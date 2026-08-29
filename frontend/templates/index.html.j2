@@ -1,0 +1,82 @@
+<!doctype html>
+<!--
+  GENERATED FILE — do not edit index.html directly.
+  Source of truth: frontend/templates/ (rendered by loom/compose.py at app
+  launch, or manually via `uv run python -m loom.compose`).
+-->
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Loom</title>
+{% for href in styles %}
+  <link rel="stylesheet" href="{{ href }}">
+{% endfor %}
+</head>
+<body>
+  <!-- library picker: the first thing a user sees -->
+  <div id="picker" class="hidden"></div>
+
+  <!-- the app proper: topbar + tab strip + tab panels -->
+  <div id="app" class="hidden">
+    <header id="topbar">
+      <div class="brand" title="Loom">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+          <g stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none">
+            <path d="M5.5 2v4.6M5.5 8.9V14"/>
+            <path d="M10.5 2v3.1M10.5 7.4V14"/>
+            <path d="M2 6h7.1M12 6h2"/>
+            <path d="M2 10h2.1M7 10h7"/>
+          </g>
+        </svg>
+        <span>Loom</span>
+        <button id="btn-back" class="iconbtn nav-btn" title="Back  (Alt+Left)" disabled></button>
+        <button id="btn-fwd" class="iconbtn nav-btn" title="Forward  (Alt+Right)" disabled></button>
+        <span id="lib-name" class="lib-name" title=""></span>
+      </div>
+      <div class="top-actions">
+        <button id="btn-newchat" class="iconbtn" title="New chat  (Ctrl+N)"></button>
+        <button id="btn-terminal" class="iconbtn" title="New terminal  (Ctrl+T)"></button>
+        <button id="btn-library" class="iconbtn" title="Library  (Ctrl+L) — drag onto a chat to attach the library folder"></button>
+        <button id="btn-servers" class="iconbtn" title="Servers  (Ctrl+E)"></button>
+        <button id="btn-models" class="iconbtn" title="Models  (Ctrl+M)"></button>
+        <button id="btn-archive" class="iconbtn" title="Chat archive  (Ctrl+H)"></button>
+        <button id="btn-envs" class="iconbtn" title="Environments  (Ctrl+Shift+E)"></button>
+        <span class="top-sep"></span>
+        <button id="btn-notif" class="iconbtn" title="Alerts  (Ctrl+Shift+A)"></button>
+        <button id="btn-theme" class="iconbtn" title="Toggle theme"></button>
+        <button id="btn-switchlib" class="iconbtn" title="Switch library"></button>
+        <span class="win-controls hidden">
+          <span class="top-sep"></span>
+          <button id="btn-min" class="iconbtn winbtn" title="Minimize"></button>
+          <button id="btn-max" class="iconbtn winbtn" title="Maximize / restore"></button>
+          <button id="btn-close" class="iconbtn winbtn winclose" title="Close to tray"></button>
+        </span>
+      </div>
+    </header>
+    <nav id="tabstrip"></nav>
+    <main id="tabpanels"></main>
+  </div>
+
+  <!-- frameless chrome: compositor-native resize zones + a 1px frame -->
+  <div id="resize-zones" class="hidden">
+    <div class="rs rs-t"  data-edges="top"></div>
+    <div class="rs rs-b"  data-edges="bottom"></div>
+    <div class="rs rs-l"  data-edges="left"></div>
+    <div class="rs rs-r"  data-edges="right"></div>
+    <div class="rs rs-tl" data-edges="top,left"></div>
+    <div class="rs rs-tr" data-edges="top,right"></div>
+    <div class="rs rs-bl" data-edges="bottom,left"></div>
+    <div class="rs rs-br" data-edges="bottom,right"></div>
+    <div id="frame-border"></div>
+  </div>
+
+  <div id="ctx-root"></div>
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+
+{% for src in scripts %}
+  <script src="{{ src }}"></script>
+{% endfor %}
+</body>
+</html>

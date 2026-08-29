@@ -1,0 +1,213 @@
+/* Terminal tabs — the emulator surface, its 16-color palette, cursor
+   shapes, permission asks, and the setup form. Plus the Models utility. */
+
+.termtab { flex-direction: column; background: var(--bg-0); }
+
+.term-head {
+  flex: none; display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px; border-bottom: 1px solid var(--bd-0);
+  background: var(--bg-1);
+}
+.term-head .spacer { flex: 1; }
+
+.term-setup {
+  margin: 48px auto; width: min(560px, 92%);
+  background: var(--bg-1); border: 1px solid var(--bd-0);
+  border-radius: var(--r-lg); padding: 18px 20px;
+}
+.term-setup h2 { margin: 0 0 14px; font-size: var(--fs-lg); }
+.ts-row {
+  display: grid; grid-template-columns: 90px 1fr; gap: 10px;
+  align-items: start; margin-bottom: 12px;
+}
+.ts-row label:first-child { color: var(--fg-1); padding-top: 5px; }
+.ts-hint { color: var(--fg-2); font-size: var(--fs-xs); margin: 8px 0 0; }
+.term-sel {
+  border: 1px solid var(--bd-1); background: var(--bg-2);
+  max-width: none; border-radius: var(--r-md);
+}
+
+/* ---------- the emulator ---------- */
+.term-emu {
+  flex: 1; min-height: 0; position: relative; display: flex;
+  flex-direction: column; outline: none;
+}
+.term-emu.bell { animation: term-bell .12s; }
+@keyframes term-bell { 50% { filter: invert(.12); } }
+.term-scroller {
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  padding: 4px 6px; background: var(--ed-bg);
+  user-select: text; cursor: text;
+}
+.trow {
+  font-family: var(--font-mono); font-size: 13px; line-height: 1.3;
+  white-space: pre; min-height: 1.3em;
+}
+.term-grid { position: relative; }
+
+/* 16-color palette (dark-theme tuned; readable in light too) */
+.tf0{color:#3f3f46}.tf1{color:#f87171}.tf2{color:#4ade80}.tf3{color:#fbbf24}
+.tf4{color:#60a5fa}.tf5{color:#c084fc}.tf6{color:#22d3ee}.tf7{color:#d4d4d8}
+.tf8{color:#71717a}.tf9{color:#fca5a5}.tf10{color:#86efac}.tf11{color:#fde047}
+.tf12{color:#93c5fd}.tf13{color:#d8b4fe}.tf14{color:#67e8f9}.tf15{color:#fafafa}
+.tb0{background:#27272a}.tb1{background:#7f1d1d}.tb2{background:#14532d}.tb3{background:#713f12}
+.tb4{background:#1e3a8a}.tb5{background:#581c87}.tb6{background:#164e63}.tb7{background:#a1a1aa}
+.tb8{background:#3f3f46}.tb9{background:#b91c1c}.tb10{background:#15803d}.tb11{background:#a16207}
+.tb12{background:#1d4ed8}.tb13{background:#7e22ce}.tb14{background:#0e7490}.tb15{background:#e4e4e7}
+.tfinv{color:var(--ed-bg)}.tbinv{background:var(--fg-0)}
+.tbold{font-weight:700}.tdim{opacity:.6}.tital{font-style:italic}
+.tund{text-decoration:underline}.tstrike{text-decoration:line-through}
+
+/* cursor */
+.tcur-block { background: var(--fg-0); color: var(--ed-bg); }
+.tcur-underline { box-shadow: inset 0 -2px 0 var(--fg-0); }
+.tcur-bar { box-shadow: inset 2px 0 0 var(--fg-0); }
+.tcur-unfocused { box-shadow: inset 0 0 0 1px var(--fg-2); }
+
+/* permission asks stack in the corner */
+.term-prompts {
+  position: absolute; right: 12px; top: 10px; z-index: 6;
+  display: flex; flex-direction: column; gap: 8px; max-width: 380px;
+}
+.term-ask {
+  background: var(--bg-2); border: 1px solid var(--bd-1);
+  border-left: 3px solid var(--warn); border-radius: var(--r-md);
+  box-shadow: var(--shadow); padding: 9px 12px;
+}
+.ta-title { display: flex; gap: 8px; align-items: baseline; font-size: var(--fs-sm); }
+.ta-keys { color: var(--fg-2); font-size: var(--fs-xs); margin-left: auto; }
+.ta-desc { color: var(--fg-1); font-size: var(--fs-xs); margin: 4px 0 8px; }
+.ta-actions { display: flex; gap: 6px; }
+
+/* ---------- the Models utility ---------- */
+.tabpanel.modstab { display: block; overflow-y: auto; padding: 18px; }
+.mods-wrap { max-width: 900px; margin: 0 auto; }
+.mods-hint { color: var(--fg-2); font-size: var(--fs-sm); margin: 0 0 12px; }
+.mods-hosts { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.mods-dl { display: flex; gap: 8px; margin-bottom: 12px; }
+.mods-url {
+  flex: 1; padding: 7px 10px; border-radius: var(--r-md);
+  border: 1px solid var(--bd-1); background: var(--bg-2); color: var(--fg-0);
+  font: inherit; font-size: var(--fs-sm); outline: none;
+}
+.mods-url:focus { border-color: var(--acc); }
+.mods-jobs { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.mods-job {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg-1); border: 1px solid var(--bd-0);
+  border-radius: var(--r-md); padding: 7px 12px; font-size: var(--fs-sm);
+}
+.mods-job .pname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mods-prog { color: var(--fg-2); font-family: var(--font-mono); font-size: var(--fs-xs); }
+/* the host tab strip: Local pinned first, ssh hosts drag-reorderable */
+.mods-tabs {
+  display: flex; gap: 4px; flex-wrap: wrap; align-items: flex-end;
+  border-bottom: 1px solid var(--bd-0); margin-bottom: 12px;
+}
+.mods-tab {
+  display: flex; align-items: center; gap: 6px; padding: 6px 14px;
+  font-size: var(--fs-sm); color: var(--fg-2); cursor: pointer;
+  border: 1px solid transparent; border-bottom: none;
+  border-radius: var(--r-md) var(--r-md) 0 0; user-select: none;
+}
+.mods-tab:hover { background: var(--bg-3); color: var(--fg-1); }
+.mods-tab.active {
+  background: var(--bg-1); border-color: var(--bd-0); color: var(--fg-0);
+  margin-bottom: -1px; padding-bottom: 7px;
+}
+.mods-tab.drop-target { box-shadow: inset 3px 0 0 var(--acc); }
+
+.mods-list {
+  border: 1px solid var(--bd-0); border-radius: var(--r-lg);
+  background: var(--bg-1); margin-bottom: 12px; overflow: hidden;
+}
+.mods-dir {
+  padding: 6px 12px; background: var(--bg-2); color: var(--fg-2);
+  font-family: var(--font-mono); font-size: var(--fs-xs);
+  border-top: 1px solid var(--bd-0);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mods-dir:first-child { border-top: none; }
+.mods-row {
+  display: flex; align-items: center; gap: 10px; padding: 6px 12px 6px 18px;
+  font-size: var(--fs-sm);
+}
+.mods-row.mm { color: var(--fg-1); }
+.mods-row .pname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mods-size { color: var(--fg-2); font-family: var(--font-mono); font-size: var(--fs-xs); flex: none; }
+.mods-badge {
+  flex: none; font-size: var(--fs-xs); color: var(--fg-2);
+  border: 1px solid var(--bd-1); border-radius: 999px; padding: 0 8px;
+}
+.mods-badge.ok { color: var(--ok); border-color: var(--ok); }
+.mods-actions { display: flex; align-items: center; gap: 12px; justify-content: flex-end; }
+/* the new-model wizard */
+.wiz-body { min-width: 480px; }
+.wiz-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.wiz-head p { margin: 0 0 8px; }
+.wiz-body input[type="text"] {
+  width: 100%; padding: 7px 10px; border-radius: var(--r-md);
+  border: 1px solid var(--bd-1); background: var(--bg-2); color: var(--fg-0);
+  font: inherit; font-size: var(--fs-sm); outline: none;
+}
+.wiz-body input[type="text"]:focus { border-color: var(--acc); }
+.wiz-list {
+  margin-top: 8px; border: 1px solid var(--bd-0); border-radius: var(--r-md);
+  background: var(--bg-1); overflow-y: auto;
+  /* FIXED height, not max-height: filtering must never resize the dialog */
+  height: 260px;
+}
+.wiz-row {
+  padding: 6px 10px; font-family: var(--font-mono); font-size: var(--fs-xs);
+  color: var(--fg-1); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border-bottom: 1px solid var(--bd-0);
+}
+.wiz-row:last-child { border-bottom: none; }
+.wiz-row:hover { background: var(--bg-3); }
+.wiz-row.sel { background: var(--acc-bg); color: var(--fg-0); }
+.wiz-mmrow { min-height: 30px; display: flex; align-items: center; }
+.wiz-nav {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 8px; margin-top: 14px;
+}
+.wiz-nav .spacer { flex: 1; }
+.wiz-slider { width: 100%; accent-color: var(--acc); }
+.wiz-ctxval {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--font-mono); font-size: var(--fs-sm); margin-top: 6px;
+}
+.wiz-ctxnum {
+  width: 120px; padding: 5px 8px; border-radius: var(--r-md);
+  border: 1px solid var(--bd-1); background: var(--bg-2); color: var(--fg-0);
+  font: inherit; font-family: var(--font-mono); font-size: var(--fs-sm);
+  outline: none;
+}
+.wiz-ctxnum:focus { border-color: var(--acc); }
+
+/* the wizard's final step hosts the REAL library editor (yaml mode) */
+.wiz-yaml-host {
+  height: 340px; display: flex; flex-direction: column;
+  border: 1px solid var(--bd-1); border-radius: var(--r-md);
+  overflow: hidden; margin-bottom: 4px;
+}
+.wiz-yaml-host .md-surface { min-height: 0; }
+.wiz-body { min-width: 560px; }
+
+.mods-yaml {
+  background: var(--ed-bg); border: 1px solid var(--bd-0);
+  border-radius: var(--r-md); padding: 12px;
+  font-family: var(--font-mono); font-size: var(--fs-sm);
+  white-space: pre; overflow-x: auto; user-select: text; cursor: text;
+  max-height: 50vh; overflow-y: auto;
+}
+
+/* live setup controls in the terminal header */
+.term-head .term-head-sel {
+  height: 22px; padding: 0 6px; font-size: var(--fs-xs);
+  background: var(--bg-2); color: var(--fg-0);
+  border: 1px solid var(--bd-0); border-radius: 999px;
+}
+.term-head .term-net { cursor: pointer; }
+.term-head .term-net.on { border-color: var(--warn); color: var(--warn); }
+.term-head .term-envkey { display: inline-flex; color: var(--fg-2); margin-left: 2px; }

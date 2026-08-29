@@ -1,0 +1,16 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Generated at app launch by loom/compose.py — templates/ is the source
+frontend/index.html
+
+.idea
+REFERENCES

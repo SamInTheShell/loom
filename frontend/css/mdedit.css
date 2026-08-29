@@ -1,0 +1,134 @@
+/* The decorated-source editor — styling lifted from databox's personal
+   cloud markdown editor (apps.css §12c²), mapped onto Loom's tokens.
+   Markers stay visible but dimmed; neon per-depth heading blocks; fenced
+   code drawn as a stacked border sandwich across line divs; line numbers
+   via CSS counters so pseudo-elements never enter the DOM. */
+
+.mdapp { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.md-toolbar {
+  flex: none; display: flex; align-items: center; gap: 4px;
+  padding: 6px 10px; border-bottom: 1px solid var(--bd-0);
+  background: var(--bg-1);
+}
+.md-toolbar .gtb {
+  background: transparent; border: 1px solid transparent;
+  border-radius: var(--r-md); padding: 4px 10px; cursor: pointer;
+  color: var(--fg-1); font-size: var(--fs-sm);
+}
+.md-toolbar .gtb:hover { background: var(--bg-3); color: var(--fg-0); }
+.md-toolbar .gtb.np-on { background: var(--acc-bg); color: var(--acc); }
+.md-widthin {
+  width: 60px; padding: 4px 6px; border-radius: var(--r-md);
+  border: 1px solid var(--bd-1); background: var(--bg-2); color: var(--fg-0);
+  font: inherit; font-size: var(--fs-sm);
+}
+.md-widthin:disabled { opacity: .4; }
+.md-status {
+  flex: none; display: flex; gap: 10px; align-items: center;
+  padding: 5px 14px; border-top: 1px solid var(--bd-0);
+  font-size: var(--fs-xs); color: var(--fg-2);
+}
+.md-status .spacer { flex: 1; }
+
+.md-scroll { flex: 1; overflow: auto; background: var(--ed-bg); padding: 18px; }
+.md-wrapper { position: relative; min-height: 100%; }
+.md-surface {
+  outline: none; font-family: var(--font-mono); font-size: 13.5px;
+  line-height: 1.7; color: var(--fg-0);
+  white-space: pre-wrap; overflow-wrap: break-word;
+  min-height: 50vh; padding-right: 76px;
+}
+.md-surface.md-nowrap { white-space: pre; overflow-wrap: normal; width: max-content; min-width: 100%; }
+.mdline { min-height: 1.7em; border-radius: 6px; }
+.md-mark { color: var(--fg-2); opacity: .65; }
+.md-b { font-weight: 800; }
+.md-i { font-style: italic; }
+.md-s { text-decoration: line-through; opacity: .75; }
+.md-codei { background: var(--ed-surface); border-radius: 4px; padding: 0 3px; color: var(--fg-0); }
+.md-link { color: var(--acc); text-decoration: underline; }
+/* text cursor: a plain click edits; Ctrl+Click follows (title says so) */
+.md-link[data-href] { cursor: text; }
+.md-link[data-href]:hover { color: var(--fg-0); background: var(--acc-bg); border-radius: 3px; }
+.md-url { color: var(--fg-2); opacity: .8; }
+.md-bullet { color: var(--acc); font-weight: 700; }
+.md-quote { border-left: 3px solid var(--bd-1); padding-left: 10px; color: var(--fg-1); }
+.md-hrline { color: var(--fg-2); letter-spacing: 2px; }
+
+/* headings: marker visible; neon mode adds the highlighter block */
+.md-h1 { font-size: 1.7em;  font-weight: 800; margin: 10px 0 4px; }
+.md-h2 { font-size: 1.45em; font-weight: 800; margin: 8px 0 3px; }
+.md-h3 { font-size: 1.25em; font-weight: 700; margin: 7px 0 2px; }
+.md-h4 { font-size: 1.1em;  font-weight: 700; margin: 6px 0 2px; }
+.md-h5 { font-size: 1em;    font-weight: 700; margin: 5px 0 2px; }
+.md-h6 { font-size: .95em;  font-weight: 700; margin: 5px 0 2px; }
+/* width:fit-content, NOT inline-block: the highlight hugs the text but the
+   line stays block-level — inline-block let consecutive headings share a
+   visual line */
+.md-neon .md-h1, .md-neon .md-h2, .md-neon .md-h3,
+.md-neon .md-h4, .md-neon .md-h5, .md-neon .md-h6 {
+  width: fit-content; max-width: 100%;
+  padding: 2px 12px 2px 8px; border-radius: 4px 14px 14px 4px;
+}
+.md-neon .md-h1 { background: rgba(255,45,150,.22);  color: #FF6EB4; box-shadow: -4px 0 0 #FF2D96; }
+.md-neon .md-h2 { background: rgba(0,229,255,.16);   color: #4DE8FF; box-shadow: -4px 0 0 #00E5FF; }
+.md-neon .md-h3 { background: rgba(57,255,20,.13);   color: #7CFF5E; box-shadow: -4px 0 0 #39FF14; }
+.md-neon .md-h4 { background: rgba(255,159,28,.16);  color: #FFB454; box-shadow: -4px 0 0 #FF9F1C; }
+.md-neon .md-h5 { background: rgba(191,90,242,.18);  color: #D49CFF; box-shadow: -4px 0 0 #BF5AF2; }
+.md-neon .md-h6 { background: rgba(250,240,66,.14);  color: #F5E663; box-shadow: -4px 0 0 #FAF042; }
+
+/* tables: consecutive .md-trow lines form a CSS ANONYMOUS TABLE, so
+   columns align across rows while every line stays plain editable
+   source. Cells shade + rule horizontally (anonymous tables can't get
+   border-collapse, so vertical borders would double — the dimmed pipes
+   serve as the column separators instead). */
+.md-trow { display: table-row; }
+.md-trow .md-tcell {
+  display: table-cell; padding: 2px 14px 2px 4px;
+  background: var(--ed-surface); border-bottom: 1px solid var(--bd-0);
+}
+.md-trow .md-tcell.md-tclose { padding-right: 4px; }
+.md-trow .md-tcell .md-mark { padding-right: 6px; }
+.md-trow.md-tsep .md-tcell { color: var(--fg-2); opacity: .6; font-size: .85em; }
+
+/* fenced code: a stacked border sandwich across separate line divs */
+.md-fence {
+  background: var(--ed-surface); border: 1px solid var(--bd-0); border-bottom: 0;
+  border-radius: 8px 8px 0 0; padding: 2px 10px; color: var(--fg-2);
+}
+.md-fence + .md-fence, .md-code + .md-fence {
+  border-radius: 0 0 8px 8px; border-top: 0; border-bottom: 1px solid var(--bd-0);
+}
+.md-lang { color: var(--ed-lang); font-size: .9em; }
+.md-code {
+  background: var(--ed-surface);
+  border-left: 1px solid var(--bd-0); border-right: 1px solid var(--bd-0);
+  padding: 0 10px; border-radius: 0;
+}
+.tok-com { color: var(--ed-com); font-style: italic; }
+.tok-str { color: var(--ed-str); }
+.tok-num { color: var(--ed-num); }
+.tok-kw  { color: var(--ed-kw); font-weight: 600; }
+.tok-key { color: var(--ed-lang); }   /* yaml mapping keys (code mode) */
+
+/* code-file mode: the whole surface is one language, no markdown chrome */
+.md-surface.md-codefile .mdline { border-radius: 0; }
+
+.md-copylayer { position: absolute; inset: 0; pointer-events: none; }
+/* positioned via inline left/top ONLY — left + a stylesheet right would
+   stretch the button between the two */
+.md-copybtn {
+  position: absolute; pointer-events: auto; white-space: nowrap;
+  border: 1px solid var(--bd-1); background: var(--bg-3); color: var(--fg-1);
+  font: inherit; font-size: 11.5px; padding: 2px 10px;
+  border-radius: 7px; cursor: pointer; opacity: .75;
+}
+.md-copybtn:hover { opacity: 1; color: var(--fg-0); border-color: var(--acc); }
+
+/* line numbers: CSS counters via ::before — never enter the DOM */
+.md-surface.md-nums { counter-reset: mdln; padding-left: 52px; }
+.md-surface.md-nums .mdline { counter-increment: mdln; position: relative; }
+.md-surface.md-nums .mdline::before {
+  content: counter(mdln); position: absolute; left: -50px; width: 38px;
+  text-align: right; color: var(--fg-2); opacity: .5; font-size: 11px;
+  line-height: inherit; user-select: none; pointer-events: none;
+}

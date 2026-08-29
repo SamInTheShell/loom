@@ -1,0 +1,104 @@
+/* Design tokens. Neutral zinc palette after llama-server's webui: dark is
+   near-black with a WHITE primary accent; light is the inverse (white with
+   a near-black primary). No colored accent — color is reserved for
+   semantic status (ok / warn / err / run). */
+
+:root {
+  --font-ui: "Inter", "Segoe UI", "Cantarell", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "Fira Code", ui-monospace,
+    "SF Mono", Menlo, Consolas, monospace;
+
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+
+  --r-sm: 3px;
+  --r-md: 5px;
+  --r-lg: 8px;
+
+  --topbar-h: 42px;
+  --tabstrip-h: 34px;
+}
+
+:root[data-theme="dark"] {
+  --bg-0: #09090b;   /* app chrome */
+  --bg-1: #111113;   /* panels */
+  --bg-2: #18181b;   /* raised: cards, inputs */
+  --bg-3: #27272a;   /* hover */
+  --bg-4: #3f3f46;   /* active */
+
+  --bd-0: #26262b;   /* subtle borders */
+  --bd-1: #3f3f46;   /* strong borders — must survive washed-out panels */
+
+  --fg-0: #fafafa;   /* primary text */
+  --fg-1: #a1a1aa;   /* secondary */
+  --fg-2: #71717a;   /* muted */
+
+  --acc: #fafafa;        /* primary (actions, focus) — white on dark */
+  --acc-fg: #18181b;
+  --acc-dim: #52525b;
+  --acc-bg: #27272a;     /* selected/tinted surfaces */
+
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --err: #f87171;
+  --run: #60a5fa;
+
+  --ok-bg: #122a1b;
+  --warn-bg: #2c2310;
+  --err-bg: #2f1615;
+
+  --sel: #3f3f46;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+
+  /* editor (mdedit.css) */
+  --ed-bg: #0c0c0e;
+  --ed-surface: #18181b;
+  --ed-str: #4ade80;
+  --ed-num: #fdba74;
+  --ed-kw: #93c5fd;
+  --ed-com: #71717a;
+  --ed-lang: #7dd3fc;
+}
+
+:root[data-theme="light"] {
+  --bg-0: #ffffff;
+  --bg-1: #fafafa;
+  --bg-2: #f4f4f5;
+  --bg-3: #e4e4e7;
+  --bg-4: #d4d4d8;
+
+  --bd-0: #e0e0e4;
+  --bd-1: #c4c4cb;   /* strong borders — must survive washed-out panels */
+
+  --fg-0: #09090b;
+  --fg-1: #52525b;
+  --fg-2: #a1a1aa;
+
+  --acc: #18181b;        /* primary — near-black on light (the inverse) */
+  --acc-fg: #fafafa;
+  --acc-dim: #a1a1aa;
+  --acc-bg: #e4e4e7;
+
+  --ok: #16a34a;
+  --warn: #b45309;
+  --err: #dc2626;
+  --run: #2563eb;
+
+  --ok-bg: #e5f5ea;
+  --warn-bg: #fbf0da;
+  --err-bg: #fbe7e6;
+
+  --sel: #d4d4d8;
+  --shadow: 0 6px 24px rgba(20, 24, 30, 0.14);
+
+  --ed-bg: #ffffff;
+  --ed-surface: #f4f4f5;
+  --ed-str: #15803d;
+  --ed-num: #b45309;
+  --ed-kw: #1d4ed8;
+  --ed-com: #a1a1aa;
+  --ed-lang: #0369a1;
+}

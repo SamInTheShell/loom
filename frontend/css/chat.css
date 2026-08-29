@@ -1,0 +1,457 @@
+/* Chat tabs — message area modeled after llama.cpp's web chat: a centered
+   column thread, user messages in bubbles, assistant text floating on the
+   thread as rendered markdown, streaming caret, tool cards, stats row. */
+
+.chattab { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+.chattab { background: var(--bg-0); }
+.thread-wrap {
+  position: relative; flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column;
+}
+.jump-bottom {
+  /* bottom RIGHT, hugging the 880px message column's edge — not the
+     window border; on narrow windows it falls back to a fixed inset */
+  position: absolute; bottom: 14px; z-index: 5;
+  right: max(20px, calc((100% - 880px) / 2 + 4px));
+  width: 34px; height: 34px; border-radius: 50%;
+  background: var(--bg-2); border: 1px solid var(--bd-1); color: var(--fg-1);
+  display: none; align-items: center; justify-content: center;
+  cursor: pointer; box-shadow: var(--shadow);
+}
+.jump-bottom.show { display: inline-flex; }
+.jump-bottom:hover { background: var(--bg-3); color: var(--fg-0); }
+.chat-thread {
+  flex: 1 1 auto; overflow-y: auto; padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 10px;
+  user-select: text;   /* every entry is copyable */
+}
+.chat-thread > * {
+  flex: none; width: 100%; max-width: 880px; margin-inline: auto;
+}
+/* reading rhythm: user entries sit slightly right, the model's slightly
+   left, everything else (tool cards, notes) splits the difference */
+.chat-thread > .msg.user { padding-left: 64px; }
+.chat-thread > .msg.assistant { padding-right: 64px; }
+.chat-thread > .sysnote, .chat-thread > .chat-resume {
+  padding-left: 32px; padding-right: 32px;
+}
+/* tool cards: the full centered column width */
+.chat-thread > .tool-card { max-width: 880px; }
+/* stats belong to the model's turn — left-aligned with its messages */
+.chat-thread > .msg-stats { padding-left: 2px; padding-right: 64px; }
+.chat-resume { display: flex; justify-content: center; padding-block: 2px; }
+
+/* NOTE: deliberately no entrance animation on messages/cards — the thread
+   re-renders during streaming, and replaying an opacity animation on every
+   redraw dims the whole area while the model generates */
+.msg-head {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: var(--fs-xs); color: var(--fg-2); margin-bottom: 3px;
+}
+.msg-head .who { font-weight: 700; color: var(--fg-1); }
+.msg.user .msg-body {
+  background: var(--acc-bg); border: 1px solid var(--acc-dim);
+  border-radius: var(--r-lg); padding: 9px 13px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.msg.user .msg-imgs { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.msg.user .msg-imgs span {
+  font-size: var(--fs-xs); color: var(--fg-2);
+  border: 1px solid var(--bd-1); border-radius: 999px; padding: 1px 8px;
+}
+.msg-thumb {
+  max-height: 96px; max-width: 160px; border-radius: 6px;
+  border: 1px solid var(--bd-1); cursor: zoom-in; display: block;
+}
+.img-preview {
+  position: fixed; z-index: 320; pointer-events: none;
+  background: var(--bg-2); border: 1px solid var(--bd-1);
+  border-radius: var(--r-lg); box-shadow: var(--shadow); padding: 6px;
+}
+.img-preview img {
+  display: block; max-width: 420px; max-height: 360px; border-radius: 4px;
+}
+.img-preview-name {
+  margin-top: 4px; font-size: var(--fs-xs); color: var(--fg-2);
+  font-family: var(--font-mono); max-width: 420px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* assistant text floats on the thread — no bubble */
+.msg.assistant .msg-body { padding: 0 2px; }
+
+.cursor {
+  display: inline-block; width: 7px; height: 13px; margin-left: 2px;
+  background: var(--acc); vertical-align: baseline;
+  animation: pulse 1s infinite;
+}
+
+/* thinking block */
+.think {
+  border-left: 3px solid var(--bd-1); padding: 4px 10px; margin: 2px 0;
+  color: var(--fg-2); font-size: var(--fs-sm); white-space: pre-wrap;
+}
+.think-toggle {
+  font-size: var(--fs-xs); color: var(--fg-2); cursor: pointer;
+  user-select: none; margin-bottom: 2px;
+}
+.think-toggle:hover { color: var(--fg-0); }
+.think.collapsed { display: none; }
+
+/* rendered markdown */
+.md-render { line-height: 1.55; overflow-wrap: anywhere; }
+.md-render > :first-child { margin-top: 0; }
+.md-render > :last-child { margin-bottom: 0; }
+.md-render p { margin: 8px 0; }
+.md-render h1, .md-render h2, .md-render h3 { margin: 14px 0 6px; }
+.md-render pre {
+  background: var(--ed-surface); border: 1px solid var(--bd-0);
+  border-radius: var(--r-md); padding: 10px 12px; overflow-x: auto;
+  font-family: var(--font-mono); font-size: var(--fs-sm);
+  position: relative;   /* anchors the per-block Copy button */
+}
+.code-copy {
+  position: absolute; top: 6px; right: 8px;
+  border: 1px solid var(--bd-1); background: var(--bg-3); color: var(--fg-1);
+  font: inherit; font-size: 11px; padding: 1px 9px; border-radius: 7px;
+  cursor: pointer; opacity: 0; transition: opacity .12s;
+}
+.md-render pre:hover .code-copy { opacity: .9; }
+.code-copy:hover { opacity: 1 !important; color: var(--fg-0); border-color: var(--acc); }
+.md-render code {
+  font-family: var(--font-mono); font-size: .92em;
+  background: var(--ed-surface); border-radius: 4px; padding: 0 4px;
+}
+.md-render pre code { background: none; padding: 0; }
+.md-render blockquote {
+  margin: 8px 0; padding: 2px 12px;
+  border-left: 3px solid var(--bd-1); color: var(--fg-1);
+}
+.md-render table { border-collapse: collapse; margin: 8px 0; }
+.md-render th, .md-render td { border: 1px solid var(--bd-1); padding: 4px 10px; }
+.md-render a { color: var(--acc); }
+
+/* tool cards */
+.tool-card {
+  background: var(--bg-1); border: 1px solid var(--bd-0);
+  border-radius: var(--r-lg); padding: 8px 12px;
+}
+.tool-head { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); }
+.tool-head.toggleable { cursor: pointer; user-select: none; }
+.tool-head.toggleable:hover .tool-name { color: var(--acc); }
+.tool-chevron { color: var(--fg-2); font-size: 10px; width: 10px; flex: none; }
+.tool-name { font-weight: 700; font-family: var(--font-mono); }
+/* an expanded RESOLVED card has no internal scrollbars — content flows at
+   full height and only the chat area scrolls. (Active cards keep their
+   caps so streaming output doesn't bounce the layout.) */
+.tool-card.resolved.open .tool-out,
+.tool-card.resolved.open .code-prev,
+.tool-card.resolved.open .tool-args { max-height: none; overflow: visible; }
+.tool-state { color: var(--fg-2); font-size: var(--fs-xs); }
+.tool-state.err { color: var(--err); }
+.tool-state.ok { color: var(--ok); }
+.tool-args {
+  margin-top: 5px; font-family: var(--font-mono); font-size: var(--fs-xs);
+  color: var(--fg-1); white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 120px; overflow-y: auto;
+}
+.tool-out {
+  margin-top: 6px; background: var(--ed-bg); border: 1px solid var(--bd-0);
+  border-radius: var(--r-md); padding: 8px 10px;
+  font-family: var(--font-mono); font-size: var(--fs-xs);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 260px; overflow-y: auto; color: var(--fg-1);
+}
+.tool-perm { margin-top: 8px; display: flex; gap: 8px; align-items: center; }
+.tool-perm .q { color: var(--warn); font-size: var(--fs-sm); flex: 1; }
+.tool-path {
+  flex: 1; min-width: 0; font-family: var(--font-mono); font-size: var(--fs-xs);
+  color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  text-align: right;
+}
+.tool-note { margin-top: 5px; font-size: var(--fs-xs); color: var(--fg-2); }
+
+/* syntax-highlighted code / diff previews inside tool cards (read_file,
+   edit_file, write_file) — tok-* colors come from mdedit.css */
+.code-prev {
+  margin-top: 6px; background: var(--ed-bg); border: 1px solid var(--bd-0);
+  border-radius: var(--r-md); padding: 6px 0;
+  font-family: var(--font-mono); font-size: var(--fs-xs); line-height: 1.55;
+  max-height: 320px; overflow: auto; user-select: text; cursor: text;
+}
+.code-prev .cl { display: flex; white-space: pre-wrap; min-height: 1.55em; }
+.code-prev .lc { overflow-wrap: anywhere; }   /* long lines wrap — no h-scrollbar */
+.code-prev .ln {
+  flex: none; width: 46px; text-align: right; padding-right: 10px;
+  color: var(--fg-2); opacity: .6; user-select: none;
+}
+.code-prev .lc { flex: 1; padding-right: 10px; }
+.code-prev .cl.add { background: var(--ok-bg); }
+.code-prev .cl.add .ln { color: var(--ok); opacity: 1; }
+.code-prev .cl.del { background: var(--err-bg); }
+.code-prev .cl.del .ln { color: var(--err); opacity: 1; }
+.code-prev .cl.more { color: var(--fg-2); }
+.code-prev .cl.more .lc { font-style: italic; }
+
+/* per-turn stats row */
+.msg-stats {
+  display: flex; gap: 14px; flex-wrap: wrap;
+  font-size: var(--fs-xs); color: var(--fg-2); padding: 0 2px;
+}
+.msg-stats .stat b { color: var(--fg-1); font-weight: 600; }
+
+.sysnote { text-align: center; color: var(--fg-2); font-size: var(--fs-xs); }
+.sysnote.err { color: var(--err); white-space: pre-wrap; }
+
+/* ---------- composer ----------
+   One integrated panel, llama.cpp-web-chat style: attachment pills, the
+   textarea, and the control row (attach · model · send) share a single
+   rounded card that lights up on focus. */
+/* transparent strip: the sides match the thread background, so the panel
+   itself reads as a floating card */
+.composer {
+  flex: none; background: transparent;
+  padding: 4px 16px 14px;
+}
+.composer-inner { max-width: 880px; margin: 0 auto; }
+
+/* queued messages: a visible panel above the input box */
+.send-queue { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.send-queue:empty { display: none; }
+.queue-row {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--bg-2); border: 1px dashed var(--bd-1);
+  border-radius: var(--r-lg); padding: 6px 10px; font-size: var(--fs-sm);
+}
+.q-badge {
+  flex: none; color: var(--warn); font-size: var(--fs-xs);
+  text-transform: uppercase; letter-spacing: .06em;
+}
+.q-text {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--fg-1);
+}
+.q-imgs { flex: none; color: var(--fg-2); font-size: var(--fs-xs); }
+.composer-panel {
+  display: flex; flex-direction: column; gap: 6px;
+  border: 1px solid var(--bd-1); border-radius: 16px;
+  background: var(--bg-2); padding: 10px 12px 8px;
+  box-shadow: var(--shadow); cursor: text;
+  transition: border-color .12s ease;
+}
+.composer-panel:focus-within { border-color: var(--acc); }
+.composer-panel.drag-over { border-color: var(--acc); border-style: dashed; }
+.attach-bar { display: flex; gap: 6px; flex-wrap: wrap; }
+.attach-bar:empty { display: none; }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--bd-1); border-radius: 999px;
+  padding: 2px 6px 2px 10px; font-size: var(--fs-xs); color: var(--fg-1);
+  background: var(--bg-2);
+}
+.pill .pname { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill button {
+  border: none; background: none; cursor: pointer; color: var(--fg-2);
+  padding: 1px 4px; border-radius: 999px; font-size: var(--fs-xs);
+}
+.pill button:hover { background: var(--bg-4); color: var(--fg-0); }
+.pill .mode.write { color: var(--warn); font-weight: 700; }
+.compose-input {
+  width: 100%; min-height: 24px; max-height: 220px; resize: none;
+  padding: 2px; border: none; background: transparent; color: var(--fg-0);
+  font: inherit; line-height: 1.5; outline: none; overflow-y: auto;
+}
+.compose-controls {
+  display: flex; gap: 4px; align-items: center; cursor: default;
+}
+.compose-controls .spacer { flex: 1; }
+.panel-top { display: flex; align-items: flex-start; gap: 8px; }
+.panel-top .attach-bar { flex: 1; }
+.panel-top .attach-bar:empty { display: block; }   /* keep the pill pinned right */
+.perm-pill {
+  margin-left: auto; flex: none;
+  display: inline-flex; align-items: center; gap: 5px;
+  background: transparent; color: var(--fg-2); border: 1px solid transparent;
+  border-radius: 999px; padding: 3px 9px; font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.perm-pill:hover { border-color: var(--bd-1); background: var(--bg-3); color: var(--fg-1); }
+.perm-pill svg { width: 12px; height: 12px; }
+.perm-pill .caret { opacity: .7; }
+.ctx-chip { margin-left: 0; font-family: var(--font-mono); }
+.ctx-chip.warn { color: var(--warn); border-color: var(--warn); }
+.net-chip { margin-left: 0; }
+.net-chip.on { color: var(--warn); border-color: var(--warn); }
+
+/* hover breakdown card (fixed, hover-friendly — no overlay) */
+.ctx-card { padding: 10px 12px; min-width: 250px; gap: 3px; }
+.ctx-row {
+  display: flex; justify-content: space-between; gap: 18px;
+  font-size: var(--fs-xs); color: var(--fg-1);
+}
+.ctx-row b { color: var(--fg-0); font-weight: 600; font-family: var(--font-mono); }
+.ctx-sep2 { height: 1px; background: var(--bd-0); margin: 5px 0; }
+.ctx-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.ctx-actions .spacer { flex: 1; }
+
+.compose-model {
+  display: inline-flex; align-items: center; gap: 7px;
+  background: transparent; color: var(--fg-1); border: 1px solid transparent;
+  border-radius: 999px; padding: 5px 10px; font-size: var(--fs-xs);
+  max-width: 260px; cursor: pointer;
+}
+.compose-model:hover { border-color: var(--bd-1); background: var(--bg-3); }
+.compose-model .caret { opacity: .7; }
+.compose-model .mname {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ---------- popup menus (model picker, permission modes) ---------- */
+.popup {
+  position: fixed; z-index: 111; min-width: 280px; max-width: 380px;
+  background: var(--bg-2); border: 1px solid var(--bd-1);
+  border-radius: 12px; box-shadow: var(--shadow); padding: 6px;
+  display: flex; flex-direction: column; max-height: 340px;
+}
+.popup-head { display: flex; gap: 6px; padding: 2px 2px 6px; align-items: center; }
+.popup-head input {
+  flex: 1; min-width: 0; padding: 6px 10px; border-radius: 8px;
+  border: 1px solid var(--bd-1); background: var(--bg-1); color: var(--fg-0);
+  font: inherit; font-size: var(--fs-sm); outline: none;
+}
+.popup-head input:focus { border-color: var(--acc); }
+.popup-head .iconbtn { width: 28px; height: 28px; }
+.popup-list { overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
+.popup-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border-radius: 8px; cursor: pointer;
+  font-size: var(--fs-sm); color: var(--fg-1);
+}
+.popup-item:hover { background: var(--bg-3); color: var(--fg-0); }
+.popup-item.sel { background: var(--acc-bg); color: var(--acc); }
+.popup-item .pi-name {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.popup-item .pi-sub { font-size: var(--fs-xs); color: var(--fg-2); flex: none; }
+.popup-item .btn-sm { flex: none; }
+.popup-empty { padding: 12px; text-align: center; color: var(--fg-2); font-size: var(--fs-sm); }
+.btn-send {
+  background: var(--acc); color: var(--acc-fg); border: 1px solid var(--acc);
+  border-radius: 50%; width: 32px; height: 32px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none;
+}
+.btn-send:hover { opacity: .85; }
+.btn-send:disabled { opacity: .45; cursor: default; filter: none; }
+/* stop state: vivid saturated red (the token --err is too pale for an
+ * emergency control) with a SOLID BLACK square glyph */
+.btn-send.stop { background: #dc2626; border-color: #b91c1c; color: #000; }
+.btn-send.stop:hover { background: #ef4444; opacity: 1; }
+.btn-send svg { width: 15px; height: 15px; }
+
+/* artifact pills — what the model left in /artifacts for the user */
+.pill.artifact { border-color: var(--acc-dim); }
+.pill.artifact .mode { text-transform: none; }
+
+/* the per-model reasoning (brain) button in the model popup */
+.popup-item .brain { flex: none; padding: 2px 3px; color: var(--fg-2); }
+.popup-item .brain:hover { color: var(--fg-0); }
+.popup-item .brain.on { color: var(--acc); }
+
+/* "@ <branch>" on folder pills — tracks out-of-app checkouts */
+.pill-branch { color: var(--fg-2); font-size: var(--fs-xs); white-space: nowrap; }
+.pill-branch:empty { display: none; }
+
+/* the model popup: room for long model names + a reasoning sub-line */
+.popup.model-popup { min-width: 380px; max-width: min(560px, 92vw); }
+.popup-item .pi-col {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px;
+}
+.popup-item .pi-col .pi-name { flex: initial; }
+.popup-item .pi-reason {
+  font-size: var(--fs-xs); color: var(--fg-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.popup-item.sel .pi-reason { color: inherit; opacity: .75; }
+
+/* the composer model button's at-a-glance thinking level */
+.compose-model .mlvl {
+  flex: none; padding: 0 5px; border-radius: 4px;
+  background: var(--acc-bg); color: var(--fg-1);
+  font-size: var(--fs-xs); line-height: 1.5;
+}
+
+/* compact model rows — hundreds of models must stay scannable. Every
+ * control stays VISIBLE (keyboard users can't hover); compactness comes
+ * from tighter padding and slimmer buttons, never from hiding. */
+.model-popup .popup-item { padding: 3px 8px; gap: 6px; }
+.model-popup .popup-item .btn-sm { padding: 1px 7px; font-size: var(--fs-xs); }
+.popup-item .pin { flex: none; padding: 2px 3px; color: var(--fg-2); }
+.popup-item .pin:hover { color: var(--fg-0); }
+.popup-item .pin.on { color: var(--warn); }
+
+/* the empty model list offers the wizard right there */
+.popup-cta { display: flex; justify-content: center; padding: 4px 0 8px; }
+
+/* wizard chrome */
+.wiz-hint { margin: 2px 0 8px; color: var(--fg-1); font-size: var(--fs-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wiz-filterrow { display: flex; gap: 6px; align-items: center; margin: 6px 0; }
+.wiz-filterrow input { flex: 1; }
+
+/* liveness counter riding the streaming cursor */
+.live-count {
+  margin-left: 8px; color: var(--fg-2); font-size: var(--fs-xs);
+  font-family: var(--font-mono); user-select: none;
+}
+
+/* ---------- assistant turns: the thought is its OWN entry, and the
+ * actual message gets breathing room above its name and below its stats
+ * so the real content stands out ---------- */
+.chat-thread > .msg.think-entry {
+  /* margin-TOP only: the base rule's margin-inline auto centers every
+   * thread entry — a shorthand here shoved thoughts to the left border */
+  padding-right: 64px; margin-top: 4px;
+}
+.think-entry .think { margin-top: 4px; }
+.think-stats {
+  margin: 4px 0 0 2px; color: var(--fg-2);
+  font-size: var(--fs-xs); font-family: var(--font-mono);
+}
+.chat-thread > .msg.assistant { margin-top: 22px; }
+.chat-thread > .msg-stats { margin-bottom: 26px; }
+/* a thought directly above its message needs no extra gap doubling */
+.chat-thread > .msg.think-entry + .msg.assistant { margin-top: 10px; }
+
+/* stats flushed after tool cards align with the tool-card column
+ * (full centered width, no message nudge) */
+.chat-thread > .msg-stats.after-tools { padding-right: 2px; }
+
+/* ---------- hierarchy: prose over plumbing ----------
+ * Resolved tool cards are MACHINERY — collapsed they drop their card
+ * chrome entirely and dim, so the model's messages own the contrast.
+ * Hover (or expanding) brings a card back; active cards (waiting for
+ * permission, running) keep full presence — they need attention. */
+.chat-thread > .tool-card.resolved.closed {
+  background: transparent; border-color: transparent;
+  padding-top: 1px; padding-bottom: 1px; opacity: .6;
+}
+.chat-thread > .tool-card.resolved.closed:hover { opacity: 1; }
+.tool-card.resolved.closed .tool-name { font-weight: 400; }
+.chat-thread > .tool-card.resolved.open { opacity: .92; }
+/* the stats row is quiet bookkeeping too */
+.chat-thread > .msg-stats { opacity: .75; }
+.chat-thread > .msg-stats:hover { opacity: 1; }
+
+/* prefill heartbeat: the bare cursor line before anything streams */
+.chat-thread > .msg.live-wait { padding-right: 64px; margin-top: 22px; }
+
+/* context chip: the fullness ring rides after the numbers */
+.ctx-chip .ctx-ring { flex: none; margin-left: 5px; vertical-align: -2px; }
+.perm-pill.ctx-chip { display: inline-flex; align-items: center; }
+
+/* the churn note — a quiet sign-off when the turn returns to the user */
+.chat-thread > .churn-note {
+  text-align: center; color: var(--fg-2); font-size: var(--fs-xs);
+  font-style: italic; padding: 2px 0; user-select: none;
+}
