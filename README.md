@@ -24,6 +24,12 @@ loom
 
 Right now you need to know the getting started flow is `download/scan for models -> create a new server of the model -> start the server -> chat with the model/server`.
 
+I use Arch Linux and AMD Radeon hardware, these are the things I have to install on the hosts where this app runs llama-cpp (local or remote over ssh).
+```
+pacman -S llama-cpp ggml-cpu ggml-vulkan iwd openssh socat python rsync
+pacman -S vulkan-radeon vulkan-icd-loader vulkan-tools
+```
+
 ## Screenshots
 
 **Chat**
