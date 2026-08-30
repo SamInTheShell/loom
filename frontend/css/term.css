@@ -99,6 +99,10 @@
 }
 .mods-job .pname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mods-prog { color: var(--fg-2); font-family: var(--font-mono); font-size: var(--fs-xs); }
+.mods-histhead {
+  display: flex; align-items: center; margin-top: 6px;
+  color: var(--fg-2); font-family: var(--font-mono); font-size: var(--fs-xs);
+}
 /* the host tab strip: Local pinned first, ssh hosts drag-reorderable */
 .mods-tabs {
   display: flex; gap: 4px; flex-wrap: wrap; align-items: flex-end;

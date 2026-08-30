@@ -44,6 +44,45 @@ check("mmproj paired to the big sibling", mm["pairedWith"] == main["path"],
 check("unpaired dir has no mmproj",
       next(e for e in entries if e["name"] == "other.gguf")["pairedWith"] is None)
 
+# ---------- split-gguf shard grouping (scan) ----------
+out = (f"100\t{FAKE_HOME}/models/big/Model-Q8_0-00002-of-00003.gguf\n"
+       f"100\t{FAKE_HOME}/models/big/Model-Q8_0-00001-of-00003.gguf\n"
+       f"50\t{FAKE_HOME}/models/big/Model-Q8_0-00003-of-00003.gguf\n"
+       f"60\t{FAKE_HOME}/models/big/mmproj-Model-F16.gguf\n"
+       f"70\t{FAKE_HOME}/models/big/whole.gguf\n")
+entries = models.parse_scan(out, FAKE_HOME)
+split = next(e for e in entries if e.get("parts"))
+check("scan collapses shards to one entry",
+      len([e for e in entries if "Q8_0" in e["name"]]) == 1, str(entries))
+check("scan split entry points at shard 1",
+      split["path"] == "~/models/big/Model-Q8_0-00001-of-00003.gguf", str(split))
+check("scan split entry sums sizes and collapses the name",
+      split["size"] == 250 and split["name"] == "Model-Q8_0.gguf", str(split))
+check("scan split entry lists shards in order",
+      split["parts"] == [f"~/models/big/Model-Q8_0-0000{i}-of-00003.gguf"
+                         for i in (1, 2, 3)], str(split))
+check("mmproj pairs to the grouped split entry",
+      next(e for e in entries if e["mmproj"])["pairedWith"] == split["path"])
+check("whole file in same dir stays its own entry",
+      any(e["name"] == "whole.gguf" and "parts" not in e for e in entries))
+
+# ---------- split-gguf shard grouping (HF repo listing) ----------
+raw = [{"path": f"Q8_0/M-Q8_0-0000{i}-of-00002.gguf", "size": 10 * i,
+        "url": f"https://x/Q8_0/M-Q8_0-0000{i}-of-00002.gguf"}
+       for i in (2, 1)]
+raw.append({"path": "mmproj-F16.gguf", "size": 5, "url": "https://x/mm"})
+grouped = models.group_split(raw)
+q = next(f for f in grouped if f.get("parts"))
+check("repo grouping: one entry per quant, display path collapsed",
+      len(grouped) == 2 and q["path"] == "Q8_0/M-Q8_0.gguf", str(grouped))
+check("repo grouping: url is shard 1, size is the total",
+      q["url"].endswith("00001-of-00002.gguf") and q["size"] == 30, str(q))
+check("repo grouping: parts ordered",
+      [p["path"] for p in q["parts"]]
+      == [f"Q8_0/M-Q8_0-0000{i}-of-00002.gguf" for i in (1, 2)], str(q))
+check("repo grouping: single files untouched",
+      any(f["path"] == "mmproj-F16.gguf" and "parts" not in f for f in grouped))
+
 # ---------- live local scan ----------
 d = Path(FAKE_HOME) / "models"
 d.mkdir(parents=True, exist_ok=True)
@@ -79,6 +118,10 @@ with tempfile.TemporaryDirectory() as td:
           cfg["models"][1]["name"] == "Qwen3 27B", cfg["models"][1]["name"])
     from loom import srv
     check("snippet composes llama args", "--mmproj" in srv.compose_args(m0))
+snip_split = models.yaml_snippet(
+    [{"path": "~/m/Qwen3-27B-Q4_K_M-00001-of-00005.gguf", "context": 4096}])
+check("display name drops the shard suffix",
+      "name: Qwen3 27B\n" in snip_split, snip_split)
 
 # ---------- non-destructive loom.yaml injection ----------
 ENTRY = {"path": "~/models/tiny.gguf", "name": "Tiny", "context": 8192,
@@ -193,8 +236,9 @@ try:
 except models.ModelsError:
     check("flag-like host rejected", True)
 
-# ---------- download from a local HTTP server ----------
-PAYLOAD = b"GGUF" + os.urandom(200_000)
+# ---------- downloads: a local HTTP server with Range support ----------
+PAYLOAD = b"GGUF" + os.urandom(2_000_000)
+RANGES = []          # every Range start the server honored
 
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -202,13 +246,36 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Length", str(len(PAYLOAD)))
+        if "missing" in self.path:
+            self.send_error(404)
+            return
+        start = 0
+        rng = self.headers.get("Range") or ""
+        if rng.startswith("bytes="):
+            start = int(rng[6:].split("-")[0])
+            RANGES.append(start)
+            self.send_response(206)
+            self.send_header(
+                "Content-Range",
+                f"bytes {start}-{len(PAYLOAD) - 1}/{len(PAYLOAD)}")
+        else:
+            self.send_response(200)
+        body = PAYLOAD[start:]
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(PAYLOAD)
+        try:
+            if "slow" in self.path:  # trickle so pause can land mid-file
+                for i in range(0, len(body), 100_000):
+                    self.wfile.write(body[i:i + 100_000])
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            else:
+                self.wfile.write(body)
+        except (ConnectionResetError, BrokenPipeError):
+            pass                     # a paused client hung up mid-body
 
 
-httpd = http.server.HTTPServer(("127.0.0.1", 0), H)
+httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
 port = httpd.server_address[1]
 
@@ -218,7 +285,7 @@ done = threading.Event()
 
 def push(ev):
     events.append(ev)
-    if ev.get("kind") in ("done", "error"):
+    if ev.get("kind") in ("done", "error", "paused", "cancelled"):
         done.set()
 
 
@@ -228,12 +295,131 @@ check("download finished", done.wait(20) and events[-1]["kind"] == "done",
 dest = models.local_models_dir() / "test-model.gguf"
 check("download landed in ~/.loom/models",
       dest.is_file() and dest.read_bytes() == PAYLOAD)
+rec = next((r for r in models.downloads() if r["id"] == "job1"), None)
+check("finished download has a done record",
+      rec is not None and rec["status"] == "done", str(rec))
+models.dismiss_download("job1")
+check("dismiss drops the record, keeps the file",
+      not any(r["id"] == "job1" for r in models.downloads()) and dest.is_file())
 try:
     models.start_download(push, "job2", f"http://127.0.0.1:{port}/dl/test-model.gguf")
     check("duplicate download refused", False)
 except models.ModelsError:
     check("duplicate download refused", True)
+
+# ---------- multi-shard (split gguf) download ----------
+shard_urls = [f"http://127.0.0.1:{port}/dl/Split-Q8_0-0000{i}-of-00003.gguf"
+              for i in (1, 2, 3)]
+events.clear()
+done.clear()
+models.start_download(push, "job3", shard_urls, total=3 * len(PAYLOAD))
+check("split download finished", done.wait(20) and events[-1]["kind"] == "done",
+      str(events[-1:]))
+ev = events[-1]
+check("split done event: collapsed name, shard-1 path, parts count",
+      ev.get("name") == "Split-Q8_0.gguf" and ev.get("parts") == 3
+      and ev.get("path", "").endswith("Split-Q8_0-00001-of-00003.gguf"), str(ev))
+shards = [models.local_models_dir() / f"Split-Q8_0-0000{i}-of-00003.gguf"
+          for i in (1, 2, 3)]
+check("all shards landed with their exact names",
+      all(p.is_file() and p.read_bytes() == PAYLOAD for p in shards))
+
+# ---------- a failing shard keeps its bytes (resumable), cancel wipes ----------
+events.clear()
+done.clear()
+models.start_download(push, "job4", [
+    f"http://127.0.0.1:{port}/dl/Half-Q4-00001-of-00002.gguf",
+    f"http://127.0.0.1:{port}/dl/missing-Half-Q4-00002-of-00002.gguf"])
+check("failing shard errors the job",
+      done.wait(20) and events[-1]["kind"] == "error", str(events[-1:]))
+rec = next((r for r in models.downloads() if r["id"] == "job4"), None)
+check("failed download keeps an error record with its bytes",
+      rec is not None and rec["status"] == "error"
+      and rec["done"] == len(PAYLOAD), str(rec))
+check("finished shard survives the failure",
+      (models.local_models_dir() / "Half-Q4-00001-of-00002.gguf").is_file())
+try:
+    models.start_download(push, "job4b",
+                          f"http://127.0.0.1:{port}/dl/Half-Q4-00001-of-00002.gguf")
+    check("name held by an unfinished record refused", False)
+except models.ModelsError:
+    check("name held by an unfinished record refused", True)
+models.cancel_download("job4")
+check("cancel wipes the record and its bytes",
+      not any(r["id"] == "job4" for r in models.downloads())
+      and not list(models.local_models_dir().glob("Half-Q4*")))
+
+# ---------- pause mid-flight, resume via HTTP Range ----------
+events.clear()
+done.clear()
+models.start_download(push, "job5", f"http://127.0.0.1:{port}/slow/paused.gguf")
+for _ in range(200):                     # wait for the first progress event
+    if any(e["kind"] == "progress" for e in events):
+        break
+    time.sleep(0.05)
+check("pause reaches the live worker", models.pause_download("job5"))
+check("worker reports paused", done.wait(10) and events[-1]["kind"] == "paused",
+      str(events[-1:]))
+part = models.local_models_dir() / "paused.gguf.part"
+rec = next((r for r in models.downloads() if r["id"] == "job5"), None)
+check("paused download keeps its .part and record",
+      part.is_file() and 0 < part.stat().st_size < len(PAYLOAD)
+      and rec is not None and rec["status"] == "paused"
+      and rec["done"] == part.stat().st_size, str(rec))
+RANGES.clear()
+events.clear()
+done.clear()
+models.resume_download(push, "job5")
+check("resume finishes the download",
+      done.wait(20) and events[-1]["kind"] == "done", str(events[-1:]))
+final = models.local_models_dir() / "paused.gguf"
+check("resumed file is byte-identical",
+      final.is_file() and final.read_bytes() == PAYLOAD)
+check("resume used a Range request from the .part offset",
+      len(RANGES) == 1 and RANGES[0] > 0, str(RANGES))
+check("pause on a dead job is a no-op", models.pause_download("job5") is False)
+
+# ---------- crash recovery: stale 'active' records surface as paused ----------
+from loom import store
+(models.local_models_dir() / "crashed.gguf.part").write_bytes(PAYLOAD[:1234])
+store.mutate_state(lambda st: st.__setitem__("downloads", st.get("downloads", []) + [
+    {"id": "job6", "urls": [f"http://127.0.0.1:{port}/dl/crashed.gguf"],
+     "names": ["crashed.gguf"], "label": "crashed.gguf",
+     "total": len(PAYLOAD), "done": 99, "status": "active", "error": "",
+     "ts": 0}]))
+rec = next((r for r in models.downloads() if r["id"] == "job6"), None)
+check("interrupted record surfaces as paused, bytes recounted from disk",
+      rec is not None and rec["status"] == "paused" and rec["done"] == 1234,
+      str(rec))
+events.clear()
+done.clear()
+models.resume_download(push, "job6")
+check("interrupted record resumes to completion",
+      done.wait(20) and events[-1]["kind"] == "done"
+      and (models.local_models_dir() / "crashed.gguf").read_bytes() == PAYLOAD,
+      str(events[-1:]))
 httpd.shutdown()
+
+# ---------- history: done records stay until cleared; clear spares live ----------
+recs = models.downloads()
+check("finished downloads are retained as history",
+      {r["id"] for r in recs if r["status"] == "done"}
+      >= {"job3", "job5", "job6"}, str(recs))
+check("done records carry a completion timestamp",
+      all(r.get("doneTs") for r in recs if r["status"] == "done"), str(recs))
+store.mutate_state(lambda st: st.__setitem__(
+    "downloads", st.get("downloads", []) + [
+        {"id": "job7", "urls": ["http://x/a.gguf"], "names": ["a.gguf"],
+         "label": "a.gguf", "total": 1, "done": 0, "status": "paused",
+         "error": "", "ts": 0}]))
+models.clear_downloads()
+recs = models.downloads()
+check("clear removes all history, keeps unfinished records",
+      [r["id"] for r in recs] == ["job7"], str(recs))
+check("cleared history leaves the files alone",
+      (models.local_models_dir() / "crashed.gguf").is_file()
+      and all(p.is_file() for p in shards))
+models.cancel_download("job7")
 
 print()
 if FAILS:

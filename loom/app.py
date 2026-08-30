@@ -193,6 +193,39 @@ def _set_tray_tooltip(text: str) -> None:
         pass
 
 
+_TRAY_MSG_MS = 10000
+
+
+def _tray_notify(title: str, text: str) -> None:
+    """Tray balloon, KDE-proof, marshalled to the Qt main thread (the
+    closing handler runs on a worker thread — raw Qt calls there are UB).
+    On KDE the tray is a StatusNotifierItem, and Qt's showMessage sets the
+    item's ATTENTION icon to the message icon (default: the blue
+    dialog-information "i") and flips the status to NeedsAttention —
+    Plasma then renders that instead of our icon, and is known to leave it
+    stuck. Passing OUR icon makes the attention icon indistinguishable
+    from the real one, and re-asserting setIcon after the timeout nudges
+    Plasma back to normal in either case."""
+    tray = _tray_state.get("tray")
+    if tray is None:
+        return
+    try:
+        from qtpy.QtCore import QTimer
+        from qtpy.QtWidgets import QApplication
+
+        def do():
+            try:
+                tray.showMessage(str(title), str(text), make_app_icon(),
+                                 _TRAY_MSG_MS)
+            except Exception:
+                return
+            QTimer.singleShot(_TRAY_MSG_MS + 1000, tray,
+                              lambda: tray.setIcon(make_app_icon()))
+        QTimer.singleShot(0, QApplication.instance(), do)
+    except Exception:
+        pass
+
+
 def _qt_focus(window):
     """Raise + activate + un-hide the window. Runs inside Qt's loop and
     must never raise (an exception there corrupts pywebview's eventFilter)."""
@@ -263,6 +296,15 @@ def setup_tray(window, api: "JsApi", bus: "Bus"):
     app = QApplication.instance()
     if app is None:
         return
+    try:
+        # the StatusNotifierItem Id on KDE comes from desktopFileName and
+        # falls back to the binary name — "python3" for us, which every
+        # Loom instance would share and plasmashell caches tray state by.
+        # Claim a proper identity before the tray registers.
+        from qtpy.QtGui import QGuiApplication
+        QGuiApplication.setDesktopFileName("loom")
+    except Exception:
+        pass
     icon = make_app_icon()
     app.setWindowIcon(icon)
 
@@ -1417,18 +1459,55 @@ class JsApi:
         return _api_call(lambda: {"yaml": models.yaml_snippet(
             selection if isinstance(selection, list) else [])})()
 
-    def models_download(self, url, filename=""):
+    def models_download(self, url, filename="", total=0):
+        """`url` may be a list of shard urls (a split model)."""
         def do():
             job = uuid_job()
-            models.start_download(self._bus.push, job, str(url),
-                                  str(filename or ""))
+            models.start_download(
+                self._bus.push, job,
+                url if isinstance(url, list) else str(url),
+                str(filename or ""), total)
             return {"job": job}
         return _api_call(do)()
 
+    def models_downloads(self):
+        return _api_call(lambda: {"downloads": models.downloads()})()
+
+    def models_dl_pause(self, job):
+        return _api_call(lambda: {"paused": models.pause_download(str(job))})()
+
+    def models_dl_resume(self, job):
+        def do():
+            models.resume_download(self._bus.push, str(job))
+            return {"resumed": True}
+        return _api_call(do)()
+
+    def models_dl_cancel(self, job):
+        def do():
+            models.cancel_download(str(job))
+            return {"cancelled": True}
+        return _api_call(do)()
+
+    def models_dl_dismiss(self, job):
+        def do():
+            models.dismiss_download(str(job))
+            return {"dismissed": True}
+        return _api_call(do)()
+
+    def models_dl_clear(self):
+        def do():
+            models.clear_downloads()
+            return {"cleared": True}
+        return _api_call(do)()
+
     def models_push(self, local_path, host):
+        """`local_path` may be a list of shard paths (a split model)."""
         def do():
             job = uuid_job()
-            models.start_push(self._bus.push, job, str(local_path), str(host))
+            models.start_push(
+                self._bus.push, job,
+                local_path if isinstance(local_path, list) else str(local_path),
+                str(host))
             return {"job": job}
         return _api_call(do)()
 
@@ -1580,15 +1659,10 @@ def on_window_closing(window, bus: Bus) -> bool:
             return True
         if not _tray_state["notified"]:
             _tray_state["notified"] = True
-            tray = _tray_state["tray"]
-            if tray is not None:
-                try:
-                    tray.showMessage(
-                        "Loom",
-                        "Still running in the tray — servers stay up. Click "
-                        "the icon to reopen, or Quit to exit.")
-                except Exception:
-                    pass
+            _tray_notify(
+                "Loom",
+                "Still running in the tray — servers stay up. Click "
+                "the icon to reopen, or Quit to exit.")
         return False
     # no tray: closing the window is a real quit and takes the gate
     return attempt_quit(bus, window, closing_main=True)

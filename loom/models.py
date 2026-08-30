@@ -5,14 +5,19 @@
   the Hugging Face cache, ~/models and ~/Downloads. mmproj files (the
   CLIP projector for a vision model) are flagged and paired with the
   model they sit beside.
-* DOWNLOAD a gguf by URL into ~/.loom/models/ (progress events).
+* DOWNLOAD a gguf by URL into ~/.loom/models/ (progress events). Every
+  download is a persistent RECORD in state.json ("downloads"): it can be
+  paused and resumed (HTTP Range on the .part file), and a crash or
+  reboot mid-transfer surfaces the record as paused — nothing restarts
+  from byte zero.
 * PUSH a local model file to a remote host's ~/.loom/models/ over the
   same multiplexed ssh connection the servers use.
 * Generate a ready-to-paste `models:` yaml snippet for loom.yaml from a
   selection of scanned files.
 
 Hosts the user configures live in ~/.loom/state.json ("modelHosts").
-Events: {type:"models", kind:"progress"|"done"|"error", op, id, ...}.
+Events: {type:"models", op, id, kind, ...} with kind progress | done |
+error, plus paused | cancelled for downloads.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -33,6 +39,11 @@ class ModelsError(Exception):
 
 
 MODELS_DIR = "~/.loom/models"
+
+# llama.cpp split-GGUF shard suffix (llama-gguf-split writes %05d). The
+# FIRST shard is the model: llama-server -m <shard 1> loads the rest from
+# the same directory by this exact naming, so shards must never be renamed.
+SPLIT_RE = re.compile(r"-\d{5}-of-\d{5}(?=\.gguf$)", re.I)
 
 # searched on every scan; find follows none of these outside $HOME
 SCAN_DIRS = (
@@ -113,8 +124,11 @@ def _tilde(path: str, home: str) -> str:
 
 def parse_scan(out: str, home: str) -> list[dict]:
     """find output → [{path, size, name, mmproj, dir, pairedWith}].
-    mmproj files are matched to the largest non-mmproj gguf in the same
-    directory (LM Studio and HF ship them side by side)."""
+    llama.cpp split shards (NAME-00001-of-000NN.gguf) in one directory
+    collapse into a single entry: path is the FIRST shard (what -m takes),
+    size the total, parts every shard path. mmproj files are matched to
+    the largest non-mmproj gguf in the same directory (LM Studio and HF
+    ship them side by side)."""
     entries = []
     seen = set()
     for line in out.splitlines():
@@ -138,6 +152,7 @@ def parse_scan(out: str, home: str) -> list[dict]:
             "mmproj": "mmproj" in name.lower(),
             "pairedWith": None,
         })
+    entries = _group_shards(entries)
     by_dir: dict[str, list[dict]] = {}
     for e in entries:
         by_dir.setdefault(e["dir"], []).append(e)
@@ -151,6 +166,30 @@ def parse_scan(out: str, home: str) -> list[dict]:
                 e["pairedWith"] = best["path"]
     entries.sort(key=lambda e: (e["dir"], e["mmproj"], -e["size"]))
     return entries
+
+
+def _group_shards(entries: list[dict]) -> list[dict]:
+    """Collapse split shards found on disk into one entry per model."""
+    groups: dict[tuple, list[dict]] = {}
+    out = []
+    for e in entries:
+        if SPLIT_RE.search(e["name"]):
+            groups.setdefault((e["dir"], SPLIT_RE.sub("", e["name"])), []) \
+                .append(e)
+        else:
+            out.append(e)
+    for (d, name), shards in groups.items():
+        shards.sort(key=lambda s: s["name"])
+        out.append({
+            "path": shards[0]["path"],
+            "size": sum(s["size"] for s in shards),
+            "name": name,
+            "dir": d,
+            "mmproj": "mmproj" in name.lower(),
+            "pairedWith": None,
+            "parts": [s["path"] for s in shards],
+        })
+    return out
 
 
 def scan(host: str = "") -> list[dict]:
@@ -211,7 +250,7 @@ def _shq(s: str) -> str:
 # the yaml snippet
 
 def _display_name(filename: str) -> str:
-    base = re.sub(r"\.gguf$", "", filename, flags=re.I)
+    base = re.sub(r"\.gguf$", "", SPLIT_RE.sub("", filename), flags=re.I)
     base = re.sub(r"[-_.](Q\d[\w.]*|IQ\d[\w.]*|BF16|F16|F32)$", "", base,
                   flags=re.I)
     return re.sub(r"[-_]+", " ", base).strip() or filename
@@ -228,6 +267,7 @@ def _yq(s: str) -> str:
 # the user sees and owns every flag instead of hunting for hidden defaults
 DEFAULT_ENTRY_FLAGS = [
     "-ngl 99",
+    "-kvu",
     "-fa on",
     "-ctk q4_0 -ctv q4_0",
     "--spec-type draft-mtp",
@@ -386,7 +426,9 @@ def parse_repo(spec: str) -> str:
 
 
 def repo_files(spec: str) -> list[dict]:
-    """The GGUF files in an HF repo: [{path, size, url}], sorted by name."""
+    """The GGUF files in an HF repo: [{path, size, url}], sorted by name.
+    Split shards (one set per quantization) collapse into a single entry —
+    see group_split — so the list reads as 'the available quants'."""
     repo = parse_repo(spec)
     api = f"https://huggingface.co/api/models/{repo}/tree/main?recursive=true"
     try:
@@ -404,16 +446,38 @@ def repo_files(spec: str) -> list[dict]:
         out.append({"path": p, "size": int(f.get("size") or 0),
                     "url": f"https://huggingface.co/{repo}/resolve/main/"
                            + urllib.parse.quote(p)})
+    out = group_split(out)
     out.sort(key=lambda x: x["path"].lower())
     if not out:
         raise ModelsError(f"{repo} has no .gguf files")
     return out
 
 
+def group_split(files: list[dict]) -> list[dict]:
+    """Collapse split shards into one logical entry per model: path is the
+    shard name with the -0000N-of-0000M suffix dropped (display only —
+    that file does not exist), url points at the FIRST shard, size is the
+    total, and parts lists every shard {path, size, url} in order."""
+    groups: dict[str, list[dict]] = {}
+    out = []
+    for f in files:
+        if SPLIT_RE.search(f["path"]):
+            groups.setdefault(SPLIT_RE.sub("", f["path"]), []).append(f)
+        else:
+            out.append(f)
+    for path, shards in groups.items():
+        shards.sort(key=lambda s: s["path"])
+        out.append({"path": path,
+                    "size": sum(s["size"] for s in shards),
+                    "url": shards[0]["url"],
+                    "parts": shards})
+    return out
+
+
 # ---------------------------------------------------------------------------
 # download / push — long operations on worker threads, progress via push
 
-_jobs: dict[str, threading.Event] = {}
+_jobs: dict[str, threading.Event] = {}   # push jobs (not resumable)
 _jobs_lock = threading.Lock()
 
 
@@ -451,66 +515,289 @@ def _emit(push, op: str, job_id: str, kind: str, **kw) -> None:
         pass
 
 
-def start_download(push, job_id: str, url: str, filename: str = "") -> None:
-    """Download a gguf to ~/.loom/models/ on a worker thread."""
-    u = str(url or "").strip()
-    if not u.startswith(("http://", "https://")):
-        raise ModelsError("give an http(s) URL to a .gguf file")
-    name = str(filename or "").strip() \
-        or urllib.parse.unquote(u.split("?")[0].rstrip("/").rsplit("/", 1)[-1])
-    name = re.sub(r"[^\w.+-]", "_", name)
-    if not name.lower().endswith(".gguf"):
-        name += ".gguf"
-    dest = local_models_dir() / name
-    if dest.exists():
-        raise ModelsError(f"{name} already exists in ~/.loom/models")
-    cancel_ev = _job(job_id)
+# ---------------------------------------------------------------------------
+# resumable downloads. Each download is a RECORD persisted in state.json
+# ("downloads"): {id, urls, names, label, total, done, status, error, ts}
+# with status active | paused | error | done. Bytes live in
+# ~/.loom/models/ — finished shards under their final names, the shard in
+# flight as <name>.part. Resume skips finished shards and continues the
+# .part with an HTTP Range request; a server that ignores Range (200
+# instead of 206) restarts just that shard. Records outlive the process:
+# after a crash or reboot, downloads() surfaces stale "active" records as
+# paused, byte counts recomputed from what is actually on disk.
 
-    def work():
-        tmp = dest.with_name(dest.name + ".part")
-        try:
-            req = urllib.request.Request(u, headers={"User-Agent": "loom"})
+_dl_ctl: dict[str, dict] = {}   # live job id -> {"pause": Event, "cancel": Event}
+_dl_lock = threading.Lock()
+
+
+class _DlCancelled(Exception):
+    pass
+
+
+def _dl_recs(st: dict) -> list[dict]:
+    got = st.get("downloads")
+    return [r for r in got if isinstance(r, dict)] \
+        if isinstance(got, list) else []
+
+
+def _dl_get(job_id: str) -> dict | None:
+    for r in _dl_recs(store.load_state()):
+        if r.get("id") == job_id:
+            return dict(r)
+    return None
+
+
+def _dl_update(job_id: str, **fields) -> None:
+    def fn(st):
+        recs = _dl_recs(st)
+        for r in recs:
+            if r.get("id") == job_id:
+                r.update(fields)
+        st["downloads"] = recs
+    store.mutate_state(fn)
+
+
+def _dl_remove(job_id: str) -> None:
+    def fn(st):
+        st["downloads"] = [r for r in _dl_recs(st) if r.get("id") != job_id]
+    store.mutate_state(fn)
+
+
+def _dl_disk_done(rec: dict) -> int:
+    """Bytes of this record already on disk (finished shards + .part)."""
+    ddir = local_models_dir()
+    got = 0
+    for n in rec.get("names") or []:
+        p = ddir / str(n)
+        t = p.with_name(p.name + ".part")
+        if p.is_file():
+            got += p.stat().st_size
+        elif t.is_file():
+            got += t.stat().st_size
+    return got
+
+
+def downloads() -> list[dict]:
+    """The download registry for the UI. Records a crash left 'active'
+    (no live worker) surface as paused, and non-active byte counts are
+    recomputed from disk — the record's counter may be stale."""
+    with _dl_lock:
+        live = set(_dl_ctl)
+    out = []
+    for r in _dl_recs(store.load_state()):
+        r = dict(r)
+        if r.get("status") == "active" and r.get("id") not in live:
+            r["status"] = "paused"
+            _dl_update(str(r.get("id")), status="paused")
+        if r.get("status") in ("paused", "error"):
+            r["done"] = _dl_disk_done(r)
+        out.append(r)
+    return out
+
+
+def start_download(push, job_id: str, url, filename: str = "",
+                   total: int = 0) -> None:
+    """Begin a new download record and its worker thread. `url` may be a
+    LIST of shard urls (a split model) — every shard keeps its exact name
+    (llama.cpp finds siblings by it). `total` is the expected byte total
+    when the caller knows it (the repo listing does)."""
+    urls = [str(u or "").strip()
+            for u in (url if isinstance(url, (list, tuple)) else [url])]
+    urls = [u for u in urls if u]
+    if not urls or not all(u.startswith(("http://", "https://"))
+                           for u in urls):
+        raise ModelsError("give an http(s) URL to a .gguf file")
+    names = []
+    for u in urls:
+        n = (str(filename or "").strip() if len(urls) == 1 else "") or \
+            urllib.parse.unquote(u.split("?")[0].rstrip("/").rsplit("/", 1)[-1])
+        n = re.sub(r"[^\w.+-]", "_", n)
+        if not n.lower().endswith(".gguf"):
+            n += ".gguf"
+        names.append(n)
+    ddir = local_models_dir()
+    for n in names:
+        if (ddir / n).exists():
+            raise ModelsError(f"{n} already exists in ~/.loom/models")
+    taken = {n for r in _dl_recs(store.load_state())
+             if r.get("status") != "done" for n in (r.get("names") or [])}
+    for n in names:
+        if n in taken:
+            raise ModelsError(
+                f"{n} is already being downloaded — resume or cancel it "
+                "in the Downloader")
+    try:
+        grand = max(0, int(total or 0))
+    except (TypeError, ValueError):
+        grand = 0
+    rec = {"id": str(job_id), "urls": urls, "names": names,
+           "label": SPLIT_RE.sub("", names[0]), "total": grand, "done": 0,
+           "status": "active", "error": "", "ts": int(time.time() * 1000)}
+
+    def fn(st):
+        st["downloads"] = _dl_recs(st) + [rec]
+    store.mutate_state(fn)
+    _dl_spawn(push, rec)
+
+
+def resume_download(push, job_id: str) -> None:
+    """Continue a paused/errored/interrupted download from its .part."""
+    rec = _dl_get(str(job_id))
+    if rec is None:
+        raise ModelsError("no such download")
+    with _dl_lock:
+        if str(job_id) in _dl_ctl:
+            return   # already running
+    if rec.get("status") == "done":
+        raise ModelsError("that download is already complete")
+    _dl_update(str(job_id), status="active", error="")
+    rec["status"] = "active"
+    _dl_spawn(push, rec)
+
+
+def pause_download(job_id: str) -> bool:
+    with _dl_lock:
+        ctl = _dl_ctl.get(str(job_id))
+    if ctl:
+        ctl["pause"].set()
+        return True
+    return False
+
+
+def cancel_download(job_id: str) -> None:
+    """Abort a download and delete everything it wrote (record included).
+    Running worker → it cleans up on its way out; idle record → clean up
+    here."""
+    jid = str(job_id)
+    with _dl_lock:
+        ctl = _dl_ctl.get(jid)
+    if ctl:
+        ctl["cancel"].set()
+        return
+    rec = _dl_get(jid)
+    if rec is not None:
+        _dl_wipe(rec)
+        _dl_remove(jid)
+
+
+def dismiss_download(job_id: str) -> None:
+    """Drop a finished record from the registry — the files stay."""
+    _dl_remove(str(job_id))
+
+
+def clear_downloads() -> None:
+    """Clear the download HISTORY: every done record goes, files stay.
+    Active, paused and errored records are live state, not history —
+    they survive (cancel is the way to drop those)."""
+    def fn(st):
+        st["downloads"] = [r for r in _dl_recs(st)
+                           if r.get("status") != "done"]
+    store.mutate_state(fn)
+
+
+def _dl_wipe(rec: dict) -> None:
+    ddir = local_models_dir()
+    for n in rec.get("names") or []:
+        p = ddir / str(n)
+        p.unlink(missing_ok=True)
+        p.with_name(p.name + ".part").unlink(missing_ok=True)
+
+
+def _dl_spawn(push, rec: dict) -> None:
+    ctl = {"pause": threading.Event(), "cancel": threading.Event()}
+    with _dl_lock:
+        _dl_ctl[rec["id"]] = ctl
+    threading.Thread(target=_dl_run, args=(push, rec, ctl), daemon=True,
+                     name=f"dl-{rec['id']}").start()
+
+
+def _dl_run(push, rec: dict, ctl: dict) -> None:
+    job_id = rec["id"]
+    label = rec.get("label") or ""
+    grand = int(rec.get("total") or 0)
+    ddir = local_models_dir()
+    got = 0
+    try:
+        est = 0
+        last = 0.0
+        last_save = 0.0
+        for u, n in zip(rec["urls"], rec["names"]):
+            dest = ddir / str(n)
+            if dest.is_file():                    # finished on an earlier run
+                got += dest.stat().st_size
+                continue
+            tmp = dest.with_name(dest.name + ".part")
+            offset = tmp.stat().st_size if tmp.is_file() else 0
+            headers = {"User-Agent": "loom"}
+            if offset:
+                headers["Range"] = f"bytes={offset}-"
+            req = urllib.request.Request(u, headers=headers)
             with urllib.request.urlopen(req, timeout=60) as resp:
-                total = int(resp.headers.get("Content-Length") or 0)
-                got = 0
-                last = 0.0
-                with open(tmp, "wb") as f:
+                if offset and getattr(resp, "status", 200) != 206:
+                    offset = 0                    # Range ignored — redo shard
+                est += offset + int(resp.headers.get("Content-Length") or 0)
+                got += offset
+                with open(tmp, "ab" if offset else "wb") as f:
                     while True:
-                        if cancel_ev.is_set():
-                            raise ModelsError("cancelled")
+                        if ctl["cancel"].is_set():
+                            raise _DlCancelled()
+                        if ctl["pause"].is_set():
+                            _dl_update(job_id, status="paused", done=got)
+                            _emit(push, "download", job_id, "paused",
+                                  name=label, done=got, total=grand or est)
+                            return
                         chunk = resp.read(1024 * 512)
                         if not chunk:
                             break
                         f.write(chunk)
                         got += len(chunk)
-                        import time as _t
-                        now = _t.monotonic()
+                        now = time.monotonic()
                         if now - last > 0.5:
                             last = now
                             _emit(push, "download", job_id, "progress",
-                                  name=name, done=got, total=total)
+                                  name=label, done=got, total=grand or est)
+                        if now - last_save > 10:
+                            last_save = now
+                            _dl_update(job_id, done=got)
             tmp.replace(dest)
-            _emit(push, "download", job_id, "done", name=name,
-                  path=str(dest), size=dest.stat().st_size)
-        except Exception as e:
-            tmp.unlink(missing_ok=True)
-            _emit(push, "download", job_id, "error", name=name, msg=str(e))
-        finally:
-            _job_done(job_id)
-    threading.Thread(target=work, daemon=True, name=f"dl-{job_id}").start()
+        _dl_update(job_id, status="done", done=got,
+                   doneTs=int(time.time() * 1000))
+        _emit(push, "download", job_id, "done", name=label,
+              path=str(ddir / rec["names"][0]), size=got,
+              parts=len(rec["names"]))
+    except _DlCancelled:
+        _dl_wipe(rec)
+        _dl_remove(job_id)
+        _emit(push, "download", job_id, "cancelled", name=label)
+    except Exception as e:
+        # bytes stay on disk — the record is resumable
+        _dl_update(job_id, status="error", error=str(e), done=got)
+        _emit(push, "download", job_id, "error", name=label, msg=str(e),
+              done=got, total=grand)
+    finally:
+        with _dl_lock:
+            if _dl_ctl.get(job_id) is ctl:
+                del _dl_ctl[job_id]
 
 
-def start_push(push, job_id: str, local_path: str, host: str) -> None:
-    """Stream a local model file to `host`:~/.loom/models/ over the
-    multiplexed ssh connection (atomic: .part then mv)."""
-    src = Path(str(local_path)).expanduser()
-    if not src.is_file():
-        raise ModelsError(f"no such file: {local_path}")
+def start_push(push, job_id: str, local_path, host: str) -> None:
+    """Stream a local model file — or a LIST of split shards — to
+    `host`:~/.loom/models/ over the multiplexed ssh connection (each file
+    atomic: .part then mv)."""
+    paths = local_path if isinstance(local_path, (list, tuple)) \
+        else [local_path]
+    srcs = [Path(str(p)).expanduser() for p in paths]
+    for i, src in enumerate(srcs):
+        if not src.is_file():
+            raise ModelsError(f"no such file: {paths[i]}")
+    if not srcs:
+        raise ModelsError("no file to push")
     h = str(host or "").strip()
     if not h or h.startswith("-"):
         raise ModelsError("pick a configured ssh host")
-    name = re.sub(r"[^\w.+-]", "_", src.name)
-    total = src.stat().st_size
+    names = [re.sub(r"[^\w.+-]", "_", src.name) for src in srcs]
+    label = SPLIT_RE.sub("", names[0])
+    total = sum(src.stat().st_size for src in srcs)
     cancel_ev = _job(job_id)
 
     def work():
@@ -519,40 +806,43 @@ def start_push(push, job_id: str, local_path: str, host: str) -> None:
                 h, 'mkdir -p "$HOME/.loom/models"', timeout=30)
             if rc != 0:
                 raise ModelsError(f"mkdir on {h} failed: {err.strip()[:200]}")
-            remote = f'$HOME/.loom/models/{name}'
-            argv = [*sshtunnel.SSH_CMD, *sshtunnel._mux_args(), h,
-                    f'cat > "{remote}.part" && mv "{remote}.part" "{remote}"']
-            proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
-                                    stderr=subprocess.PIPE,
-                                    env=sshtunnel._ssh_env(),
-                                    start_new_session=True)
             sent = 0
             last = 0.0
             import time as _t
-            with open(src, "rb") as f:
-                while True:
-                    if cancel_ev.is_set():
-                        proc.kill()
-                        raise ModelsError("cancelled")
-                    chunk = f.read(1024 * 512)
-                    if not chunk:
-                        break
-                    proc.stdin.write(chunk)
-                    sent += len(chunk)
-                    now = _t.monotonic()
-                    if now - last > 0.5:
-                        last = now
-                        _emit(push, "push", job_id, "progress",
-                              name=name, host=h, done=sent, total=total)
-            proc.stdin.close()
-            rc = proc.wait(timeout=120)
-            if rc != 0:
-                err = proc.stderr.read().decode("utf-8", "replace")[:300]
-                raise ModelsError(f"transfer failed (rc {rc}): {err}")
-            _emit(push, "push", job_id, "done", name=name, host=h,
-                  path=f"~/.loom/models/{name}")
+            for src, name in zip(srcs, names):
+                remote = f'$HOME/.loom/models/{name}'
+                argv = [*sshtunnel.SSH_CMD, *sshtunnel._mux_args(), h,
+                        f'cat > "{remote}.part" && '
+                        f'mv "{remote}.part" "{remote}"']
+                proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                                        stderr=subprocess.PIPE,
+                                        env=sshtunnel._ssh_env(),
+                                        start_new_session=True)
+                with open(src, "rb") as f:
+                    while True:
+                        if cancel_ev.is_set():
+                            proc.kill()
+                            raise ModelsError("cancelled")
+                        chunk = f.read(1024 * 512)
+                        if not chunk:
+                            break
+                        proc.stdin.write(chunk)
+                        sent += len(chunk)
+                        now = _t.monotonic()
+                        if now - last > 0.5:
+                            last = now
+                            _emit(push, "push", job_id, "progress",
+                                  name=label, host=h, done=sent, total=total)
+                proc.stdin.close()
+                rc = proc.wait(timeout=120)
+                if rc != 0:
+                    err = proc.stderr.read().decode("utf-8", "replace")[:300]
+                    raise ModelsError(f"transfer failed (rc {rc}): {err}")
+            _emit(push, "push", job_id, "done", name=label, host=h,
+                  path=f"~/.loom/models/{names[0]}")
         except Exception as e:
-            _emit(push, "push", job_id, "error", name=name, host=h, msg=str(e))
+            _emit(push, "push", job_id, "error", name=label, host=h,
+                  msg=str(e))
         finally:
             _job_done(job_id)
     threading.Thread(target=work, daemon=True, name=f"push-{job_id}").start()

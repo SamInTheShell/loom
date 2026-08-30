@@ -1,12 +1,13 @@
 /* modelstab.js — the Models utility (singleton tab): manage GGUFs across
- * machines. Top to bottom: the fetcher (URL / HF repo → quant picker;
- * a repo's mmproj vision projector downloads automatically alongside the
- * quant you pick), "+ add ssh host…", then a tab strip — Local first
- * (pinned), one tab per ssh host (drag to reorder, right-click to
- * forget). Each tab auto-scans the common model folders on first open,
- * caches the result, and has a reload button + filter. Rows offer
- * "Server…" (the New-model wizard prefilled with this host + file) and,
- * on Local, "Copy to…" any ssh host's ~/.loom/models. */
+ * machines. Top to bottom: the "Downloader" button (fetching GGUFs lives
+ * in its own tab — downloader.js), "+ add ssh host…", then a tab strip —
+ * Local first (pinned), one tab per ssh host (drag to reorder,
+ * right-click to forget). Each tab auto-scans the common model folders
+ * on first open, caches the result, and has a reload button + filter.
+ * Split ggufs show as ONE entry with an "N parts" badge; all shards copy
+ * together. Rows offer "Server…" (the New-model wizard prefilled with
+ * this host + file) and, on Local, "Copy to…" any ssh host's
+ * ~/.loom/models. */
 "use strict";
 
 function modelsState() {
@@ -78,83 +79,15 @@ function renderModelsTab() {
   const panel = panelFor("models");
   if (!panel) return;
   const ms = modelsState();
+  const focus = captureFocus(panel);
   panel.replaceChildren();
   const wrap = el("div", { class: "mods-wrap" });
 
   wrap.append(el("div", { class: "srv-head" }, el("h2", { text: "Models" })));
   wrap.append(el("p", { class: "mods-hint",
-    text: "Fetch GGUFs here, then browse each machine's models below — copy them from Local to your ssh hosts, or turn any of them into a server." }));
+    text: "Browse each machine's models below — copy them from Local to your ssh hosts, or turn any of them into a server. Fetching new GGUFs lives in the Downloader." }));
 
-  /* ---- the fetcher: direct .gguf URL, or a repo → pick the quant ---- */
-  const startDownload = async (u, label) => {
-    const r = await Api.call("models_download", u, "");
-    if (!r.ok) { toast(r.error, "err"); return false; }
-    ms.jobs[r.data.job] = { op: "download", label: label || baseName(u), done: 0, total: 0 };
-    renderModelsTab();
-    return true;
-  };
-  const urlIn = el("input", { type: "text", class: "mods-url", value: ms.dlInput || "",
-    placeholder: "owner/repo (e.g. unsloth/Qwen3.8-27B-GGUF), a repo URL, or a direct .gguf URL" });
-  urlIn.addEventListener("input", () => { ms.dlInput = urlIn.value; });
-  const dlBtn = el("button", {
-    class: "btn btn-sm btn-acc", text: ms.fetching ? "Fetching…" : "Fetch",
-    disabled: ms.fetching ? "" : null,
-    onclick: async () => {
-      const u = urlIn.value.trim();
-      if (!u) return;
-      if (/\.gguf(\?.*)?$/i.test(u)) {          // direct file → just download
-        ms.dlInput = "";
-        startDownload(u);
-        return;
-      }
-      ms.fetching = true;
-      renderModelsTab();
-      const r = await Api.call("models_repo", u);
-      ms.fetching = false;
-      if (!r.ok) { toast(r.error, "err"); renderModelsTab(); return; }
-      ms.repoFiles = r.data.files;
-      ms.repoName = u;
-      ms.repoMmDone = false;
-      renderModelsTab();
-    },
-  });
-  urlIn.addEventListener("keydown", (e) => { if (e.key === "Enter") dlBtn.click(); });
-  wrap.append(el("div", { class: "mods-dl" }, urlIn, dlBtn));
-
-  if (ms.repoFiles?.length) {
-    const mm = repoMmproj(ms.repoFiles);
-    const rl = el("div", { class: "mods-list" },
-      el("div", { class: "mods-dir" },
-        el("span", { text: "quants in " + ms.repoName + "  " }),
-        el("button", { class: "btn btn-sm", text: "×", title: "Clear",
-          onclick: () => { ms.repoFiles = null; renderModelsTab(); } })));
-    if (mm) {
-      rl.append(el("div", { class: "mods-dir" },
-        el("span", { text: "vision projector detected (" + baseName(mm.path)
-          + ") — it downloads automatically with the quant you pick" })));
-    }
-    for (const f of ms.repoFiles) {
-      const isMm = /mmproj/i.test(baseName(f.path));
-      rl.append(el("div", { class: "mods-row" + (isMm ? " mm" : "") },
-        el("span", { class: "pname", title: f.path, text: f.path }),
-        isMm ? el("span", { class: "mods-badge", text: "mmproj" }) : null,
-        el("span", { class: "mods-prog", text: fmtBytes(f.size) }),
-        el("button", {
-          class: "btn btn-sm btn-acc", text: "Download",
-          onclick: async () => {
-            const ok = await startDownload(f.url, baseName(f.path));
-            // the paired projector rides along, once per repo fetch
-            if (ok && !isMm && mm && !ms.repoMmDone) {
-              ms.repoMmDone = true;
-              startDownload(mm.url, baseName(mm.path));
-            }
-          },
-        })));
-    }
-    wrap.append(rl);
-  }
-
-  /* ---- jobs ---- */
+  /* ---- push jobs (Copy to… transfers) ---- */
   const jobIds = Object.keys(ms.jobs);
   if (jobIds.length) {
     const jl = el("div", { class: "mods-jobs" });
@@ -162,8 +95,7 @@ function renderModelsTab() {
       const j = ms.jobs[jid];
       const pct = j.total ? Math.round(100 * j.done / j.total) : null;
       jl.append(el("div", { class: "mods-job" },
-        el("span", { class: "pname",
-          text: (j.op === "push" ? "→ " + (j.host || "") + "  " : "⇣ ") + j.label }),
+        el("span", { class: "pname", text: "→ " + (j.host || "") + "  " + j.label }),
         el("span", { class: "mods-prog", text: j.error ? ("failed: " + j.error)
           : j.finished ? "done"
           : pct != null ? `${pct}%  (${fmtBytes(j.done)} / ${fmtBytes(j.total)})`
@@ -179,20 +111,27 @@ function renderModelsTab() {
     wrap.append(jl);
   }
 
-  /* ---- add host ---- */
-  wrap.append(el("div", { class: "mods-hosts" }, el("button", {
-    class: "btn btn-sm", text: "+ add ssh host…",
-    onclick: () => promptModal("Add a model host",
-      "ssh destination (user@host or a ~/.ssh/config alias):", "",
-      async (v) => {
-        const dest = v.trim();
-        if (!dest) return;
-        const r = await Api.call("models_host_add", dest);
-        if (!r.ok) { toast(r.error, "err"); return; }
-        ms.hosts = r.data.hosts;
-        activateModelsHost(dest);
-      }, "Add"),
-  })));
+  /* ---- add host (left) + the Downloader (right) ---- */
+  wrap.append(el("div", { class: "mods-hosts" },
+    el("button", {
+      class: "btn btn-sm", text: "+ add ssh host…",
+      onclick: () => promptModal("Add a model host",
+        "ssh destination (user@host or a ~/.ssh/config alias):", "",
+        async (v) => {
+          const dest = v.trim();
+          if (!dest) return;
+          const r = await Api.call("models_host_add", dest);
+          if (!r.ok) { toast(r.error, "err"); return; }
+          ms.hosts = r.data.hosts;
+          activateModelsHost(dest);
+        }, "Add"),
+    }),
+    el("button", {
+      class: "btn btn-sm btn-acc", text: "⇣ Downloader",
+      style: "margin-left:auto",
+      title: "Fetch GGUFs from a URL or Hugging Face repo — resumable downloads",
+      onclick: () => openTab("downloader"),
+    })));
 
   /* ---- host tabs: Local pinned first, ssh hosts drag-reorderable ---- */
   const strip = el("div", { class: "mods-tabs" });
@@ -259,7 +198,8 @@ function renderModelsTab() {
   /* ---- the active host's models: reload + filter + rows ---- */
   const t = modelsHostTab(ms.active);
   const bar = el("div", { class: "mods-dl" });
-  const filterIn = el("input", { type: "text", class: "mods-url", value: t.filter,
+  const filterIn = el("input", { type: "text", class: "mods-url",
+    "data-keep": "mods-filter", value: t.filter,
     placeholder: "filter — space-separated words, all must match" });
   bar.append(filterIn, el("button", {
     class: "btn btn-sm", title: "Rescan " + (ms.active || "this machine"),
@@ -290,6 +230,10 @@ function renderModelsTab() {
         el("span", { class: "pname", title: e2.path, text: e2.path }),
         e2.mmproj ? el("span", { class: "mods-badge", text: "mmproj" })
           : vision.has(e2.path) ? el("span", { class: "mods-badge ok", text: "vision" }) : null,
+        e2.parts ? el("span", { class: "mods-badge",
+          title: "split gguf — " + e2.parts.length
+            + " files; the server loads them via the first",
+          text: e2.parts.length + " parts" }) : null,
         el("span", { class: "mods-size", text: fmtBytes(e2.size) }));
       if (!e2.mmproj) {
         row.append(el("button", {
@@ -306,10 +250,10 @@ function renderModelsTab() {
             ctxMenu(ev2.clientX, ev2.clientY, ms.hosts.map((h) => ({
               label: "→ " + h,
               fn: async () => {
-                const r = await Api.call("models_push", e2.path, h);
+                const r = await Api.call("models_push", e2.parts || e2.path, h);
                 if (!r.ok) { toast(r.error, "err"); return; }
                 ms.jobs[r.data.job] = { op: "push", host: h,
-                  label: baseName(e2.path), done: 0, total: 0 };
+                  label: e2.name || baseName(e2.path), done: 0, total: 0 };
                 renderModelsTab();
               },
             })));
@@ -323,6 +267,7 @@ function renderModelsTab() {
   wrap.append(list);
   renderList();
   panel.append(wrap);
+  restoreFocus(panel, focus);
 }
 
 /* the repo's vision projector, if it ships one: prefer the F16 build,
@@ -334,7 +279,7 @@ function repoMmproj(files) {
     || mms.slice().sort((a, b) => a.size - b.size)[0];
 }
 
-/* progress events */
+/* push (Copy to…) progress events — downloads are the Downloader tab's */
 function onModelsEvent(ev) {
   const ms = modelsState();
   const j = ms.jobs[ev.id] || (ms.jobs[ev.id] = { op: ev.op, label: ev.name || "", done: 0, total: 0 });
@@ -345,16 +290,14 @@ function onModelsEvent(ev) {
     j.total = ev.total || 0;
   } else if (ev.kind === "done") {
     j.finished = true;
-    toast((ev.op === "push" ? "Pushed " : "Downloaded ") + (ev.name || "")
-      + (ev.host ? " → " + ev.host : "") + " (" + (ev.path || "") + ")", "ok");
-    // a finished download lands in ~/.loom/models — reflect it on Local;
+    toast("Pushed " + (ev.name || "") + (ev.host ? " → " + ev.host : "")
+      + " (" + (ev.path || "") + ")", "ok");
     // a finished push lands on its host's tab
-    const key = ev.op === "push" ? (ev.host || null) : "";
-    const tab = key === null ? null : ms.tabs[key];
-    if (tab && tab.entries !== null) scanModelsHost(key, true);
+    const tab = ev.host ? ms.tabs[ev.host] : null;
+    if (tab && tab.entries !== null) scanModelsHost(ev.host, true);
   } else if (ev.kind === "error") {
     j.error = ev.msg || "failed";
-    toast((ev.op === "push" ? "Push" : "Download") + " failed: " + (ev.msg || ""), "err");
+    toast("Push failed: " + (ev.msg || ""), "err");
   }
   if (st.activeTab === "models") renderModelsTab();
 }

@@ -227,7 +227,8 @@ onLMEvent((ev) => {
       onTermEvent(ev);
       break;
     case "models":
-      onModelsEvent(ev);
+      if (ev.op === "download") onDownloaderEvent(ev);
+      else onModelsEvent(ev);
       break;
     case "prompt":
       sshPromptModal(ev.id, ev.text);

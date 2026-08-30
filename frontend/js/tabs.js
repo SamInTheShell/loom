@@ -13,6 +13,7 @@ const TAB_META = {
   servers: { icon: "servers", title: () => "Servers" },
   archive: { icon: "archive", title: () => "Chat Archive" },
   models: { icon: "download", title: () => "Models" },
+  downloader: { icon: "download", title: () => "Downloader" },
   alerts: { icon: "bell", title: () => "Alerts" },
   envs: { icon: "key", title: () => "Environments" },
   chat: {
@@ -124,6 +125,7 @@ function mountTab(tab, panel) {
   else if (tab.type === "servers") mountServersTab(panel);
   else if (tab.type === "archive") mountArchiveTab(panel);
   else if (tab.type === "models") mountModelsTab(panel);
+  else if (tab.type === "downloader") mountDownloaderTab(panel);
   else if (tab.type === "alerts") mountAlertsTab(panel);
   else if (tab.type === "envs") mountEnvsTab(panel);
   else if (tab.type === "chat") mountChatTab(panel, tab.chatId);
@@ -143,6 +145,7 @@ function activateTab(id) {
   const tab = tabById(id);
   if (tab?.type === "servers") refreshServersTab();
   if (tab?.type === "archive") refreshArchiveTab();
+  if (tab?.type === "downloader") refreshDownloaderTab();
   if (tab?.type === "alerts") {
     NotifLog.unseen = 0;
     renderNotifBadge();

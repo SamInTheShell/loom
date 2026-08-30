@@ -497,3 +497,21 @@ function renderMarkdown(text) {
     return esc(text);
   }
 }
+
+/* Full-panel re-renders (replaceChildren) destroy the focused input —
+ * mid-typing, a background event would silently steal the caret. Inputs
+ * that must survive carry data-keep="<key>"; capture before the rebuild,
+ * restore after. */
+function captureFocus(panel) {
+  const a = document.activeElement;
+  if (!a || !panel || !panel.contains(a) || !a.dataset || !a.dataset.keep) return null;
+  return { keep: a.dataset.keep, s: a.selectionStart, e: a.selectionEnd };
+}
+
+function restoreFocus(panel, f) {
+  if (!f || !panel) return;
+  const n = panel.querySelector(`[data-keep="${CSS.escape(f.keep)}"]`);
+  if (!n) return;
+  n.focus();
+  try { n.setSelectionRange(f.s, f.e); } catch (e) { /* not a text input */ }
+}

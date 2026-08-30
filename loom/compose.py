@@ -46,6 +46,7 @@ APP_SCRIPTS = [
     "js/chat.js",
     "js/terminal.js",
     "js/modelstab.js",
+    "js/downloader.js",
     "js/archive.js",
     "js/alerts.js",
     "js/envstab.js",
