@@ -36,10 +36,12 @@ import traceback
 import urllib.error
 from pathlib import Path
 
-from loom import (chats, containers, envs, libconfig, library, search, srv,
-                  sshtunnel, store)
+from loom import (chats, containers, envs, libconfig, library, mcp, search,
+                  srv, sshtunnel, store)
 
-STREAM_IDLE_TIMEOUT = 300     # seconds without a chunk = stall
+# seconds without a chunk = stall. Matches srv.LOAD_TIMEOUT_S: a CPU
+# prefill over a huge context can legitimately emit nothing for minutes.
+STREAM_IDLE_TIMEOUT = 600
 MAX_TOOL_RESULT = 60_000
 
 
@@ -91,15 +93,62 @@ def wait_if_cancelling(chat_id: str, timeout: float = 4.0) -> bool:
     """True once the chat's worker is gone. A stream the user already
     CANCELLED is merely unwinding — briefly wait it out so a send racing
     the cancel succeeds instead of bouncing with 'already streaming'. A
-    live, uncancelled stream returns False immediately."""
+    live, uncancelled stream returns False immediately.
+
+    The abort is RE-FIRED here: stop() may have raced the request setup
+    (its close hit the _PreStream before the abort callable existed),
+    leaving a cancelled worker blocked waiting for first-token headers.
+    Closing whatever is registered NOW is idempotent and frees it."""
     with _lock:
         rec = _running.get(chat_id)
     if rec is None or not rec["thread"].is_alive():
         return True
     if not rec["cancel"].is_set():
         return False
+    with _lock:
+        resp = _streams.get(chat_id)
+    if resp is not None:
+        try:
+            resp.close()
+        except Exception:
+            pass
     rec["thread"].join(timeout)
     return not rec["thread"].is_alive()
+
+
+def join_worker(chat_id: str, timeout: float = 6.0) -> bool:
+    """Wait for the chat's worker thread to end (True when gone). A
+    delete must not race the dying worker's FINAL save — that would
+    resurrect the file the delete just removed."""
+    with _lock:
+        rec = _running.get(chat_id)
+    if rec is None:
+        return True
+    rec["thread"].join(timeout)
+    return not rec["thread"].is_alive()
+
+
+def stop_chats_on_models(root: Path, cfg: dict, names: set[str]) -> list[str]:
+    """Cancel every RUNNING chat whose resolved model is in `names` —
+    called on every server stop/eject path, so a stream about to lose its
+    server ends as a clean cancel instead of a socket error. Resolution
+    mirrors _server_for: the chat's own model, else the config default,
+    else the first configured model."""
+    models = (cfg or {}).get("models") or []
+    default = str(((cfg or {}).get("chat") or {}).get("model") or "")
+    stopped = []
+    for cid in running_chats():
+        try:
+            doc = chats.load_chat(root, cid)
+        except chats.ChatError:
+            continue
+        name = str(doc.get("model") or "") or default
+        if not name and models:
+            name = models[0]["name"]
+        if name in names:
+            stop(cid)
+            stopped.append(cid)
+    return stopped
 
 
 def stop(chat_id: str) -> bool:
@@ -179,13 +228,32 @@ READ_GATE_CHARS = 100_000
 READ_SLICE_MAX_LINES = 2000
 
 
+def perm_for(cfg: dict | None, name: str, mode: str = "") -> str:
+    """The effective level for one tool. mcp_* tools resolve in two
+    layers: an EXPLICIT entry in the active permission mode (loom.yaml)
+    wins; otherwise the default chosen in the MCP Servers tab applies
+    (libconfig's blanket unknown-tool 'ask' never sees mcp_* names)."""
+    if name.startswith("mcp_"):
+        modes = (cfg or {}).get("permissionModes") or {}
+        m = mode or ((cfg or {}).get("chat") or {}).get("permission_mode") \
+            or libconfig.DEFAULT_MODE
+        tools = modes.get(m)   # an empty mode is still THAT mode
+        if not isinstance(tools, dict):
+            tools = modes.get(libconfig.DEFAULT_MODE) or {}
+        if name in tools:
+            return tools[name]
+        return mcp.tool_perm(name)
+    return libconfig.permission_for(cfg, name, mode) if cfg else "allow"
+
+
 def tool_specs(cfg: dict | None = None, mode: str = "") -> list[dict]:
-    """The tools offered this turn. A tool at level `disabled` in the
-    active permission mode is not offered at all. Every chat has the
+    """The tools offered this turn — built-ins plus every tool of every
+    RUNNING MCP server. A tool at level `disabled` in the active
+    permission mode is not offered at all. Every chat has the
     write tools and shell: /artifacts is always writable, and view-mode
     mounts are enforced read-only by the container itself."""
     def level(name):
-        return libconfig.permission_for(cfg, name, mode) if cfg else "allow"
+        return perm_for(cfg, name, mode)
 
     specs: list[dict] = []
 
@@ -257,6 +325,9 @@ def tool_specs(cfg: dict | None = None, mode: str = "") -> list[dict]:
          "timeout": {"type": "integer",
                      "description": "seconds, default 300"}},
         ["command"])
+    for spec in mcp.live_tool_specs():
+        if level(spec["function"]["name"]) != "disabled":
+            specs.append(spec)
     return specs
 
 
@@ -334,6 +405,12 @@ def _search_scopes(root: Path, chat: dict, path: str) -> list[tuple[str, Path]]:
 
 def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
                cancel: threading.Event, on_output=None) -> str:
+    if name.startswith("mcp_"):
+        try:
+            return mcp.call_full(name, args)
+        except mcp.McpError as e:
+            raise chats.ChatError(str(e))
+
     if name in ("grep", "find_files"):
         query = str(args.get("query") or "").strip()
         if not query:
@@ -1094,17 +1171,17 @@ def _save_from_loop(root: Path, chat: dict) -> None:
 
 
 def _refresh_user_fields(root: Path, chat: dict) -> None:
-    """Pull the user-editable knobs (permission mode, network, folders,
-    container, env, title) from disk into the loop's in-memory doc. The
-    user flips these MID-CONVERSATION; the loop must both honor the
-    change on its very next decision and not clobber it with a stale
+    """Pull the user-editable knobs (model, permission mode, network,
+    folders, container, env, title) from disk into the loop's in-memory
+    doc. The user flips these MID-CONVERSATION; the loop must both honor
+    the change on its very next decision and not clobber it with a stale
     copy on its next save."""
     try:
         disk = chats.load_chat(root, str(chat["id"]))
     except chats.ChatError:
         return
-    for k in ("permMode", "network", "folders", "container", "env",
-              "title", "archived"):
+    for k in ("model", "permMode", "network", "folders", "container",
+              "env", "title", "archived"):
         if k in disk:
             chat[k] = disk[k]
         else:
@@ -1269,7 +1346,7 @@ def _run_tool(root: Path, cfg: dict, chat: dict, call: dict,
             args = {}
     except ValueError:
         args = {"_raw": call["args"]}
-    perm = libconfig.permission_for(cfg, name, str(chat.get("permMode") or ""))
+    perm = perm_for(cfg, name, str(chat.get("permMode") or ""))
     ev("tool_call", callId=call_id, tool=name, args=args, perm=perm)
 
     result_ok = True

@@ -158,7 +158,7 @@ function mountChatTab(panel, chatId) {
 
   const modelBtn = el("button", {
     class: "compose-model", "data-role": "model",
-    title: "Model for this chat — click to pick, start or stop  (Ctrl+.)",
+    title: "Model for this chat — picking a stopped model starts it  (Ctrl+.)",
   });
   setHotkey(modelBtn, "Ctrl+.");
   modelBtn.addEventListener("click", () => modelMenu(modelBtn, chatId));
@@ -632,7 +632,7 @@ function refreshChatModelSelectors() {
   if (window._modelPopupRefresh) window._modelPopupRefresh();
 }
 
-/* ---------- the model popup: filter, refresh, pick, start/stop ----------
+/* ---------- the model popup: filter, refresh, pick (auto-start), eject ----------
  * Every row also carries a brain button → that model's reasoning submenu:
  * first HOW to configure it (default / reasoning_effort request field /
  * enable_thinking template kwarg / think prompt switch), then the level
@@ -726,16 +726,21 @@ function modelMenu(anchor, chatId) {
       const state = st.servers[mo.id]?.state || "stopped";
       const busy = ["starting", "loading", "stopping"].includes(state);
       const up = ["running", "starting", "loading"].includes(state);
-      const act = el("button", {
-        class: "btn btn-sm" + (up ? " btn-danger" : ""),
-        text: busy ? state + "…" : up ? "Stop" : "Start",
-        disabled: busy ? "" : null,
-        title: up ? "Stop this server" : "Start this server",
-      });
-      act.addEventListener("click", (e) => {
-        e.stopPropagation();
-        Api.call(up ? "server_stop" : "server_start", mo.id);
-      });
+      // no Start button: PICKING a stopped model starts it. A running
+      // model gets an eject — unload it without picking anything else.
+      let act = null;
+      if (up || busy) {
+        act = el("button", {
+          class: "btn btn-sm" + (up ? " btn-danger" : ""),
+          text: busy ? state + "…" : "⏏ Eject",
+          disabled: busy ? "" : null,
+          title: "Eject — stop this server and free its memory",
+        });
+        act.addEventListener("click", (e) => {
+          e.stopPropagation();
+          Api.call("server_stop", mo.id);
+        });
+      }
       const pref = reasonMap[mo.id];
       const brain = el("button", {
         class: "iconbtn brain" + (pref ? " on" : ""),
@@ -768,6 +773,12 @@ function modelMenu(anchor, chatId) {
           cs2.chat.model = mo.name;
           Api.call("chat_set_model", chatId, mo.name)
             .then(() => refreshChatSilently(chatId));   // nCtx changed
+          // picking a model that isn't running means the user wants it
+          // running — start it (the host's limit ejects others first)
+          if (!up && !busy) {
+            Api.call("server_start", mo.id);
+            toast("Starting " + mo.name + "…", "ok");
+          }
           renderModelButton(chatId);
           close();
         },
@@ -1775,6 +1786,10 @@ function renderQueue(chatId) {
   const thread = panel.querySelector('[data-role="thread"]');
   const wasBottom = thread && thread.clientHeight && atBottom(thread);
   host.replaceChildren();
+  // "Send now" is only honest when the model can actually take the
+  // message — while it's stopped/starting/loading the queue auto-flushes
+  // on ready, so the button would be a lie
+  const canSendNow = modelStateByName(chatModelName(cs)) === "running";
   (cs.queue || []).forEach((q, i) => {
     host.append(el("div", { class: "queue-row" },
       el("span", { class: "q-badge", text: "queued" }),
@@ -1788,7 +1803,7 @@ function renderQueue(chatId) {
         title: "Return this message to the input for editing",
         onclick: () => queueToInput(chatId, i),
       }),
-      el("button", {
+      canSendNow ? el("button", {
         class: "btn btn-sm", text: "Send now",
         title: "Move to the front and send immediately",
         onclick: () => {
@@ -1798,7 +1813,7 @@ function renderQueue(chatId) {
           renderQueue(chatId);
           attemptFlush(chatId, true);
         },
-      }),
+      }) : null,
       el("button", {
         class: "btn btn-sm", text: "×", title: "Cancel this message",
         onclick: () => { cs.queue.splice(i, 1); renderQueue(chatId); },
@@ -1829,6 +1844,9 @@ function queueToInput(chatId, i) {
   input.setSelectionRange(it.text.length, it.text.length);
 }
 
+/* `item` STAYS at the queue head while the send is in flight — it is
+ * only removed on success. A bounced send (racing a still-unwinding
+ * cancelled stream) therefore never makes the queued row flicker. */
 async function dispatchMessage(chatId, item) {
   const cs = chatState(chatId);
   cs._dispatching = true;
@@ -1836,11 +1854,10 @@ async function dispatchMessage(chatId, item) {
   const res = await Api.call("chat_send", chatId, item.text, item.images || []);
   cs._dispatching = false;
   if (!res.ok) {
-    cs.queue.unshift(item);   // nothing is ever lost — back to the head
-    renderQueue(chatId);
-    // losing a race with a still-unwinding stream is not an error — and
-    // the done event may ALREADY have fired, so never depend on it:
-    // retry shortly until the worker is really gone
+    // the item never left the queue — nothing is ever lost. Losing a
+    // race with a still-unwinding stream is not an error — and the done
+    // event may ALREADY have fired, so never depend on it: retry
+    // shortly until the worker is really gone
     if (/already streaming/i.test(res.error || "")) {
       setTimeout(() => attemptFlush(chatId, false), 800);
     } else {
@@ -1848,6 +1865,9 @@ async function dispatchMessage(chatId, item) {
     }
     return;
   }
+  const qi = cs.queue.indexOf(item);
+  if (qi >= 0) cs.queue.splice(qi, 1);
+  renderQueue(chatId);
   cs.chat.messages.push(res.data.message);
   cs.running = true;
   cs.respT0 = performance.now();
@@ -1873,20 +1893,18 @@ function attemptFlush(chatId, interactive) {
   const state = modelStateByName(name);
   if (state && state !== "running") {
     if (state === "starting" || state === "loading") return;  // flush on ready
+    // sending to a stopped model means the user wants it running — start
+    // it without asking; queued messages send once it's ready
     const m = (st.config?.models || []).find((x) => x.name === name);
-    confirmModal("Model not running",
-      name + " isn't running. Start the server? Queued messages send as "
-      + "soon as the model is ready.",
-      "Start model", () => {
-        Api.call("server_start", m.id);
-        toast("Starting " + name + "…", "ok");
-        renderModelButton(chatId);
-      }, false, "model-start:" + chatId);   // singleton — Enter spam can't stack it
+    if (m) {
+      Api.call("server_start", m.id);
+      toast("Starting " + name + " — queued messages send when it's ready.",
+        "ok");
+      renderModelButton(chatId);
+    }
     return;
   }
-  const item = cs.queue.shift();
-  renderQueue(chatId);
-  dispatchMessage(chatId, item);
+  dispatchMessage(chatId, cs.queue[0]);   // peek — removed on success
 }
 
 /* continue/retry still needs the start gate (no queue item involved) */
@@ -1902,15 +1920,12 @@ function ensureModelRunning(chatId, flag) {
     return false;
   }
   const m = (st.config?.models || []).find((x) => x.name === name);
-  confirmModal("Model not running",
-    name + " isn't running. Start the server now? The generation resumes "
-    + "as soon as the model is ready.",
-    "Start model", () => {
-      cs[flag] = true;
-      Api.call("server_start", m.id);
-      toast("Starting " + name + "…", "ok");
-      renderModelButton(chatId);
-    }, false, "model-start:" + chatId);
+  if (m) {
+    cs[flag] = true;
+    Api.call("server_start", m.id);
+    toast("Starting " + name + " — resumes when it's ready.", "ok");
+    renderModelButton(chatId);
+  }
   return false;
 }
 
@@ -1921,6 +1936,7 @@ function chatsOnSrvEvent() {
     const cs = st.chats[tab.chatId];
     if (!cs) continue;
     const state = modelStateByName(chatModelName(cs));
+    if (cs.queue?.length) renderQueue(tab.chatId);   // Send-now visibility
     if (state === "running") {
       if (cs.autoContinue) {
         cs.autoContinue = false;

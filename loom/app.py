@@ -28,8 +28,9 @@ from pathlib import Path
 
 import webview
 
-from loom import (askpass, chat, chats, compose, containers, envs, libconfig,
-                  library, models, search, srv, store, terminals)
+from loom import (apiserver, askpass, chat, chats, compose, containers, envs,
+                  libconfig, library, mcp, models, search, srv, store,
+                  terminals)
 from loom.compose import OUTPUT as FRONTEND_INDEX
 
 DEFAULT_DEVTOOLS_PANEL = "console"
@@ -323,12 +324,14 @@ def setup_tray(window, api: "JsApi", bus: "Bus"):
 
     def stop_all():
         def work():
-            for rec in srv.snapshot():
-                if rec.get("state") in ("running", "loading", "starting"):
-                    try:
-                        srv.stop(str(rec.get("host") or ""), str(rec["id"]))
-                    except Exception:
-                        pass
+            live = [rec for rec in srv.snapshot()
+                    if rec.get("state") in ("running", "loading", "starting")]
+            api._cancel_chats_for({r.get("name") for r in live})
+            for rec in live:
+                try:
+                    srv.stop(str(rec.get("host") or ""), str(rec["id"]))
+                except Exception:
+                    pass
         threading.Thread(target=work, daemon=True, name="tray-stopall").start()
 
     def rebuild():
@@ -360,6 +363,26 @@ def setup_tray(window, api: "JsApi", bus: "Bus"):
         if srv.running_count():
             menu.addAction(f"Stop all servers ({srv.running_count()})"
                            ).triggered.connect(lambda _=False: stop_all())
+        menu.addSeparator()
+        # the OpenAI-compatible API — toggleable from the tray, and always
+        # OFF at launch (the on/off state is never persisted)
+        ast = apiserver.status()
+        act = menu.addAction(
+            f"API server — on ({ast['interface']}:{ast['port']})"
+            if ast["running"] else "API server — off")
+        act.setCheckable(True)
+        act.setChecked(ast["running"])
+        act.setEnabled(api._root is not None)
+
+        def toggle_api(_=False, want=not ast["running"]):
+            def work():
+                got = api.api_server_toggle(want)
+                if not got.get("ok"):
+                    bus.push({"type": "toast", "level": "err",
+                              "msg": got.get("error") or "API toggle failed"})
+            threading.Thread(target=work, daemon=True,
+                             name="tray-api").start()
+        act.triggered.connect(toggle_api)
         menu.addSeparator()
         # quit runs on a WORKER thread: the gate may surface a confirm in
         # the window — never block the Qt main loop
@@ -426,7 +449,8 @@ def _api_call(fn):
             return {"ok": True, "data": out}
         except (srv.SrvError, library.LibraryError, libconfig.ConfigError,
                 chats.ChatError, containers.ContainerError,
-                terminals.TermError, models.ModelsError) as e:
+                terminals.TermError, models.ModelsError, mcp.McpError,
+                apiserver.ApiError) as e:
             return {"ok": False, "error": str(e)}
         except Exception as e:
             traceback.print_exc()
@@ -671,6 +695,12 @@ class JsApi:
             models = cfg.get("models") or []
             threading.Thread(target=lambda: srv.refresh(models),
                              daemon=True, name="srv-refresh").start()
+        # MCP: servers running when the library last closed come back up
+        mcp.set_library(str(root), self._bus.push)
+        if isinstance(cfg, dict) and not cfg.get("error"):
+            mcps = cfg.get("mcpServers") or []
+            threading.Thread(target=lambda: mcp.autostart(mcps),
+                             daemon=True, name="mcp-autostart").start()
         chats.purge_empty_archived(root)   # empty chats are never worth keeping
         open_chats = [c for c in chats.list_chats(root) if not c["archived"]]
         sess = store.session_get(str(root))
@@ -762,13 +792,13 @@ class JsApi:
                 row["detail"] = st.get("detail") or ""
                 row["nCtx"] = st.get("nCtx")
                 try:
-                    row["command"] = "llama-server --host <socket> " + " ".join(
-                        srv.compose_args(m))
+                    row["command"] = srv.spawn_preview(m)
                 except srv.SrvError as e:
                     row["command"] = ""
                     row["configError"] = str(e)
                 models.append(row)
-            return {"models": models, "config": cfg}
+            return {"models": models, "config": cfg,
+                    "limits": store.server_limits()}
         return _api_call(do)()
 
     def _model_rec(self, mid: str) -> dict:
@@ -778,6 +808,23 @@ class JsApi:
             raise srv.SrvError("no such model in loom.yaml")
         return rec
 
+    def _cancel_chats_for(self, names: set) -> None:
+        """A server in `names` is about to stop — cancel the chats
+        mid-generation on it (clean cancel, not a socket error)."""
+        root = self._root
+        names = {str(n) for n in names if n}
+        if root is None or not names:
+            return
+        try:
+            cfg = libconfig.load(root)
+        except libconfig.ConfigError:
+            cfg = {}
+        got = chat.stop_chats_on_models(root, cfg, names)
+        if got:
+            self._toast("warn",
+                        f"Cancelled {len(got)} generation(s) — "
+                        + ", ".join(sorted(names)) + " stopped")
+
     def server_start(self, mid):
         def do():
             rec = self._model_rec(str(mid))
@@ -785,9 +832,16 @@ class JsApi:
                 return {"already": True}
 
             def work():
+                note = lambda m: self._bus.push(  # noqa: E731
+                    {"type": "note", "id": rec["id"], "msg": m})
                 try:
-                    srv.start(rec, notice=lambda m: self._bus.push(
-                        {"type": "note", "id": rec["id"], "msg": m}))
+                    # per-host concurrency: make room BEFORE the start
+                    srv.make_room(
+                        rec["host"], rec["id"],
+                        store.server_limit(rec["host"]), note,
+                        on_stop=lambda r: self._cancel_chats_for(
+                            {r.get("name")}))
+                    srv.start(rec, notice=note)
                 except srv.SrvError as e:
                     self._toast("err", str(e))
                 except Exception as e:
@@ -798,12 +852,25 @@ class JsApi:
             return {}
         return _api_call(do)()
 
+    def server_limits(self):
+        return _api_call(lambda: {"limits": store.server_limits()})()
+
+    def server_limit_set(self, host, n):
+        def do():
+            try:
+                return {"limits": store.set_server_limit(str(host or ""),
+                                                         int(n))}
+            except (TypeError, ValueError) as e:
+                raise srv.SrvError(str(e))
+        return _api_call(do)()
+
     def server_stop(self, mid):
         def do():
             rec = self._model_rec(str(mid))
 
             def work():
                 try:
+                    self._cancel_chats_for({rec["name"]})
                     srv.stop(rec["host"], rec["id"])
                 except srv.SrvError as e:
                     self._toast("err", str(e))
@@ -817,10 +884,17 @@ class JsApi:
             rec = self._model_rec(str(mid))
 
             def work():
+                note = lambda m: self._bus.push(  # noqa: E731
+                    {"type": "note", "id": rec["id"], "msg": m})
                 try:
+                    self._cancel_chats_for({rec["name"]})
                     srv.stop(rec["host"], rec["id"])
-                    srv.start(rec, notice=lambda m: self._bus.push(
-                        {"type": "note", "id": rec["id"], "msg": m}))
+                    srv.make_room(
+                        rec["host"], rec["id"],
+                        store.server_limit(rec["host"]), note,
+                        on_stop=lambda r: self._cancel_chats_for(
+                            {r.get("name")}))
+                    srv.start(rec, notice=note)
                 except srv.SrvError as e:
                     self._toast("err", str(e))
                 except Exception as e:
@@ -1029,6 +1103,7 @@ class JsApi:
                     return {"ok": False, "error": "inference is running",
                             "needsConfirm": True}
                 chat.stop(cid)
+                chat.join_worker(cid)
             root = self._need_root()
             c = chats.load_chat(root, cid)
             if not c.get("messages"):
@@ -1043,6 +1118,8 @@ class JsApi:
             cid = str(chat_id)
             if chat.is_running(cid):
                 chat.stop(cid)
+                chat.join_worker(cid)   # its final save must not
+                                        # resurrect the file we remove
             chats.delete_chat(self._need_root(), cid)
             return {}
         return _api_call(do)()
@@ -1591,6 +1668,9 @@ class JsApi:
             library.release_lock(self._root)
             self._root = None
             _set_tray_tooltip("Loom")
+            apiserver.stop()   # the API serves THIS library's models
+            self._bus.push({"type": "apisrv", **apiserver.status()})
+            mcp.shutdown()     # and the MCP servers are its config too
             for cid in chat.running_chats():
                 chat.stop(cid)
             # terminals run the library's containers — they close with it
@@ -1611,6 +1691,148 @@ class JsApi:
                 threading.Thread(target=work, daemon=True,
                                  name="lib-close-stop").start()
             return {"stopping": len(stop_list)}
+        return _api_call(do)()
+
+    # ---------------- MCP servers ----------------
+    def _mcp_cfg(self) -> list[dict]:
+        cfg = libconfig.load(self._need_root())
+        return cfg.get("mcpServers") or []
+
+    def mcp_status(self):
+        return _api_call(lambda: {"servers": mcp.status(self._mcp_cfg())})()
+
+    def mcp_toggle(self, name, on):
+        """Enable/disable one MCP server. Enabled == running, and the set
+        persists — enabled servers autostart when the library reopens."""
+        def do():
+            rec = next((s for s in self._mcp_cfg()
+                        if s["name"] == str(name)), None)
+            if rec is None:
+                raise mcp.McpError(f"no mcp server named {name!r} in "
+                                   "loom.yaml")
+            if on:
+                mcp.start_server(rec)
+            else:
+                mcp.stop_server(rec["name"])
+            store.set_mcp_running(str(self._need_root()), rec["name"],
+                                  bool(on))
+            return {"servers": mcp.status(self._mcp_cfg())}
+        return _api_call(do)()
+
+    def mcp_refresh(self, name):
+        """Re-query one running server's tool list."""
+        def do():
+            n = mcp.refresh_tools(str(name))
+            return {"tools": n, "servers": mcp.status(self._mcp_cfg())}
+        return _api_call(do)()
+
+    def mcp_tool_perm_set(self, tool, level):
+        """The tab's per-tool DEFAULT permission (loom.yaml per-mode
+        entries still win)."""
+        def do():
+            try:
+                store.set_mcp_tool_perm(str(self._need_root()), str(tool),
+                                        str(level or ""))
+            except ValueError as e:
+                raise mcp.McpError(str(e))
+            return {"servers": mcp.status(self._mcp_cfg())}
+        return _api_call(do)()
+
+    def mcp_add(self, name, command, env):
+        """The wizard's final step: inject one `mcp-servers:` entry into
+        loom.yaml non-destructively, validating the result first."""
+        def do():
+            import yaml as _yaml
+            root = self._need_root()
+            p = library.config_path(root)
+            if p is None:
+                raise libconfig.ConfigError("the library has no loom.yaml")
+            env_map = {str(k): str(v) for k, v in env.items()} \
+                if isinstance(env, dict) else {}
+            new_text = mcp.inject_server(p.read_text(encoding="utf-8"),
+                                         str(name), str(command), env_map)
+            try:
+                raw = _yaml.safe_load(new_text) or {}
+                libconfig._mcp_servers(raw.get("mcp-servers"))
+            except _yaml.YAMLError as e:
+                raise libconfig.ConfigError(
+                    f"the result would not parse — nothing was written: {e}")
+            library.write_file(root, p.name, new_text)
+            self._bus.push({"type": "config", "config": self._config_or_error()})
+            return {"servers": mcp.status(self._mcp_cfg())}
+        return _api_call(do)()
+
+    # ---------------- the OpenAI-compatible API server ----------------
+    def _api_models(self) -> list[dict]:
+        """Fresh model list for the API's per-request routing."""
+        try:
+            if self._root is None:
+                return []
+            return libconfig.load(self._root).get("models") or []
+        except libconfig.ConfigError:
+            return []
+
+    def api_server_status(self):
+        def do():
+            cfg = dict(libconfig.DEFAULT_API)
+            try:
+                if self._root is not None:
+                    cfg = libconfig.load(self._root).get("api") or cfg
+            except libconfig.ConfigError:
+                pass
+            return {"api": {**apiserver.status(), "cfg": cfg}}
+        return _api_call(do)()
+
+    def api_server_toggle(self, on):
+        """Turn the API on/off. The state is process-local by design —
+        every Loom launch starts with the API OFF."""
+        def do():
+            if not on:
+                apiserver.stop()
+            else:
+                cfg = libconfig.load(self._need_root()).get("api") \
+                    or libconfig.DEFAULT_API
+                try:
+                    apiserver.start(cfg["interface"], cfg["port"],
+                                    self._api_models)
+                except apiserver.ApiError as e:
+                    raise libconfig.ConfigError(str(e))
+            got = apiserver.status()
+            self._bus.push({"type": "apisrv", **got})
+            return {"api": got}
+        return _api_call(do)()
+
+    def api_server_config_set(self, interface, port):
+        """Persist interface + port into loom.yaml's `api:` section (the
+        on/off toggle is never persisted). A running API restarts on the
+        new address."""
+        def do():
+            import yaml as _yaml
+            root = self._need_root()
+            p = library.config_path(root)
+            if p is None:
+                raise libconfig.ConfigError("the library has no loom.yaml")
+            try:
+                new_text = apiserver.inject_api_config(
+                    p.read_text(encoding="utf-8"),
+                    str(interface or ""), int(port))
+            except (apiserver.ApiError, TypeError, ValueError) as e:
+                raise libconfig.ConfigError(str(e))
+            try:
+                libconfig._api((_yaml.safe_load(new_text) or {}).get("api"))
+            except _yaml.YAMLError as e:
+                raise libconfig.ConfigError(
+                    f"the result would not parse — nothing was written: {e}")
+            library.write_file(root, p.name, new_text)
+            self._bus.push({"type": "config", "config": self._config_or_error()})
+            if apiserver.is_running():
+                apiserver.stop()
+                apiserver.start(str(interface or ""), int(port),
+                                self._api_models)
+                self._bus.push({"type": "apisrv", **apiserver.status()})
+            return {"api": {**apiserver.status(),
+                            "cfg": {"interface": str(interface or ""),
+                                    "port": int(port)}}}
         return _api_call(do)()
 
     # ---------------- quit gate ----------------
@@ -1778,6 +2000,7 @@ def main():
     compose.compose()   # render templates → frontend/index.html (~1 ms)
 
     atexit.register(srv.shutdown)
+    atexit.register(mcp.shutdown)   # child processes must not outlive us
 
     bus = Bus()
     srv.on_status(lambda snap: bus.push({"type": "srv", **snap}))
@@ -1891,9 +2114,17 @@ def main():
         traceback.print_exc()
         code = 1
     finally:
+        # os._exit below SKIPS atexit handlers — every cleanup that must
+        # happen on a normal quit has to run right here, explicitly
         broker.stop()
         terminals.shutdown()
         srv.shutdown()   # nothing keeps running after the app exits
+        mcp.shutdown()   # MCP children are session leaders — reap them
+        try:
+            library.release_lock(api._root)
+        except Exception:
+            pass
+        _cleanup_pidfile()
         # the window is gone and cleanup ran — nothing (non-daemon bridge
         # threads included) may keep the process alive in the terminal
         os._exit(code)

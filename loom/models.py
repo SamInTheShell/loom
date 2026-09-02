@@ -55,11 +55,14 @@ SCAN_DIRS = (
     "~/Downloads",
 )
 
+# find -L: the Hugging Face hub cache (~/.cache/huggingface/hub) stores
+# bytes as extensionless blobs and exposes *.gguf only as SYMLINKS under
+# snapshots/ — dereferencing makes those count as files (%s = real size)
 _SCAN_SCRIPT = (
     "set -u\n"
     + "\n".join(
         f'[ -d {d.replace("~", "$HOME", 1)} ] && '
-        f'find {d.replace("~", "$HOME", 1)} -type f -name "*.gguf" '
+        f'find -L {d.replace("~", "$HOME", 1)} -type f -name "*.gguf" '
         '-printf "%s\\t%p\\n" 2>/dev/null'
         for d in SCAN_DIRS)
     + "\ntrue\n")
@@ -302,6 +305,9 @@ def entry_lines(e: dict) -> list[str]:
     binary = str(e.get("binary") or "").strip()
     if binary and binary != "llama-server":
         lines.append(f"  binary: {_yq(binary)}")
+    container = str(e.get("container") or "").strip()
+    if container:
+        lines.append(f"  container: {_yq(container)}")
     flags = e.get("flags")
     if isinstance(flags, str):
         flags = [ln for ln in flags.splitlines() if ln.strip()]

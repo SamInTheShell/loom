@@ -13,6 +13,14 @@ stay stable across app restarts and yaml edits that don't rename.
       model: ~/.lmstudio/models/.../Qwen3.8-27B-Q4_K_M.gguf
       mmproj: ~/.lmstudio/models/.../mmproj-Qwen3.8-27B-BF16.gguf
       binary: llama-server   # optional
+      # OR run llama-server inside a container instead of a host binary:
+      # an engine `run` command; loom appends `--host <socket>` plus the
+      # composed args after it, and bind-mounts the socket dir and the
+      # model's directories at identical paths inside. The image's
+      # entrypoint must be llama-server. No -t/-it (detached, no TTY),
+      # no port mapping needed (unix socket, like every managed server).
+      container: >-
+        podman run --rm --device /dev/dri llama-server-vulkan:latest
       flags: |
         -ngl 99
         -fa on
@@ -106,6 +114,9 @@ def load(root: Path) -> dict:
             raw.get("permission-modes", raw.get("permission_modes")),
             raw.get("permissions")),
         "containers": _containers(raw.get("containers")),
+        "api": _api(raw.get("api")),
+        "mcpServers": _mcp_servers(raw.get("mcp-servers",
+                                           raw.get("mcp_servers"))),
     }
     if out["chat"]["permission_mode"] not in out["permissionModes"]:
         raise ConfigError(
@@ -148,6 +159,8 @@ def _models(sec) -> list[dict]:
             "ctx": ctx,
             "flags": str(m.get("flags") or ""),
             "serverBin": str(m.get("binary") or "").strip(),
+            # a container run command replaces the host binary entirely
+            "container": str(m.get("container") or "").strip(),
         })
     return out
 
@@ -234,6 +247,65 @@ def _containers(sec) -> dict:
     return {"engine": engine,
             "default": str(sec.get("default") or DEFAULT_CONTAINERS["default"]).strip(),
             "definitions": defs}
+
+
+DEFAULT_API = {"interface": "127.0.0.1", "port": 1234}
+
+
+def _api(sec) -> dict:
+    """`api:` — where the OpenAI-compatible API binds when toggled on.
+    Only interface + port persist here; on/off is process state (always
+    off at launch)."""
+    sec = sec if isinstance(sec, dict) else {}
+    iface = str(sec.get("interface")
+                or DEFAULT_API["interface"]).strip()
+    try:
+        port = int(sec.get("port", DEFAULT_API["port"]))
+    except (TypeError, ValueError):
+        raise ConfigError("api.port must be a number")
+    if not (1 <= port <= 65535):
+        raise ConfigError("api.port must be 1-65535")
+    return {"interface": iface, "port": port}
+
+
+def _mcp_servers(sec) -> list[dict]:
+    """`mcp-servers:` — stdio MCP servers the chats may call.
+
+        mcp-servers:
+        - name: files
+          command: npx -y @modelcontextprotocol/server-filesystem /tmp
+          env:
+            FOO: bar
+
+    Tool names surface to the model (and to permission-modes.<mode>.tools)
+    as mcp_<server>_<tool>."""
+    if sec is None:
+        return []
+    if not isinstance(sec, list):
+        raise ConfigError("mcp-servers must be a list")
+    out, names = [], set()
+    for i, s in enumerate(sec):
+        if not isinstance(s, dict):
+            raise ConfigError(f"mcp-servers[{i}] must be a mapping")
+        name = str(s.get("name") or "").strip()
+        if not name:
+            raise ConfigError(f"mcp-servers[{i}] has no name")
+        if not re.match(r"^[\w-]+$", name):
+            raise ConfigError(
+                f"mcp-servers[{i}]: name {name!r} — letters, digits, - and _ "
+                "only (it becomes part of tool function names)")
+        if name in names:
+            raise ConfigError(f"two mcp servers share the name {name!r}")
+        names.add(name)
+        command = str(s.get("command") or "").strip()
+        if not command:
+            raise ConfigError(f"mcp server {name!r} has no `command`")
+        env = s.get("env")
+        if env is not None and not isinstance(env, dict):
+            raise ConfigError(f"mcp server {name!r}: env must be a mapping")
+        out.append({"name": name, "command": command,
+                    "env": {str(k): str(v) for k, v in (env or {}).items()}})
+    return out
 
 
 def permission_for(cfg: dict, tool: str, mode: str = "") -> str:

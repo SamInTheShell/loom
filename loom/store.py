@@ -73,6 +73,18 @@ DEFAULT_STATE = {
     # per-library pinned model ids (shown first in pickers), keyed by
     # resolved library path: [model id, ...] in pin order
     "modelPins": {},
+    # per-ssh-host llama-server concurrency: {host: n} — how many servers
+    # may run at once on that host ("" = this machine). Default 1 (model
+    # RAM use is unmeasured — one at a time is the only safe default);
+    # -1 = no limit. Machine state, not library config: the limit models
+    # the host's RAM, which travels with the machine, not the library.
+    "serverLimits": {},
+    # per-library MCP state, keyed by resolved library path:
+    #   mcpRunning:   [server names] — running at last close → autostart
+    #   mcpToolPerms: {mcp_<server>_<tool>: level} — the tab-chosen
+    #                 DEFAULT permission (loom.yaml per-mode entries win)
+    "mcpRunning": {},
+    "mcpToolPerms": {},
 }
 
 
@@ -95,6 +107,12 @@ def load_state() -> dict:
         merged["reasoning"] = {}
     if not isinstance(merged.get("modelPins"), dict):
         merged["modelPins"] = {}
+    if not isinstance(merged.get("serverLimits"), dict):
+        merged["serverLimits"] = {}
+    if not isinstance(merged.get("mcpRunning"), dict):
+        merged["mcpRunning"] = {}
+    if not isinstance(merged.get("mcpToolPerms"), dict):
+        merged["mcpToolPerms"] = {}
     return merged
 
 
@@ -304,4 +322,83 @@ def clear_recents() -> None:
     user's durable 'never show this' decision, not a cache."""
     def fn(st):
         st["recents"] = [r for r in st["recents"] if r.get("omitted")]
+    mutate_state(fn)
+
+
+# ---------------------------------------------------------------------------
+# per-host llama-server concurrency limits
+
+SERVER_LIMIT_MAX = 16
+
+
+def server_limits() -> dict:
+    got = load_state().get("serverLimits")
+    return {str(k): v for k, v in got.items()} if isinstance(got, dict) else {}
+
+
+def server_limit(host: str) -> int:
+    """How many llama-servers may run at once on `host` ('' = local).
+    Default 1; -1 means no limit."""
+    try:
+        n = int(server_limits().get(str(host or ""), 1))
+    except (TypeError, ValueError):
+        return 1
+    return n if n == -1 or 1 <= n <= SERVER_LIMIT_MAX else 1
+
+
+def set_server_limit(host: str, n: int) -> dict:
+    """Persist a host's limit. Returns the full limits map."""
+    n = int(n)
+    if n != -1 and not (1 <= n <= SERVER_LIMIT_MAX):
+        raise ValueError(
+            f"the limit must be 1-{SERVER_LIMIT_MAX}, or -1 for no limit")
+
+    def fn(st):
+        cur = st.get("serverLimits")
+        cur = cur if isinstance(cur, dict) else {}
+        cur[str(host or "")] = n
+        st["serverLimits"] = cur
+    return mutate_state(fn).get("serverLimits", {})
+
+
+# ---------------------------------------------------------------------------
+# MCP: which servers autostart, and the tab-chosen default tool permissions
+
+def mcp_running(path: str) -> list[str]:
+    got = load_state()["mcpRunning"].get(str(path))
+    return [str(n) for n in got] if isinstance(got, list) else []
+
+
+def set_mcp_running(path: str, name: str, on: bool) -> list[str]:
+    def fn(st):
+        lib = st.setdefault("mcpRunning", {})
+        cur = lib.get(str(path))
+        cur = [str(n) for n in cur] if isinstance(cur, list) else []
+        if on and str(name) not in cur:
+            cur.append(str(name))
+        if not on:
+            cur = [n for n in cur if n != str(name)]
+        lib[str(path)] = cur
+    return mutate_state(fn)["mcpRunning"].get(str(path), [])
+
+
+def mcp_tool_perms(path: str) -> dict:
+    got = load_state()["mcpToolPerms"].get(str(path))
+    return {str(k): str(v) for k, v in got.items()} \
+        if isinstance(got, dict) else {}
+
+
+def set_mcp_tool_perm(path: str, tool: str, level: str) -> None:
+    """Set one tool's default level; '' clears back to ask."""
+    if level not in ("allow", "ask", "deny", "disabled", ""):
+        raise ValueError(f"not a permission level: {level!r}")
+
+    def fn(st):
+        lib = st.setdefault("mcpToolPerms", {}).setdefault(str(path), {})
+        if not isinstance(lib, dict):
+            lib = st["mcpToolPerms"][str(path)] = {}
+        if level:
+            lib[str(tool)] = level
+        else:
+            lib.pop(str(tool), None)
     mutate_state(fn)

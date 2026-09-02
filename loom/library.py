@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -381,7 +382,9 @@ def write_file(root: Path, rel: str, text: str) -> dict:
     if p.is_dir():
         raise LibraryError(f"{rel} is a folder")
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + f".{os.getpid()}.tmp")
+    # pid AND thread — concurrent writers in one process must never
+    # share a tmp file (store.py sets the pattern)
+    tmp = p.with_name(p.name + f".{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         tmp.write_text(str(text), encoding="utf-8")
         tmp.replace(p)
@@ -433,8 +436,10 @@ PID_FILE = ".loom-pid"
 
 def _lock_holder_alive(pid: int) -> bool:
     """Does the pid in a library's lock file still look like a live Loom?
-    Dead pid → stale lock; live pid whose cmdline clearly is not Loom →
-    pid reuse, also stale; uninspectable → assume the lock is honest."""
+    Dead pid → stale lock; live pid that clearly is not Loom → pid reuse,
+    also stale; uninspectable → assume the lock is honest (a false
+    "alive" merely refuses the open; a false "stale" would let two
+    instances share a library — always err toward alive)."""
     if pid <= 0:
         return False
     try:
@@ -442,7 +447,16 @@ def _lock_holder_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        pass   # alive but not ours — the cmdline check below still applies
+        pass   # alive but not ours — the checks below still apply
+    # the executable must be plausible for Loom (python/uv/loom) — this
+    # rules out a recycled pid whose CMDLINE merely mentions a loom path
+    # (an editor open on ~/projects/loom is not a Loom instance)
+    try:
+        exe = os.path.basename(os.readlink(f"/proc/{pid}/exe")).lower()
+        if exe and not (exe.startswith("python") or exe in ("loom", "uv")):
+            return False
+    except OSError:
+        pass   # unreadable exe (perms) — fall through to the cmdline
     try:
         cmd = Path(f"/proc/{pid}/cmdline").read_bytes() \
             .decode("utf-8", "replace").lower()

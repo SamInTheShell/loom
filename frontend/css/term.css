@@ -149,12 +149,13 @@
 .wiz-body { min-width: 480px; }
 .wiz-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .wiz-head p { margin: 0 0 8px; }
-.wiz-body input[type="text"] {
+.wiz-body input[type="text"], .wiz-body textarea {
   width: 100%; padding: 7px 10px; border-radius: var(--r-md);
   border: 1px solid var(--bd-1); background: var(--bg-2); color: var(--fg-0);
   font: inherit; font-size: var(--fs-sm); outline: none;
 }
-.wiz-body input[type="text"]:focus { border-color: var(--acc); }
+.wiz-body input[type="text"]:focus, .wiz-body textarea:focus { border-color: var(--acc); }
+.wiz-body textarea { resize: vertical; }
 .wiz-list {
   margin-top: 8px; border: 1px solid var(--bd-0); border-radius: var(--r-md);
   background: var(--bg-1); overflow-y: auto;

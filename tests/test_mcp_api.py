@@ -1,0 +1,377 @@
+"""MCP servers + the OpenAI-compatible API server.
+
+MCP: config parsing, yaml injection, a REAL stdio round-trip against a
+stub MCP server, permission layering (tab default vs loom.yaml override).
+API: config parsing/injection, routing (models list, unknown model,
+stopped model), and a REAL proxy round-trip to a llama-server stand-in on
+a unix socket — embeddings included.
+
+Run: uv run python tests/test_mcp_api.py
+"""
+
+import json
+import os
+import socket
+import sys
+import tempfile
+import threading
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+os.environ["LOOM_HOME"] = tempfile.mkdtemp(prefix="loomtest-home-")
+os.environ["HOME"] = tempfile.mkdtemp(prefix="loomtest-userhome-")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import yaml  # noqa: E402
+
+from loom import apiserver, chat, libconfig, mcp, srv, store  # noqa: E402
+
+FAILS = []
+
+
+def check(name, cond, detail=""):
+    print(("ok  " if cond else "FAIL") + f"  {name}"
+          + (f" — {detail}" if not cond else ""))
+    if not cond:
+        FAILS.append(name)
+
+
+# =========================================================================
+# libconfig: api + mcp-servers sections
+cfg_api = libconfig._api(None)
+check("api defaults", cfg_api == {"interface": "127.0.0.1", "port": 1234})
+check("api parsed", libconfig._api({"interface": "0.0.0.0", "port": 9999})
+      == {"interface": "0.0.0.0", "port": 9999})
+for bad in ({"port": "x"}, {"port": 0}, {"port": 70000}):
+    try:
+        libconfig._api(bad)
+        check(f"api rejects {bad}", False)
+    except libconfig.ConfigError:
+        check(f"api rejects {bad}", True)
+
+got = libconfig._mcp_servers([{"name": "files", "command": "npx x",
+                               "env": {"A": 1}}])
+check("mcp-servers parsed",
+      got == [{"name": "files", "command": "npx x", "env": {"A": "1"}}],
+      str(got))
+for bad in ([{"command": "x"}], [{"name": "a b", "command": "x"}],
+            [{"name": "a"}], "nope",
+            [{"name": "a", "command": "x"}, {"name": "a", "command": "y"}]):
+    try:
+        libconfig._mcp_servers(bad)
+        check(f"mcp rejects {str(bad)[:30]}", False)
+    except libconfig.ConfigError:
+        check(f"mcp rejects {str(bad)[:30]}", True)
+
+# =========================================================================
+# apiserver: loom.yaml injection
+base = "models: []\n# tail comment\nchat:\n  model: ''\n"
+t1 = apiserver.inject_api_config(base, "127.0.0.1", 4321)
+check("api inject appends a block",
+      yaml.safe_load(t1)["api"] == {"interface": "127.0.0.1", "port": 4321}
+      and "# tail comment" in t1, t1)
+t2 = apiserver.inject_api_config(t1, "0.0.0.0", 5555)
+check("api inject replaces in place",
+      yaml.safe_load(t2)["api"] == {"interface": "0.0.0.0", "port": 5555}
+      and t2.count("api:") == 1 and "# tail comment" in t2, t2)
+
+# =========================================================================
+# apiserver: live routing + proxy to a unix-socket llama-server stand-in
+
+
+class FakeLlama(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        out = json.dumps({"echo_path": self.path,
+                          "echo": json.loads(body or b"{}")}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
+
+class UnixHTTPServer(ThreadingHTTPServer):
+    address_family = socket.AF_UNIX
+
+    def client_address_string(self):
+        return "unix"
+
+
+sock_path = os.path.join(tempfile.mkdtemp(prefix="loomtest-sock-"), "s.sock")
+uhttpd = UnixHTTPServer(sock_path, FakeLlama)
+threading.Thread(target=uhttpd.serve_forever, daemon=True).start()
+
+with srv._lock:
+    srv._servers["m1"] = {"id": "m1", "state": "running", "sock": sock_path,
+                          "host": "", "name": "Test Model"}
+    srv._servers["m2"] = {"id": "m2", "state": "stopped", "host": ""}
+
+MODELS = [{"name": "Test Model", "id": "m1", "host": ""},
+          {"name": "Down Model", "id": "m2", "host": ""}]
+
+check("api off at start", apiserver.status()["running"] is False)
+got = apiserver.start("127.0.0.1", 0, lambda: MODELS)
+check("api starts", got["running"] and got["port"] > 0, str(got))
+base_url = f"http://127.0.0.1:{got['port']}"
+
+
+def get(path):
+    with urllib.request.urlopen(base_url + path, timeout=10) as r:
+        return r.status, json.loads(r.read())
+
+
+def post(path, obj):
+    req = urllib.request.Request(base_url + path,
+                                 data=json.dumps(obj).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+code, body = get("/v1/models")
+check("GET /v1/models lists configured models",
+      code == 200 and [m["id"] for m in body["data"]]
+      == ["Test Model", "Down Model"], str(body))
+check("models carry live state",
+      body["data"][0]["state"] == "running"
+      and body["data"][1]["state"] == "stopped", str(body))
+
+code, body = post("/v1/chat/completions",
+                  {"model": "Test Model", "messages": []})
+check("chat completions proxied to the socket",
+      code == 200 and body["echo_path"] == "/v1/chat/completions"
+      and body["echo"]["model"] == "Test Model", str(body))
+
+code, body = post("/v1/embeddings", {"model": "Test Model", "input": "hi"})
+check("embeddings proxied",
+      code == 200 and body["echo_path"] == "/v1/embeddings"
+      and body["echo"]["input"] == "hi", str(body))
+
+code, body = post("/v1/chat/completions", {"model": "gpt-4o", "messages": []})
+check("unknown model with ONE running model routes to it",
+      code == 200 and body["echo"]["model"] == "gpt-4o", str(body))
+
+code, body = post("/v1/chat/completions", {"model": "Down Model"})
+check("stopped model → 503 with a hint",
+      code == 503 and "not running" in body["error"]["message"], str(body))
+
+code, body = post("/v1/nope", {})
+check("unknown route → 404", code == 404)
+
+apiserver.stop()
+check("api stops", apiserver.status()["running"] is False)
+uhttpd.shutdown()
+
+# =========================================================================
+# mcp: yaml injection
+t3 = mcp.inject_server(base, "files", "npx -y server-fs /tmp", {"A": "b c"})
+parsed = libconfig._mcp_servers(yaml.safe_load(t3).get("mcp-servers"))
+check("mcp inject creates the block",
+      parsed == [{"name": "files", "command": "npx -y server-fs /tmp",
+                  "env": {"A": "b c"}}] and "# tail comment" in t3, t3)
+t4 = mcp.inject_server(t3, "web", "uvx mcp-server-fetch", None)
+parsed = libconfig._mcp_servers(yaml.safe_load(t4).get("mcp-servers"))
+check("mcp inject appends to the block",
+      [s["name"] for s in parsed] == ["files", "web"], t4)
+for name, cmd in (("bad name", "x"), ("ok", "")):
+    try:
+        mcp.inject_server(base, name, cmd)
+        check(f"mcp inject rejects {name!r}/{cmd!r}", False)
+    except mcp.McpError:
+        check(f"mcp inject rejects {name!r}/{cmd!r}", True)
+
+# =========================================================================
+# mcp: a real stdio round-trip against a stub server
+STUB = r'''
+import json, sys
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n"); sys.stdout.flush()
+for line in sys.stdin:
+    m = json.loads(line)
+    meth, mid = m.get("method"), m.get("id")
+    if meth == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": m["params"]["protocolVersion"],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "stub", "version": "1"}}})
+    elif meth == "tools/list":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [
+            {"name": "echo", "description": "echoes back",
+             "inputSchema": {"type": "object",
+                             "properties": {"text": {"type": "string"}},
+                             "required": ["text"]}}]}})
+    elif meth == "tools/call":
+        p = m["params"]
+        if p["name"] == "echo":
+            send({"jsonrpc": "2.0", "id": mid, "result": {"content": [
+                {"type": "text",
+                 "text": "echo: " + p["arguments"]["text"]}]}})
+        else:
+            send({"jsonrpc": "2.0", "id": mid,
+                  "error": {"code": -32602, "message": "no such tool"}})
+    elif mid is not None:
+        send({"jsonrpc": "2.0", "id": mid, "result": {}})
+'''
+stub_path = Path(tempfile.mkdtemp(prefix="loomtest-mcp-")) / "stub.py"
+stub_path.write_text(STUB)
+
+LIB = str(Path(os.environ["HOME"]) / "lib")
+mcp.set_library(LIB)
+rec = {"name": "stub", "command": f"{sys.executable} {stub_path}", "env": {}}
+mcp.start_server(rec)
+check("mcp server starts and lists tools",
+      mcp.running() == {"stub": ""}, str(mcp.running()))
+specs = mcp.live_tool_specs()
+check("tool spec surfaces with the full function name",
+      len(specs) == 1 and specs[0]["function"]["name"] == "mcp_stub_echo"
+      and specs[0]["function"]["parameters"]["required"] == ["text"],
+      str(specs))
+out = mcp.call_full("mcp_stub_echo", {"text": "hi"})
+check("tools/call round-trips", out == "echo: hi", out)
+check("refresh re-queries", mcp.refresh_tools("stub") == 1)
+try:
+    mcp.call_full("mcp_stub_missing", {})
+    check("unknown mcp tool raises", False)
+except mcp.McpError:
+    check("unknown mcp tool raises", True)
+
+# permission layering: tab default vs loom.yaml per-mode override
+CFG = {"permissionModes": {"always-ask": {"mcp_stub_echo": "deny"},
+                           "custom": {}},
+       "chat": {"permission_mode": "always-ask"}}
+check("tab default is ask", chat.perm_for(CFG, "mcp_stub_echo", "custom") == "ask")
+mcp.set_tool_perm("mcp_stub_echo", "allow")
+check("tab default applies where yaml is silent",
+      chat.perm_for(CFG, "mcp_stub_echo", "custom") == "allow")
+check("loom.yaml per-mode override wins",
+      chat.perm_for(CFG, "mcp_stub_echo", "always-ask") == "deny")
+check("built-in tools resolve through libconfig",
+      chat.perm_for({"permissionModes": libconfig.BUILTIN_MODES,
+                     "chat": {"permission_mode": "always-ask"}},
+                    "read_file") == "allow")
+mcp.set_tool_perm("mcp_stub_echo", "disabled")
+specs = chat.tool_specs(CFG, "custom")
+check("disabled mcp tool is not offered",
+      all(s["function"]["name"] != "mcp_stub_echo" for s in specs))
+mcp.set_tool_perm("mcp_stub_echo", "")
+check("clearing restores ask", mcp.tool_perm("mcp_stub_echo") == "ask")
+
+# enabled == running persistence (the autostart set)
+store.set_mcp_running(LIB, "stub", True)
+check("running set persists", store.mcp_running(LIB) == ["stub"])
+store.set_mcp_running(LIB, "stub", False)
+check("disable clears it", store.mcp_running(LIB) == [])
+
+mcp.stop_server("stub")
+check("mcp server stops", mcp.running() == {}, str(mcp.running()))
+
+# =========================================================================
+# ejecting a server cancels the chats generating on that model
+from loom import chats  # noqa: E402
+import threading as _t  # noqa: E402
+
+chat_root = Path(tempfile.mkdtemp(prefix="loomtest-chatroot-"))
+doc_a = chats.new_chat(chat_root, model="Test Model")
+doc_b = chats.new_chat(chat_root, model="Other Model")
+holds = []
+for doc in (doc_a, doc_b):
+    ev = _t.Event()
+    th = _t.Thread(target=ev.wait, args=(30,), daemon=True)
+    th.start()
+    holds.append(ev)
+    with chat._lock:
+        chat._running[doc["id"]] = {"thread": th, "cancel": _t.Event()}
+CFG2 = {"models": [{"name": "Test Model"}, {"name": "Other Model"}],
+        "chat": {}}
+got = chat.stop_chats_on_models(chat_root, CFG2, {"Test Model"})
+check("eject cancels the chats on that model", got == [doc_a["id"]], str(got))
+check("their cancel event is set",
+      chat._running[doc_a["id"]]["cancel"].is_set())
+check("chats on other models keep streaming",
+      not chat._running[doc_b["id"]]["cancel"].is_set())
+# a chat with NO model of its own follows the config default
+doc_c = chats.new_chat(chat_root, model="")
+ev = _t.Event()
+th = _t.Thread(target=ev.wait, args=(30,), daemon=True)
+th.start()
+holds.append(ev)
+with chat._lock:
+    chat._running[doc_c["id"]] = {"thread": th, "cancel": _t.Event()}
+got = chat.stop_chats_on_models(
+    chat_root, {**CFG2, "chat": {"model": "Other Model"}}, {"Other Model"})
+check("default-model chats cancel with the default's server",
+      sorted(got) == sorted([doc_b["id"], doc_c["id"]]), str(got))
+for ev in holds:
+    ev.set()
+with chat._lock:
+    chat._running.clear()
+
+# a cancelled worker still blocked waiting for headers (stop() raced the
+# abort registration) is freed when wait_if_cancelling re-fires the close
+freed = _t.Event()
+
+
+class FakeStream:
+    def close(self):
+        freed.set()          # ...which unblocks the "worker" below
+
+
+th = _t.Thread(target=freed.wait, args=(10,), daemon=True)
+th.start()
+cancel_ev = _t.Event()
+cancel_ev.set()
+with chat._lock:
+    chat._running["stuck"] = {"thread": th, "cancel": cancel_ev}
+    chat._streams["stuck"] = FakeStream()
+check("wait_if_cancelling re-fires the abort and frees the worker",
+      chat.wait_if_cancelling("stuck", timeout=5.0) and freed.is_set())
+live_ev = _t.Event()
+live_th = _t.Thread(target=live_ev.wait, args=(10,), daemon=True)
+live_th.start()
+with chat._lock:
+    chat._running["live"] = {"thread": live_th, "cancel": _t.Event()}
+check("an uncancelled live stream still bounces immediately",
+      chat.wait_if_cancelling("live") is False)
+live_ev.set()
+with chat._lock:
+    chat._running.clear()
+    chat._streams.clear()
+
+# a mid-stream model switch on disk reaches the in-memory doc (and is
+# therefore never clobbered by the worker's next save)
+doc_m = chats.new_chat(chat_root, model="Old Model")
+mem = chats.load_chat(chat_root, doc_m["id"])
+doc_m["model"] = "New Model"
+chats.save_chat(chat_root, doc_m)
+chat._refresh_user_fields(chat_root, mem)
+check("mid-stream model switch survives the worker's save cycle",
+      mem["model"] == "New Model", str(mem.get("model")))
+
+# join_worker: gone workers return True fast; live ones wait
+check("join_worker with no worker", chat.join_worker("nope") is True)
+jev = _t.Event()
+jth = _t.Thread(target=jev.wait, args=(10,), daemon=True)
+jth.start()
+with chat._lock:
+    chat._running["j"] = {"thread": jth, "cancel": _t.Event()}
+check("join_worker times out on a live worker",
+      chat.join_worker("j", timeout=0.2) is False)
+jev.set()
+check("join_worker returns once the worker dies",
+      chat.join_worker("j", timeout=5.0) is True)
+with chat._lock:
+    chat._running.clear()
+
+print()
+if FAILS:
+    print("FAILURES:", ", ".join(FAILS))
+    sys.exit(1)
+print("ALL PASS")

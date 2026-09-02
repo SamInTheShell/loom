@@ -242,6 +242,89 @@ def _q(args: list[str]) -> str:
     return " ".join(_q1(a) for a in args)
 
 
+def _spawn_parts(rec: dict, args: list[str]) -> tuple[str, str, str]:
+    """(binary to `command -v`, prelude script lines, the fragment that
+    execs the server bound to "$S"). Two shapes:
+
+    * default — the llama-server binary on the host (empty prelude).
+    * `container:` — an engine run command (podman/docker …). The prelude
+      builds a LOOM_MNT array: the SOCKET dir always, plus each model
+      file's directory (model, mmproj, -md/--model-draft/--lora in flags)
+      at an IDENTICAL path — but ONLY when that directory exists on the
+      host. That supports both path conventions: host paths mount
+      automatically; container-internal paths (e.g. /root/… mapped by the
+      user's own -v options) pass through untouched. The mounts land
+      right after the `run` token, then `--host "$S"` and the composed
+      args follow the image as entrypoint arguments — the image's
+      entrypoint must be llama-server. The engine client's argv carries
+      the socket path, so the /proc cmdline identity check keeps working,
+      and sig-proxy forwards the supervisor's TERM to the server."""
+    server_bin = str(rec.get("serverBin") or "").strip() or DEFAULT_SERVER_BIN
+    container = str(rec.get("container") or "").strip()
+    if not container:
+        return server_bin, "", _q1(server_bin) + ' --host "$S" ' + _q(args)
+    try:
+        toks = shlex.split(container)
+    except ValueError as e:
+        raise SrvError(f"the model's `container` does not parse: {e}")
+    run_i = next((i for i, t in enumerate(toks) if t == "run"), -1)
+    if len(toks) < 3 or run_i < 1:
+        raise SrvError(
+            "the model's `container` must be an engine run command ending "
+            "in the image, e.g. `podman run --rm --device /dev/dri "
+            "llama-server-vulkan:latest`")
+    if any(t in ("-t", "-it", "-ti", "--tty") for t in toks):
+        raise SrvError("drop -t/-it from the `container` command — the "
+                       "server runs detached, there is no TTY")
+    # the image must be last: llama-server's args are appended after it.
+    # Catch the common miss — a trailing option, or a trailing VALUE of a
+    # value-taking option (`… -v a:b` has no image at all)
+    val_opts = {"-v", "--volume", "--mount", "-e", "--env", "--env-file",
+                "--device", "-p", "--publish", "--name", "--network",
+                "--user", "-u", "--entrypoint", "--gpus", "--memory",
+                "--security-opt", "--cap-add", "--cap-drop", "--label",
+                "-w", "--workdir", "--pull"}
+    if toks[-1].startswith("-") or (len(toks) >= 2
+                                    and toks[-2] in val_opts):
+        raise SrvError(
+            "the `container` command must END with the image (loom appends "
+            "llama-server's arguments after it) — e.g. `podman run --rm "
+            "--device /dev/dri my-llama-image:latest`")
+    # every model FILE llama-server will open gets its directory mounted
+    # at the IDENTICAL path — IF it exists on the host (checked at spawn
+    # time, so this works on ssh hosts too). Absent dirs are container-
+    # internal paths the user maps with their own -v options.
+    paths = [rec.get("model"), rec.get("mmproj")]
+    for i, tok in enumerate(args):
+        if tok in ("-md", "--model-draft", "--lora", "--lora-scaled") \
+                and i + 1 < len(args):
+            paths.append(args[i + 1])
+    dirs: list[str] = []
+    for p in paths:
+        p = str(p or "").strip()
+        d = p.rsplit("/", 1)[0] if "/" in p else ""
+        if d and not d.startswith("-") and d not in dirs:
+            dirs.append(d)
+    prelude = 'LOOM_MNT=(-v "${S%/*}":"${S%/*}")\n'
+    for d in dirs:
+        qd = _q1(d)
+        prelude += f'[ -d {qd} ] && LOOM_MNT+=(-v {qd}:{qd})\n'
+    return toks[0], prelude, (_q(toks[:run_i + 1]) + ' "${LOOM_MNT[@]}" '
+                              + _q(toks[run_i + 1:])
+                              + ' --host "$S" ' + _q(args))
+
+
+def spawn_preview(rec: dict) -> str:
+    """The spawn command for the eye (Servers tab tooltip)."""
+    _bin, prelude, spawn = _spawn_parts(rec, compose_args(rec))
+    mnts = " ".join(ln.split("&& ", 1)[-1].replace("LOOM_MNT+=(", ""
+                    ).rstrip(")") + " (if the dir exists)"
+                    for ln in prelude.splitlines()[1:])
+    return spawn.replace('"${LOOM_MNT[@]}"',
+                         ('-v <socket dir> ' + mnts).strip()) \
+                .replace('"$S"', "<socket>")
+
+
 def _run_json(host: str, script: str, timeout: float = 30) -> dict:
     try:
         rc, out, err = sshtunnel.run(host, script, timeout=timeout)
@@ -312,8 +395,8 @@ def start(rec: dict, notice=None, load_timeout: float | None = None) -> dict:
         raise SrvError("server record has no id")
     host = str(rec.get("host") or "")
     name = str(rec.get("name") or sid)
-    server_bin = str(rec.get("serverBin") or "").strip() or DEFAULT_SERVER_BIN
     args = compose_args(rec)
+    check_bin, spawn_prelude, spawn = _spawn_parts(rec, args)
 
     def note(msg):
         if notice:
@@ -340,20 +423,20 @@ def start(rec: dict, notice=None, load_timeout: float | None = None) -> dict:
         '  exit 0\n'
         'fi\n'
         'rm -f "$S" "$D/pid"\n'
-        'command -v ' + _q1(server_bin) + ' >/dev/null 2>&1 || '
+        'command -v ' + _q1(check_bin) + ' >/dev/null 2>&1 || '
         '{ echo "{\\"state\\":\\"nobinary\\"}"; exit 0; }\n'
-        'CMD=' + shlex.quote(_q([server_bin, "--host"])) + '" $(printf %q "$S") "'
-        + shlex.quote(_q(args)) + '\n'
-        'printf "%s" "$CMD" > "$D/cmd"\n'
-        'cat > "$D/meta.json" <<\'EOF\'\n'
+        'cat > "$D/cmd" <<\'LOOMCMD_EOF\'\n'
+        + (spawn_prelude + spawn) + "\n"
+        'LOOMCMD_EOF\n'
+        + spawn_prelude
+        + 'cat > "$D/meta.json" <<\'EOF\'\n'
         + json.dumps({"name": name, "model": rec.get("model"), "args": args,
                       "startedTs": int(time.time() * 1000)}) + "\n"
         'EOF\n'
         # the server is a CHILD of this supervisor — its life is bounded by
         # ours, and ours by the lifeline. 9>&- matters: the child must NOT
         # inherit the flock fd, or the lock would be held for its whole life
-        + _q1(server_bin) + ' --host "$S" '
-        + _q(args) + ' < /dev/null >> "$D/log" 2>&1 9>&- &\n'
+        + spawn + ' < /dev/null >> "$D/log" 2>&1 9>&- &\n'
         'SRV=$!\n'
         'echo "$SRV" > "$D/pid"\n'
         'exec 9>&-\n'
@@ -408,10 +491,11 @@ def start(rec: dict, notice=None, load_timeout: float | None = None) -> dict:
                        "stayed busy for 30s — try again")
     if state == "nobinary":
         _set_state(sid, "error", level="error",
-                   detail=f"{server_bin} not found on {host or 'this machine'}")
+                   detail=f"{check_bin} not found on {host or 'this machine'}")
         raise SrvError(
-            f"{server_bin} is not installed on {host or 'this machine'} "
-            "(install llama.cpp, or set the server binary path)")
+            f"{check_bin} is not installed on {host or 'this machine'} "
+            "(install llama.cpp / the container engine, or fix the "
+            "binary/container entry)")
 
     sock = got.get("sock") or ""
     started = state == "spawned"
@@ -577,6 +661,44 @@ def shutdown(timeout: float = 8.0) -> None:
             h.proc.wait(left)
         except Exception:
             pass
+
+
+def make_room(host: str, keep_id: str, limit: int, notice=None,
+              on_stop=None) -> list[str]:
+    """Enforce the per-host concurrency limit before starting `keep_id`:
+    stop other live servers on `host` (oldest observation first) until the
+    new one fits. RAM use per model is unmeasured, so the default limit is
+    1 — starting a model means every other llama-server on its host stops
+    first. limit -1 = no limit. Returns the ids stopped."""
+    if limit < 0:
+        return []
+    with _lock:
+        live = [dict(r) for r in _servers.values()
+                if (r.get("host") or "") == (host or "")
+                and r.get("id") != keep_id
+                and r.get("state") in ("running", "loading", "starting")]
+    live.sort(key=lambda r: r.get("ts") or 0)
+    excess = len(live) - (max(1, limit) - 1)
+    stopped = []
+    for r in live[:max(0, excess)]:
+        if on_stop:
+            try:
+                on_stop(r)   # e.g. cancel the chats generating on it
+            except Exception:
+                pass
+        if notice:
+            try:
+                notice(f"stopping {r.get('name') or r['id']} first — "
+                       f"{host or 'this machine'} allows {max(1, limit)} "
+                       "server(s) at a time")
+            except Exception:
+                pass
+        try:
+            stop(host, str(r["id"]))
+            stopped.append(str(r["id"]))
+        except SrvError:
+            pass   # unreachable host surfaces when the start itself fails
+    return stopped
 
 
 def stop(host: str, sid: str) -> dict:

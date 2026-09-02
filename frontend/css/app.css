@@ -299,6 +299,49 @@ body.maximized #frame-border { display: none; }
   align-items: center; justify-content: space-between;
 }
 .srv-head h2 { margin: 0; font-size: var(--fs-lg); }
+.srv-limits {
+  max-width: 900px; margin: 0 auto 12px; display: flex; gap: 14px;
+  align-items: center; flex-wrap: wrap;
+  color: var(--fg-2); font-size: var(--fs-xs);
+}
+.srv-limits .lbl { font-family: var(--font-mono); }
+.srv-limit { display: flex; gap: 6px; align-items: center; }
+.srv-limit-sel { width: auto; padding: 2px 6px; font-size: var(--fs-xs); }
+
+/* API Server tab */
+.api-status {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+  background: var(--bg-1); border: 1px solid var(--bd-0);
+  border-radius: var(--r-lg); padding: 12px 14px;
+}
+.api-status .spacer { flex: 1; }
+.api-state { font-family: var(--font-mono); font-size: var(--fs-sm);
+  user-select: text; cursor: text; }
+.api-lbl { align-self: center; color: var(--fg-2); font-size: var(--fs-xs); }
+.api-port { max-width: 110px; }
+.api-usage { padding: 10px 12px; }
+.api-usage pre {
+  margin: 0 0 8px; font-size: var(--fs-xs); font-family: var(--font-mono);
+  white-space: pre-wrap; word-break: break-all; color: var(--fg-1);
+  user-select: text; cursor: text;   /* the app default is no selection */
+}
+.api-usage .mods-hint { user-select: text; }
+
+/* MCP Servers tab */
+.mcp-tool {
+  display: flex; align-items: flex-start; gap: 10px;
+  border-top: 1px solid var(--bd-0); padding: 8px 0 6px; margin-top: 8px;
+}
+.mcp-tool-col { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mcp-tool-name { font-weight: 600; font-size: var(--fs-sm); }
+.mcp-fn {
+  font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--acc);
+  cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mcp-fn:hover { text-decoration: underline; }
+.mcp-tool-desc { color: var(--fg-2); font-size: var(--fs-xs); }
+.mcp-perm-sel { width: auto; padding: 2px 6px; font-size: var(--fs-xs); flex: none; }
+.mcp-env { font-family: var(--font-mono); }
 .srv-cards { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
 .srv-card {
   background: var(--bg-1); border: 1px solid var(--bd-0);

@@ -16,6 +16,7 @@ async function refreshServersTab() {
   if (!res.ok) { toast(res.error, "err"); return; }
   st.serverModels = res.data.models;
   st.config = res.data.config;
+  st.serverLimits = res.data.limits || {};
   renderServersTab();
 }
 
@@ -38,6 +39,16 @@ function renderServersTab() {
       el("button", {
         class: "btn btn-sm btn-acc", text: "New model…",
         onclick: () => modelWizard(),
+      }),
+      el("button", {
+        class: "btn btn-sm", html: icon("mcp", 13) + " MCP Servers",
+        title: "Model Context Protocol tool servers for chats",
+        onclick: () => openTab("mcpsrv"),
+      }),
+      el("button", {
+        class: "btn btn-sm", html: icon("globe", 13) + " API Server",
+        title: "Serve the models as an OpenAI-compatible API",
+        onclick: () => openTab("apisrv"),
       }),
       el("button", {
         class: "btn btn-sm", text: "Edit loom.yaml",
@@ -64,9 +75,39 @@ function renderServersTab() {
         }))));
     return;
   }
+  panel.append(serverLimitsRow(models));
   const cards = el("div", { class: "srv-cards" });
   for (const m of models) cards.append(serverCard(m));
   panel.append(cards);
+}
+
+/* per-host concurrency: model RAM use is unmeasured, so each host runs
+ * ONE llama-server at a time unless the user raises its limit here —
+ * starting a model auto-stops others on its host to make room */
+function serverLimitsRow(models) {
+  const hosts = [...new Set(models.map((m) => m.host || ""))]
+    .sort((a, b) => (a === "" ? -1 : b === "" ? 1 : a.localeCompare(b)));
+  const row = el("div", { class: "srv-limits" },
+    el("span", { class: "lbl",
+      title: "How many llama-servers may run at once on each host. "
+        + "Starting a model stops others on its host to make room "
+        + "(RAM use per model is unmeasured — 1 is the safe default).",
+      text: "servers per host" }));
+  for (const h of hosts) {
+    const sel = el("select", { class: "term-sel srv-limit-sel" });
+    for (let n = 1; n <= 8; n++) sel.append(el("option", { value: String(n), text: String(n) }));
+    sel.append(el("option", { value: "-1", text: "no limit" }));
+    const cur = st.serverLimits?.[h];
+    sel.value = String(cur === -1 || (cur >= 1 && cur <= 8) ? cur : 1);
+    sel.addEventListener("change", async () => {
+      const r = await Api.call("server_limit_set", h, Number(sel.value));
+      if (!r.ok) { toast(r.error, "err"); return; }
+      st.serverLimits = r.data.limits || {};
+    });
+    row.append(el("label", { class: "srv-limit" },
+      el("span", { text: h || "local" }), sel));
+  }
+  return row;
 }
 
 function serverCard(m) {

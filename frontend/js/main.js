@@ -16,6 +16,8 @@ async function boot() {
   $("#btn-terminal").innerHTML = icon("terminal");
   $("#btn-library").innerHTML = icon("library");
   $("#btn-servers").innerHTML = icon("servers");
+  $("#btn-mcp").innerHTML = icon("mcp");
+  $("#btn-api").innerHTML = icon("globe");
   $("#btn-models").innerHTML = icon("download");
   $("#btn-archive").innerHTML = icon("archive");
   $("#btn-envs").innerHTML = icon("key");
@@ -38,6 +40,8 @@ async function boot() {
   });
   libBtn.addEventListener("dragend", () => { st.dragLibrary = false; });
   $("#btn-servers").addEventListener("click", () => openTab("servers"));
+  $("#btn-mcp").addEventListener("click", () => openTab("mcpsrv"));
+  $("#btn-api").addEventListener("click", () => openTab("apisrv"));
   $("#btn-models").addEventListener("click", () => openTab("models"));
   $("#btn-archive").addEventListener("click", () => openTab("archive"));
   $("#btn-envs").addEventListener("click", () => openTab("envs"));
@@ -229,6 +233,12 @@ onLMEvent((ev) => {
     case "models":
       if (ev.op === "download") onDownloaderEvent(ev);
       else onModelsEvent(ev);
+      break;
+    case "apisrv":
+      onApiSrvEvent(ev);
+      break;
+    case "mcp":
+      onMcpEvent(ev);
       break;
     case "prompt":
       sshPromptModal(ev.id, ev.text);

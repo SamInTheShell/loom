@@ -47,6 +47,8 @@ APP_SCRIPTS = [
     "js/terminal.js",
     "js/modelstab.js",
     "js/downloader.js",
+    "js/apisrv.js",
+    "js/mcptab.js",
     "js/archive.js",
     "js/alerts.js",
     "js/envstab.js",

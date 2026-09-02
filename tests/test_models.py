@@ -89,10 +89,20 @@ d.mkdir(parents=True, exist_ok=True)
 (d / "tiny.gguf").write_bytes(b"GGUF" + b"x" * 100)
 (d / "mmproj-tiny.gguf").write_bytes(b"GGUF" + b"y" * 50)
 (d / "not-a-model.bin").write_bytes(b"nope")
+# the HF hub layout: bytes live in an extensionless blob, the *.gguf name
+# is a SYMLINK in snapshots/ — the scan must dereference it
+hub = Path(FAKE_HOME) / ".cache/huggingface/hub/models--org--repo"
+(hub / "blobs").mkdir(parents=True, exist_ok=True)
+(hub / "snapshots/abc").mkdir(parents=True, exist_ok=True)
+(hub / "blobs/deadbeef").write_bytes(b"GGUF" + b"h" * 500)
+(hub / "snapshots/abc/hub-model.gguf").symlink_to(hub / "blobs/deadbeef")
 found = models.scan("")
 names = {e["name"] for e in found}
 check("local scan finds ggufs", {"tiny.gguf", "mmproj-tiny.gguf"} <= names, str(names))
 check("local scan ignores non-gguf", "not-a-model.bin" not in names)
+hubhit = next((e for e in found if e["name"] == "hub-model.gguf"), None)
+check("scan finds HF-hub symlinked ggufs with the real size",
+      hubhit is not None and hubhit["size"] == 504, str(hubhit))
 check("local scan pairs mmproj",
       next(e for e in found if e["name"] == "mmproj-tiny.gguf")["pairedWith"]
       == "~/models/tiny.gguf", str(found))

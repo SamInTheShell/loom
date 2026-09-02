@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -72,7 +73,9 @@ def save_chat(root: Path, chat: dict) -> None:
     chat["updatedTs"] = int(time.time() * 1000)
     p = _path(root, str(chat["id"]))
     chats_dir(root)
-    tmp = p.with_name(p.name + f".{os.getpid()}.tmp")
+    # pid AND thread: the bridge thread and a chat worker can save the
+    # same doc concurrently — they must never share a tmp file
+    tmp = p.with_name(p.name + f".{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         tmp.write_text(json.dumps(chat, indent=1), encoding="utf-8")
         tmp.replace(p)
