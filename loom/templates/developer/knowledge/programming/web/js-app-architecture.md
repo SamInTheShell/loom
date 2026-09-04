@@ -1,10 +1,10 @@
-# JS app architecture — framework-free state, routing, rendering
+# JS app architecture - framework-free state, routing, rendering
 
 The application architecture for a desktop-first HTML/CSS/JS app served
 straight off disk (`file://`) inside a webview window, with a native
 backend reachable only through an injected JS bridge (the Python side is
 ../python/pywebview/js-api-bridge.md). No framework, no bundler, no npm,
-no dev server — plain script tags, one global state object, hash
+no dev server - plain script tags, one global state object, hash
 routing, and full-view re-renders with a handful of surgical
 escape hatches. This shape holds up well past 15k lines of UI code and
 buys instant startup, zero build steps, and total debuggability; the
@@ -15,7 +15,7 @@ the visual system is design-language.md.
 ## Script order is the module system
 
 Under a `file://` origin Chromium blocks ES-module imports and
-`fetch()` of sibling files — but classic `<script src>` and
+`fetch()` of sibling files - but classic `<script src>` and
 `<link rel=stylesheet>` work fine. So there are no modules: every file
 is an ordinary script defining globals (each starts with
 `"use strict";`), and the ONLY assembly step is rendering `index.html`
@@ -24,21 +24,21 @@ script tags in a fixed, meaningful order:
 
 ```
 util.js        helpers: h(), toast, tooltip, formatting
-data.js        seed dataset — the shapes ARE the API contract
+data.js        seed dataset - the shapes ARE the API contract
 state.js       the store: st, lookups, persistence, chrome renderers
 api.js         bridge wrapper + mock backend + event registry
 sim.js         the turn driver (streams, tools) mutating state
 components.js  shared widgets     modals.js  dialogs
 views_*.js     one file per page
 router.js      routes + refreshAll
-main.js        boot IIFE — wiring, event dispatch, start()
+main.js        boot IIFE - wiring, event dispatch, start()
 ```
 
 Later files may call earlier globals freely; an earlier file may
 reference a later global only inside a function that runs after boot
 (guard with `typeof fn === "function"` when unsure). Secondary windows
 (editor, docs, diagnostics popouts) get their OWN composed page with a
-subset of the list plus one page-local controller file — shared code is
+subset of the list plus one page-local controller file - shared code is
 shared by inclusion, not import. Static data a page needs is embedded
 at compose time (`<script>window.DOCS = {{json}};</script>`), never
 fetched.
@@ -60,7 +60,7 @@ const st = {
 ```
 
 Views read `st` directly, mutate it directly, then trigger a repaint.
-The store file also owns all lookups (`itemById` — linear `find` is
+The store file also owns all lookups (`itemById` - linear `find` is
 fine at these sizes), derived predicates, and the persistence helpers.
 Three tiers of state, and the tier decides where a field lives:
 
@@ -71,7 +71,7 @@ Three tiers of state, and the tier decides where a field lives:
 - **Persisted settings and session**: mirrored to the backend's config
   file. Durable preferences go on `cfg.*`; resumable UI state (open
   tabs, drafts, per-record selections, window history) goes under
-  `cfg.session.*` — one namespace to inspect or wipe.
+  `cfg.session.*` - one namespace to inspect or wipe.
 - **Ephemeral**: route, filters, selections, and `_`-prefixed caches
   (`st._fetchedAt`, `st._cfgCache`). Never written anywhere.
 
@@ -87,18 +87,18 @@ async function persistSettings(patch) {
     await Api.call("config_set", cfg);
   } catch { /* Api.get already toasted */ }
 }
-// usage — the patch touches ONLY its own keys:
+// usage - the patch touches ONLY its own keys:
 persistSettings((cfg) => {
   cfg.session = { ...(cfg.session || {}), openTabs: [...st.openTabs] };
 });
 ```
 
-Text-shaped state (drafts, filter boxes) debounces its writes — one
-write per typing pause (~800 ms), not per keystroke — and every
+Text-shaped state (drafts, filter boxes) debounces its writes - one
+write per typing pause (~800 ms), not per keystroke - and every
 persisted list normalizes on load through a function that migrates
 legacy shapes losslessly, so old config files never break the UI.
 
-## Rendering — full rebuild, with escape hatches
+## Rendering - full rebuild, with escape hatches
 
 The base move is the cheapest one to reason about: wipe the view root
 and rebuild it from state. Routing and re-rendering share one path:
@@ -121,7 +121,7 @@ function render() {
 mutation calls. `lightweight = true` marks a stream tick (text grew,
 nothing structural): the visible chat view gets an in-place patch, and
 every other view refreshes only its chrome counters. `false` is a
-structural change: full `render()`, but with focused-input rescue —
+structural change: full `render()`, but with focused-input rescue -
 before rebuilding, the current view's text inputs save their value,
 focus, and caret; after rebuilding, the new instances restore them. A
 textarea that survives a rebuild with its caret intact is
@@ -130,7 +130,7 @@ indistinguishable from one that was never touched.
 **Render parking.** A rebuild that lands between `mousedown` and
 `mouseup` destroys the node under the cursor and the browser silently
 drops the click; a rebuild while a context menu is open closes the
-menu. During generation, refreshes arrive constantly — so any refresh
+menu. During generation, refreshes arrive constantly - so any refresh
 in one of those windows is PARKED and replayed just after:
 
 ```js
@@ -189,13 +189,13 @@ function patchLiveView() {
 ```
 
 Returning `false` hands control back to `refreshAll`, which does the
-full render (with input rescue). Never try to patch structure — the
+full render (with input rescue). Never try to patch structure - the
 patch/rebuild boundary IS the contract. Signature strings (ids +
 status + selection joined) are the change detector for list panels:
 one string compare decides rebuild-vs-leave-alone, because rebuilding
 rows on every streamed token kills the row under the cursor and eats
 clicks. List ordering uses a key that moves only at DISCRETE moments
-(user sent, turn ended) — never `updatedAt`, which ticks per token and
+(user sent, turn ended) - never `updatedAt`, which ticks per token and
 makes concurrently-streaming rows leapfrog on every delta.
 
 **Live counters patch by data-attribute.** For high-frequency numeric
@@ -214,7 +214,7 @@ function updateUsageDom() {
 ```
 
 Render values into attributed nodes precisely so a later patcher can
-find them — that is the whole pattern.
+find them - that is the whole pattern.
 
 ## The view-module contract
 
@@ -223,12 +223,12 @@ The contract every view follows:
 
 - Build the DOM with the element builder and append into `root`; bind
   events inline as `onclick`/`oninput` properties at build time. No
-  event delegation framework — closures over state are the wiring.
+  event delegation framework - closures over state are the wiring.
 - Call `setContext(crumbs, statusText)` so the shared chrome (bread-
   crumb, status bar) reflects the page.
 - Read `st` directly. Any per-view state that must survive a re-render
   (active sub-tab, selected branch) lives ON `st`, not in the view's
-  closure — the view is re-entered from scratch on every render and
+  closure - the view is re-entered from scratch on every render and
   must reproduce itself from state alone.
 - Mutating actions call `Api`, mutate `st` (or re-fetch), then
   `refreshAll()` or `navigate(...)`. Views never write config directly;
@@ -241,7 +241,7 @@ The contract every view follows:
 
 ## Routing without URLs
 
-A `file://` page has no server and no paths — `location.hash` is the
+A `file://` page has no server and no paths - `location.hash` is the
 entire address bar. Routes are regex → function pairs:
 
 ```js
@@ -251,7 +251,7 @@ const ROUTES = [
   { re: /^#\/old-name$/,        fn: () => redirect("#/items"),         view: "items" },
 ];
 function navigate(hash) {
-  if (location.hash === hash) render();   // hashchange won't fire — render
+  if (location.hash === hash) render();   // hashchange won't fire - render
   else location.hash = hash;              // hashchange listener renders
 }
 function redirect(hash) {
@@ -265,20 +265,20 @@ Rules that make this feel like a real router:
 
 - **Redirecting routes must REPLACE**, never push: a pushed redirect
   hash stays in history, and Back lands on it and bounces forward again
-  — Back appears broken. Keep legacy route aliases as redirects forever;
+  - Back appears broken. Keep legacy route aliases as redirects forever;
   persisted histories and muscle memory keep working.
 - Back/forward come free from the browser; wire Alt+←/→ to
   `history.back()/forward()`.
 - **Location restore**: persist the last ~50 hashes (debounced) under
-  `cfg.session`; on boot, replay them with `history.pushState` — which
-  fires no `hashchange` — so the back/forward stack is rebuilt silently
+  `cfg.session`; on boot, replay them with `history.pushState` - which
+  fires no `hashchange` - so the back/forward stack is rebuilt silently
   and one `render()` lands on the final entry. An explicit hash in the
   opening URL always wins over the restored trail.
 - Back/forward can land on data that went stale while the user was
   elsewhere: after rendering, quietly re-fetch if the last load is
   older than ~10 s.
 
-## The bridge wrapper — two verbs, one error surface
+## The bridge wrapper - two verbs, one error surface
 
 Every backend method resolves to an `{ok, ...}` envelope; the wrapper
 exposes exactly two verbs plus a mode probe:
@@ -306,12 +306,12 @@ const Api = (() => {
 })();
 ```
 
-The convention: `get()` when the caller wants data — the error toasts
+The convention: `get()` when the caller wants data - the error toasts
 in exactly one place and the throw aborts the caller's chain; `call()`
 when the caller inspects `.ok` itself or fires-and-forgets. Downstream
 `catch {}` after `get()` is legitimate silence because the user was
 already told. The `Mock` object mirrors the real backend method-for-
-method against the seed dataset — the mock IS the API contract, keeps
+method against the seed dataset - the mock IS the API contract, keeps
 the whole UI explorable in a plain browser, and forces the shapes to be
 designed before the backend exists. `st.real` records which world the
 page is in; views branch on it for honesty (an unmissable "DEMO DATA"
@@ -319,7 +319,7 @@ badge, features that answer "needs the desktop app").
 
 Boot handles the bridge race: if the bridge is already injected, start;
 otherwise listen for the ready event AND set a ~400 ms timeout that
-starts in mock mode — a plain browser never fires the event. Load
+starts in mock mode - a plain browser never fires the event. Load
 depot + config in parallel, THEN install stateful chrome widgets, then
 `render()`, then set a `window.READY = true` flag for automation.
 
@@ -338,7 +338,7 @@ function ON_EVENT(ev) {                    // called from the backend
 }
 function onEvent(fn) {
   handlers.push(fn);
-  return () => {                           // unsubscribe — modals attach
+  return () => {                           // unsubscribe - modals attach
     const i = handlers.indexOf(fn);        // per-run listeners
     if (i >= 0) handlers.splice(i, 1);
   };
@@ -352,7 +352,7 @@ switch. The conventions inside it carry the weight:
   agent work; a single debounce timer (~1.5 s) collapses the burst into
   one re-fetch + `refreshAll`.
 - **Patch, don't render, for high-frequency types**: the usage feed
-  updates `st` then calls the data-attribute patcher — never a render.
+  updates `st` then calls the data-attribute patcher - never a render.
 - **Refresh conditionally**: an index-progress event re-renders only if
   the settings page that shows it is the current view; otherwise it
   just updates state and toasts.
@@ -366,14 +366,14 @@ switch. The conventions inside it carry the weight:
 Secondary OS windows are separate webview pages, each composed with its
 own script list. Three patterns, by how much state they need:
 
-**Bound editor window** — shares the store/bridge/component scripts but
+**Bound editor window** - shares the store/bridge/component scripts but
 has NO router; it defines local shims (`function refreshAll() {
 repaint(); }`, `function navigate() {}`) so shared components keep
 working. Its identity is immutable for the window's lifetime, carried
 in the location hash (`#repo=…&branch=…&mode=…`) and parsed once at
 boot. It talks BACK through ordinary bridge calls: reporting its dirty
 count (drives the app's close/quit warning gates), its mode, its open-
-file context. It receives events filtered to its binding — a commit on
+file context. It receives events filtered to its binding - a commit on
 its branch triggers a debounced buffer refresh that fast-forwards clean
 buffers (preserving the cursor) and flags dirty ones as conflicts
 instead of overwriting; a `confirm_close` event renders the save/
@@ -381,17 +381,17 @@ discard dialog. Cross-window intent is a backend hop: "show this in the
 main window" is a bridge call the backend routes, never a navigation.
 The backend enforces one window per identity key.
 
-**Self-contained document window** — takes only the util script and its
+**Self-contained document window** - takes only the util script and its
 own controller; its data is embedded at compose time. The backend
 focuses an already-open instance by calling a global the page exposes
 (`window.OPEN_DOC = (slug, q) => { … }`) instead of spawning a
 duplicate.
 
-**Observer window (diagnostics)** — owns NO truth at all. The main
+**Observer window (diagnostics)** - owns NO truth at all. The main
 window holds live state (including in-flight streams), so it is the
 only honest source: it tracks which observer windows exist via
 open/close events (a `Set` of ids), and pushes compact snapshots on a
-~700 ms interval — but only when the snapshot changed:
+~700 ms interval - but only when the snapshot changed:
 
 ```js
 const last = {};
@@ -419,8 +419,8 @@ immediately on the open event, not on the next tick.
   boot. Adding a file means choosing its slot in the ordered list.
 - Install stateful widgets AFTER persisted config loads. A pane-size
   handle built at boot captures the default sizes object, and persisted
-  sizes silently never apply — a real, hard-to-spot bug class.
-- `replaceState`/`pushState` fire no `hashchange` — call `render()`
+  sizes silently never apply - a real, hard-to-spot bug class.
+- `replaceState`/`pushState` fire no `hashchange` - call `render()`
   yourself (redirect) or deliberately don't (history restore).
   `navigate()` to the CURRENT hash must render explicitly too.
 - Redirecting routes replace history; a pushed redirect breaks Back.
@@ -438,7 +438,7 @@ immediately on the open event, not on the next tick.
   by discrete-moment keys, never by stream-ticking timestamps.
 - Errors surface once: `get()` toasts and throws; a `call()` site owns
   its `.ok` check or explicitly accepts silence.
-- Wrap every event subscriber in try/catch — one broken handler must
+- Wrap every event subscriber in try/catch - one broken handler must
   not sever the feed for the rest.
 - Keep the mock backend in method parity with the real one; it is the
   living API contract and the browser-preview mode.
@@ -447,7 +447,7 @@ immediately on the open event, not on the next tick.
   pushed snapshots, and cross-window actions round-trip through the
   backend.
 - Dedupe pushed feeds by comparing serialized payloads; debounce all
-  persistence (~300–800 ms) and event-driven refetches (~1–2 s).
+  persistence (~300-800 ms) and event-driven refetches (~1-2 s).
 - `requestAnimationFrame` never fires without a compositor (hidden or
-  occluded webview) — use `setTimeout` for work that must run, rAF only
+  occluded webview) - use `setTimeout` for work that must run, rAF only
   for visible animation (node-graph.md uses it correctly).

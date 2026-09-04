@@ -1,4 +1,4 @@
-/* state.js — the one global state object. Views read it, events mutate it. */
+/* state.js - the one global state object. Views read it, events mutate it. */
 "use strict";
 
 const st = {
@@ -12,12 +12,9 @@ const st = {
 
   chats: {},            // chatId -> {chat, running, live:{text,think,tools:{}}, pendingTool}
   terms: {},            // termId -> {container, folders, network, title, started, running}
-  servers: {},          // model id -> live state record from srv events
-  reasoning: {},        // model id -> {method, level} reasoning prefs
-  pins: [],             // pinned model ids — pickers list these first
-  notes: {},            // model id -> progress note line
-  serverLogOpen: {},    // model id -> bool
-  serverLogs: {},       // model id -> cached log text (fetched on open/refresh)
+  providers: {},        // provider name -> {state, detail, models:[{id,ctx}], ts}
+  reasoning: {},        // "provider::model" -> {method, level} reasoning prefs
+  pins: [],             // pinned "provider::model" keys - listed first
 
   lib: {                // library tab state
     tree: [],
@@ -37,12 +34,12 @@ const st = {
 /* Persist "where I left off" for this library: tabs (and order), the
  * active tab, and the Library tab's open file / expansion / panel width.
  * Debounced; every structural UI change calls this. saveSessionNow is
- * the immediate form — quitting must not lose the last 400ms. */
+ * the immediate form - quitting must not lose the last 400ms. */
 function saveSessionNow() {
   if (!st.library || st.restoring) return;
   // per-chat view state: scroll position + how much history was loaded.
   // atBottom is the truth that survives restarts: "at the bottom" is a
-  // STATE, not a pixel value — heights drift between sessions
+  // STATE, not a pixel value - heights drift between sessions
   const chatView = {};
   for (const t of st.tabs) {
     if (t.type !== "chat") continue;
@@ -55,7 +52,7 @@ function saveSessionNow() {
       };
     }
   }
-  // terminal tab configs (the shell itself does not survive a restart —
+  // terminal tab configs (the shell itself does not survive a restart -
   // the tab reopens on its setup form, pre-filled)
   const terms = {};
   for (const t of st.tabs) {
@@ -63,7 +60,7 @@ function saveSessionNow() {
     const tc = st.terms[t.chatId];
     if (tc) {
       terms[t.chatId] = { container: tc.container, folders: tc.folders,
-                          network: !!tc.network, env: tc.env || "",
+                          network: netMode(tc.network), env: tc.env || "",
                           title: tc.title || null };
     }
   }
@@ -90,7 +87,3 @@ function applyTheme() {
   if (b) b.innerHTML = icon(st.theme === "light" ? "moon" : "sun");
 }
 
-function modelNames() {
-  if (!st.config || st.config.error) return [];
-  return (st.config.models || []).map((m) => m.name);
-}

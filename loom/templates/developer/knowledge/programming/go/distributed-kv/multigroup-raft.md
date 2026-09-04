@@ -1,9 +1,9 @@
-# Multi-group raft — many groups in one process
+# Multi-group raft - many groups in one process
 
 A sharded store runs one raft group per shard (see sharding.md), so a
 node hosts replicas of MANY groups. This file is the delta from a single
 group (etcd-raft.md) to hundreds per process. The single-group contract
-is unchanged — this is plumbing to run N of them affordably.
+is unchanged - this is plumbing to run N of them affordably.
 
 ## What is shared, what is per-group
 
@@ -17,7 +17,7 @@ Shared across all groups on the node:
   cheap). Thousands of timers is scheduler noise for nothing.
 - **One transport.** Every message is addressed `(to NodeID, GroupID,
   raftpb.Message)`; the receiver demuxes to the right group's `Step`.
-  Batch messages per destination node per flush — heartbeats for 500
+  Batch messages per destination node per flush - heartbeats for 500
   groups to the same peer should ride one network write, not 500.
 - **One storage engine.** All groups log into one Pebble DB under
   per-group prefixes (pebble.md):
@@ -30,7 +30,7 @@ Shared across all groups on the node:
   d/<group>/<userkey>   state machine data
   ```
 
-  One shared engine means one WAL and batched fsyncs across groups —
+  One shared engine means one WAL and batched fsyncs across groups -
   the difference between 100 and 10k fsyncs/s under load.
 
 ## The node skeleton
@@ -63,7 +63,7 @@ func (n *Node) run() {
 
 Each group still runs its own Ready-drain (goroutine per group is fine
 into the low thousands; beyond that, a worker pool draining a queue of
-"groups with pending Ready" — the contract per group is identical).
+"groups with pending Ready" - the contract per group is identical).
 
 **Batched persistence:** collect the HardState+Entries of every group
 that produced a Ready this cycle into ONE engine batch, one fsync, then
@@ -73,7 +73,7 @@ Advance) still hold within each group.
 
 ## Group lifecycle
 
-Groups are created and destroyed at runtime — this is what makes splits
+Groups are created and destroyed at runtime - this is what makes splits
 and rebalancing (sharding.md) possible.
 
 - **Create** (bootstrap or split): write a group descriptor
@@ -84,7 +84,7 @@ and rebalancing (sharding.md) possible.
 - **Create on demand**: a raft message for an unknown group may mean
   the metadata group placed a new replica here (a move in progress).
   Only create a replica in response to a message if the metadata group's
-  placement says this node should host it — otherwise drop the message.
+  placement says this node should host it - otherwise drop the message.
   (Unconditional create-on-message resurrects deleted groups.)
 - **Destroy** (after a move away or merge): stop the goroutine, delete
   `r/<group>/*`, `a/<group>`, `d/<group>/*` with a range delete, and
@@ -99,14 +99,14 @@ and rebalancing (sharding.md) possible.
 - Idle groups still heartbeat. At hundreds of groups either accept the
   (small, batched) cost, or implement quiescence: stop ticking groups
   with no traffic and wake them on the first message/proposal. Do
-  quiescence LAST — it is an optimization with real edge cases, not a
+  quiescence LAST - it is an optimization with real edge cases, not a
   requirement (this is also rung M6 vs later in build-plan.md).
 
 ## Rules
 
 - The per-group Ready contract from etcd-raft.md is unchanged; never
   interleave one group's persist/send/apply steps out of order even
-  when batching across groups (persist ALL, then send ALL, is fine —
+  when batching across groups (persist ALL, then send ALL, is fine -
   it strengthens the ordering, never weakens it).
 - `raft.Config.ID` is the NODE id and stays the same for every group on
   the node; the pair (GroupID, NodeID) names a replica.

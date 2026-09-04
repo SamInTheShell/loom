@@ -1,8 +1,8 @@
-# User systems — accounts, tokens, authorization
+# User systems - accounts, tokens, authorization
 
 The account and permission layer for a databox-style store. It is
 deliberately boring: a small amount of strongly-consistent state (in
-the metadata group — metadata-group.md), standard crypto primitives,
+the metadata group - metadata-group.md), standard crypto primitives,
 and one middleware seam every frontend shares (frontends.md,
 wire-protocols.md).
 
@@ -15,7 +15,7 @@ token/<tokenID>        Token{userRef, scopeGrants, expiry, secretHash}
 ```
 
 Users and grants change rarely → metadata-group write rates are fine,
-and every node can answer authz from its replicated copy — auth never
+and every node can answer authz from its replicated copy - auth never
 adds a network hop to the data path.
 
 ## Passwords
@@ -32,12 +32,12 @@ hash := argon2.IDKey(password, salt, 1, 64*1024, 4, 32)
 Verify by recomputing with the stored parameters and comparing with
 `subtle.ConstantTimeCompare`. Store the parameter string alongside so
 parameters can be raised later (rehash-on-successful-login when the
-stored params are below current policy). Never any other hash — not
+stored params are below current policy). Never any other hash - not
 bcrypt-because-familiar, definitely not SHA-anything.
 
 ## API tokens (the thing clients actually send)
 
-Opaque random tokens, hashed at rest — if the metadata store leaks,
+Opaque random tokens, hashed at rest - if the metadata store leaks,
 tokens don't:
 
 ```go
@@ -73,10 +73,10 @@ func Allowed(u *AuthCtx, res string, need Perm) bool
 Rules:
 
 - Check happens in ONE place: a middleware/interceptor that resolves
-  the token to an `AuthCtx` and the handler declares `need` — never
+  the token to an `AuthCtx` and the handler declares `need` - never
   ad-hoc checks scattered through handlers.
 - Deny by default; the error names the missing perm (`need write on
-  b/logs`) — debuggable denials get fixed instead of worked around.
+  b/logs`) - debuggable denials get fixed instead of worked around.
 - Admin API (frontends.md) requires PermAdmin AND is a separate
   listener/port so a network policy can fence it.
 - The property test from build-plan.md M9: for every API operation,
@@ -92,15 +92,15 @@ Rules:
 - Disabled users keep their rows (audit trail); tokens of a disabled
   user fail auth immediately (the check reads the user row too).
 - Rate-limit login attempts per user+IP (a token bucket in memory per
-  node is fine — it's a nuisance control, not a consistency problem).
-- Log auth DECISIONS (who, what, allowed/denied, from where) —
+  node is fine - it's a nuisance control, not a consistency problem).
+- Log auth DECISIONS (who, what, allowed/denied, from where) -
   metadata writes are the natural audit log for grant changes; denials
   go to the normal log.
 
 ## Multi-tenancy note
 
 If buckets are tenant boundaries, encode the tenant into the KV key
-prefix (`d/<group>/<bucket>/<key>` at the engine level — pebble.md key
+prefix (`d/<group>/<bucket>/<key>` at the engine level - pebble.md key
 schema) so a grant on a bucket is literally a grant on a key range;
 range-sharded groups then keep tenants contiguous, which also makes
 per-tenant usage accounting an engine range-size query.

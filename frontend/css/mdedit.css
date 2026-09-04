@@ -1,4 +1,4 @@
-/* The decorated-source editor — styling lifted from databox's personal
+/* The decorated-source editor - styling lifted from databox's personal
    cloud markdown editor (apps.css §12c²), mapped onto Loom's tokens.
    Markers stay visible but dimmed; neon per-depth heading blocks; fenced
    code drawn as a stacked border sandwich across line divs; line numbers
@@ -55,7 +55,7 @@
   padding-left: 4px; white-space: nowrap;
 }
 .md-findcount.md-findmiss { color: var(--warn); }
-/* match highlights (CSS Custom Highlight API — no DOM inside the lines).
+/* match highlights (CSS Custom Highlight API - no DOM inside the lines).
    Amber reads on both themes; the current match flips to dark-on-amber. */
 ::highlight(loom-find) { background-color: rgba(250, 204, 21, .30); }
 ::highlight(loom-find-cur) { background-color: #f59e0b; color: #18181b; }
@@ -92,7 +92,7 @@
 .md-h5 { font-size: 1em;    font-weight: 700; margin: 5px 0 2px; }
 .md-h6 { font-size: .95em;  font-weight: 700; margin: 5px 0 2px; }
 /* width:fit-content, NOT inline-block: the highlight hugs the text but the
-   line stays block-level — inline-block let consecutive headings share a
+   line stays block-level - inline-block let consecutive headings share a
    visual line */
 .md-neon .md-h1, .md-neon .md-h2, .md-neon .md-h3,
 .md-neon .md-h4, .md-neon .md-h5, .md-neon .md-h6 {
@@ -109,7 +109,7 @@
 /* tables: consecutive .md-trow lines form a CSS ANONYMOUS TABLE, so
    columns align across rows while every line stays plain editable
    source. Cells shade + rule horizontally (anonymous tables can't get
-   border-collapse, so vertical borders would double — the dimmed pipes
+   border-collapse, so vertical borders would double - the dimmed pipes
    serve as the column separators instead). */
 .md-trow { display: table-row; }
 .md-trow .md-tcell {
@@ -144,7 +144,7 @@
 .md-surface.md-codefile .mdline { border-radius: 0; }
 
 .md-copylayer { position: absolute; inset: 0; pointer-events: none; }
-/* positioned via inline left/top ONLY — left + a stylesheet right would
+/* positioned via inline left/top ONLY - left + a stylesheet right would
    stretch the button between the two */
 .md-copybtn {
   position: absolute; pointer-events: auto; white-space: nowrap;
@@ -154,7 +154,7 @@
 }
 .md-copybtn:hover { opacity: 1; color: var(--fg-0); border-color: var(--acc); }
 
-/* line numbers: CSS counters via ::before — never enter the DOM */
+/* line numbers: CSS counters via ::before - never enter the DOM */
 .md-surface.md-nums { counter-reset: mdln; padding-left: 52px; }
 .md-surface.md-nums .mdline { counter-increment: mdln; position: relative; }
 .md-surface.md-nums .mdline::before {

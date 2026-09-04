@@ -1,4 +1,4 @@
-/* main.js — boot, event routing, keyboard. */
+/* main.js - boot, event routing, keyboard. */
 "use strict";
 
 let _booted = false;
@@ -18,7 +18,6 @@ async function boot() {
   $("#btn-servers").innerHTML = icon("servers");
   $("#btn-mcp").innerHTML = icon("mcp");
   $("#btn-api").innerHTML = icon("globe");
-  $("#btn-models").innerHTML = icon("download");
   $("#btn-archive").innerHTML = icon("archive");
   $("#btn-envs").innerHTML = icon("key");
   $("#btn-switchlib").innerHTML = icon("swap");
@@ -33,7 +32,7 @@ async function boot() {
   libBtn.addEventListener("dragstart", (e) => {
     if (!st.library) { e.preventDefault(); return; }
     // custom dataTransfer types don't survive the embedded webview's
-    // drag pipeline — for a same-app drag the flag is the source of truth
+    // drag pipeline - for a same-app drag the flag is the source of truth
     st.dragLibrary = true;
     e.dataTransfer.setData("text/plain", st.library);
     e.dataTransfer.effectAllowed = "copy";
@@ -42,10 +41,9 @@ async function boot() {
   $("#btn-servers").addEventListener("click", () => openTab("servers"));
   $("#btn-mcp").addEventListener("click", () => openTab("mcpsrv"));
   $("#btn-api").addEventListener("click", () => openTab("apisrv"));
-  $("#btn-models").addEventListener("click", () => openTab("models"));
   $("#btn-archive").addEventListener("click", () => openTab("archive"));
   $("#btn-envs").addEventListener("click", () => openTab("envs"));
-  // no Ctrl-reveal chips on the nav buttons — their hover tooltips
+  // no Ctrl-reveal chips on the nav buttons - their hover tooltips
   // already spell out the shortcuts
   renderNotifBadge();
   $("#btn-notif").addEventListener("click", openAlertsTab);
@@ -155,7 +153,7 @@ function setupFramelessChrome() {
 
 /* Titlebar drag with a MOVEMENT THRESHOLD: startSystemMove on bare
  * mousedown hands the pointer to the compositor, which would eat the
- * second click of a double-click — so the system move only starts after
+ * second click of a double-click - so the system move only starts after
  * ~4px of actual motion, and dblclick reliably toggles maximize. */
 function wireDragRegion(region, isChrome) {
   let down = null;
@@ -202,20 +200,18 @@ function windowControls() {
 /* ---------- events from Python ---------- */
 onLMEvent((ev) => {
   switch (ev.type) {
-    case "srv": {
-      for (const r of ev.servers || []) st.servers[r.id] = r;
-      if (ev.event && ["running", "stopped", "error"].includes(ev.event.state)) {
-        delete st.notes[ev.event.id];
+    case "providers": {
+      for (const r of ev.providers || []) st.providers[r.name] = r;
+      // drop registry entries the backend no longer reports
+      const names = new Set((ev.providers || []).map((r) => r.name));
+      for (const k of Object.keys(st.providers)) {
+        if (!names.has(k)) delete st.providers[k];
       }
       if (st.activeTab === "servers") renderServersTab();
-      refreshChatModelSelectors();   // ●/◐/○ markers track live state
-      chatsOnSrvEvent();             // fire messages queued behind a start
+      refreshChatModelSelectors();   // ●/▲/○ markers track reachability
+      chatsOnProvidersEvent();
       break;
     }
-    case "note":
-      st.notes[ev.id] = ev.msg;
-      if (st.activeTab === "servers") renderServersTab();
-      break;
     case "config":
       st.config = ev.config;
       if (st.activeTab === "servers") refreshServersTab();
@@ -230,21 +226,18 @@ onLMEvent((ev) => {
     case "term":
       onTermEvent(ev);
       break;
-    case "models":
-      if (ev.op === "download") onDownloaderEvent(ev);
-      else onModelsEvent(ev);
-      break;
     case "apisrv":
       onApiSrvEvent(ev);
       break;
     case "mcp":
       onMcpEvent(ev);
       break;
-    case "prompt":
-      sshPromptModal(ev.id, ev.text);
+    case "diag_popin":
+      // a popped-out diagnostics window came home - reopen it as a tab
+      if (ev.chatId) openTab("diag", ev.chatId);
       break;
     case "confirm_quit":
-      confirmQuitModal(ev.servers || 0, ev.chats || 0, ev.terminals || 0);
+      confirmQuitModal(ev.chats || 0, ev.terminals || 0);
       break;
     case "winstate":
       applyWinState(ev.maximized);
@@ -255,16 +248,15 @@ onLMEvent((ev) => {
 /* ---------- switching libraries ---------- */
 async function switchLibraryFlow() {
   const res = await Api.call("switch_blockers");
-  const blk = res.ok ? res.data : { servers: [], chats: 0 };
+  const blk = res.ok ? res.data : { chats: 0, terminals: 0 };
 
   const back = async () => {
-    await Api.call("library_close");   // stops servers + cancels chats
+    await Api.call("library_close");   // cancels chats, closes terminals
     st.tabs = [];
     st.activeTab = null;
     st.library = null;
     st.chats = {};
-    st.servers = {};
-    st.notes = {};
+    st.providers = {};
     st.reasoning = {};
     st.pins = [];
     if (st.lib.editor) { st.lib.editor.destroy(); st.lib.editor = null; }
@@ -276,11 +268,6 @@ async function switchLibraryFlow() {
   };
 
   const consequences = [];
-  if (blk.servers.length) {
-    consequences.push(el("p", { text: "These llama-servers will be stopped:" }));
-    consequences.push(el("ul", {},
-      ...blk.servers.map((n) => el("li", { text: n }))));
-  }
   if (blk.chats) {
     consequences.push(el("p", {
       text: blk.chats + " chat generation" + (blk.chats > 1 ? "s" : "")
@@ -314,38 +301,21 @@ function renderNotifBadge() {
   b.classList.toggle("has-unseen", NotifLog.unseen > 0);
   const t = (NotifLog.unseen ? `Alerts (${NotifLog.unseen} new)` : "Alerts")
     + "  (Ctrl+Shift+A)";
-  // installTooltips may have absorbed title into data-tip — keep both fresh
+  // installTooltips may have absorbed title into data-tip - keep both fresh
   if (b.dataset.tip) b.dataset.tip = t;
   else b.title = t;
 }
 
-function sshPromptModal(promptId, text) {
-  const input = el("input", { type: "password" });
-  const remember = el("input", { type: "checkbox" });
-  modal("SSH needs a secret",
-    [el("p", { text }), input,
-     el("label", { class: "chk" }, remember, "Remember for this session")],
-    [
-      { label: "Cancel", fn: () => { Api.call("prompt_cancel", promptId); } },
-      {
-        label: "OK", cls: "btn-acc",
-        fn: () => { Api.call("prompt_answer", promptId, input.value, remember.checked); },
-      },
-    ]);
-  setTimeout(() => input.focus(), 0);
-}
-
-function confirmQuitModal(servers, chats, terminals) {
+function confirmQuitModal(chats, terminals) {
   const bits = [];
-  if (servers) bits.push(servers + " running server" + (servers > 1 ? "s" : ""));
   if (chats) bits.push(chats + " streaming chat" + (chats > 1 ? "s" : ""));
   if (terminals) bits.push(terminals + " terminal session" + (terminals > 1 ? "s" : ""));
-  // singleton: every close attempt pushes a confirm_quit event — repeated
+  // singleton: every close attempt pushes a confirm_quit event - repeated
   // clicks must replace this dialog, never stack another copy
   modal("Quit Loom?",
     [el("p", {
-      text: "Quitting stops " + (bits.join(" and ") || "running work")
-        + ". Servers die with the app.",
+      text: "Quitting cancels " + (bits.join(" and ") || "running work")
+        + ". Inference servers are not Loom's - they keep running.",
     })],
     [
       { label: "Cancel" },
@@ -362,8 +332,9 @@ function confirmQuitModal(servers, chats, terminals) {
 /* ---------- keyboard ----------
  * Hold Ctrl: every visible control reveals its key (hotkeys.js chips).
  * Ctrl+Shift+I  DevTools            Ctrl+N              new chat
+ * Ctrl+Shift+N  clone the active chat's setup into a new chat
  * Ctrl+T        new terminal        Ctrl+W              close tab
- * Ctrl+L / E / M / H   Library / Servers / Models / Archive
+ * Ctrl+L / E / H   Library / Providers / Archive
  * Ctrl+Shift+A  Alerts tab          Ctrl+Shift+E        Environments tab
  * Ctrl+1..9     jump to tab N
  * Ctrl+PgUp/PgDn        cycle tabs (also Ctrl+Tab)
@@ -372,7 +343,6 @@ function confirmQuitModal(servers, chats, terminals) {
  * Ctrl+R        the chat's Retry / Continue banner (when showing)
  * Ctrl+. / Ctrl+, / Ctrl+; / Ctrl+'   the active chat's model /
  *               permission / environment / container menus
- * Ctrl+Shift+N  toggle the active chat's container network access
  * PgUp/PgDn     in the message input: scroll the chat thread
  * Ctrl+F        library: focus search    Ctrl+\   library: tree ↔ editor
  * Esc           close menu/dialog, else stop the active chat's generation
@@ -382,13 +352,13 @@ function confirmQuitModal(servers, chats, terminals) {
 document.addEventListener("keydown", (e) => {
   const mod = e.ctrlKey || e.metaKey;
   // Ctrl/Cmd+Shift+I → the REAL Chromium DevTools (bounced to Python, which
-  // attaches the local devtools page — no remote debugger involved)
+  // attaches the local devtools page - no remote debugger involved)
   if (mod && e.shiftKey && (e.key === "I" || e.key === "i")) {
     e.preventDefault();
     Api.call("open_devtools");
     return;
   }
-  // Alt+Left / Alt+Right (and media-key equivalents) — navigation history
+  // Alt+Left / Alt+Right (and media-key equivalents) - navigation history
   if (st.library && e.altKey && !mod && !e.shiftKey) {
     if (e.key === "ArrowLeft") { e.preventDefault(); navGo(-1); return; }
     if (e.key === "ArrowRight") { e.preventDefault(); navGo(1); return; }
@@ -400,7 +370,7 @@ document.addEventListener("keydown", (e) => {
   }
   const anyModal = !!$("#modal-root").firstChild;
   const anyMenu = !!$("#ctx-root").firstChild;
-  // the active chat's permission gate: Ctrl+Enter allows, Ctrl+Esc denies —
+  // the active chat's permission gate: Ctrl+Enter allows, Ctrl+Esc denies -
   // but never while a dialog or menu sits on top of it
   if (st.library && mod && !e.shiftKey && !e.altKey && !anyModal && !anyMenu
       && (e.key === "Enter" || e.key === "Escape")) {
@@ -439,12 +409,12 @@ document.addEventListener("keydown", (e) => {
       if (tab) { e.preventDefault(); activateTab(tab.id); }
       return;
     }
-    // Ctrl+\ in a terminal is SIGQUIT — the shell keeps it
+    // Ctrl+\ in a terminal is SIGQUIT - the shell keeps it
     if (e.key === "\\" && !inTerm) {
       if (st.activeTab === "library") { e.preventDefault(); libToggleFocus(); }
       return;
     }
-    // Ctrl+. , ; '  — the active chat's model / permission / environment /
+    // Ctrl+. , ; '  - the active chat's model / permission / environment /
     // container menus (one adjacent key cluster)
     const MENU_KEYS = { ".": "model", ",": "perm", ";": "env", "'": "cont" };
     if (MENU_KEYS[e.key] && !e.shiftKey && !inTerm && !inEditor) {
@@ -459,10 +429,9 @@ document.addEventListener("keydown", (e) => {
     if (!e.shiftKey && !inTerm && !inEditor) {
       if (k === "l") { e.preventDefault(); openTab("library"); return; }
       if (k === "e") { e.preventDefault(); openTab("servers"); return; }
-      if (k === "m") { e.preventDefault(); openTab("models"); return; }
       if (k === "h") { e.preventDefault(); openTab("archive"); return; }
       if (k === "i") { e.preventDefault(); focusMessageInput(); return; }
-      // Ctrl+R — the Retry/Continue banner, whenever it is showing
+      // Ctrl+R - the Retry/Continue banner, whenever it is showing
       if (k === "r") {
         const active = tabById(st.activeTab);
         if (active?.type === "chat") {
@@ -473,7 +442,7 @@ document.addEventListener("keydown", (e) => {
       }
       if (k === "f" && st.activeTab === "library") {
         // inside the editor's find bar, Ctrl+F belongs to the editor
-        // (re-select the query) — not the library-wide search
+        // (re-select the query) - not the library-wide search
         if (e.target.closest && e.target.closest(".md-findbar")) return;
         e.preventDefault();
         st.lib.ui?.searchIn?.focus();
@@ -481,14 +450,17 @@ document.addEventListener("keydown", (e) => {
       }
     }
     if (e.shiftKey && k === "a") { e.preventDefault(); openAlertsTab(); return; }
-    // Ctrl+Shift+E — the Environments tab
+    // Ctrl+Shift+E - the Environments tab
     if (e.shiftKey && k === "e") { e.preventDefault(); openTab("envs"); return; }
-    // Ctrl+Shift+N — toggle container network access for the active chat
-    if (e.shiftKey && k === "n") {
+    // Ctrl+Shift+N - clone the active chat's setup into a fresh chat
+    // (model, permission mode, network, attachments; not the messages).
+    // Anywhere else it does nothing - there is nothing to clone.
+    if (e.shiftKey && k === "n" && !inTerm) {
       const active = tabById(st.activeTab);
-      const btn = active?.type === "chat"
-        ? panelFor(active.id)?.querySelector('[data-role="net"]') : null;
-      if (btn) { e.preventDefault(); btn.click(); }
+      if (active?.type === "chat") {
+        e.preventDefault();
+        newChat(true);
+      }
       return;
     }
     if (e.key === "PageDown") {
@@ -520,7 +492,7 @@ document.addEventListener("keydown", (e) => {
     if (anyMenu) { e.preventDefault(); closeCtxTop(); return; }
     if (closeTopModal()) { e.preventDefault(); return; }
     // nothing stacked on top: Esc cancels the active chat's generation
-    // (a running compaction counts — it must be cancellable too)
+    // (a running compaction counts - it must be cancellable too)
     if (!mod && st.library) {
       const active = tabById(st.activeTab);
       const acs = active?.type === "chat" ? st.chats[active.chatId] : null;

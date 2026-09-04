@@ -1,10 +1,10 @@
-/* mcptab.js — the MCP Servers tab (singleton): Model Context Protocol
+/* mcptab.js - the MCP Servers tab (singleton): Model Context Protocol
  * tool servers for chats. Servers are DEFINED in loom.yaml
- * (`mcp-servers:` — the wizard here writes entries non-destructively);
+ * (`mcp-servers:` - the wizard here writes entries non-destructively);
  * enable/disable starts/stops the process, and enabled servers autostart
  * when the library reopens. Each running server lists its tools with
- * their REAL function names (mcp_<server>_<tool>) — the name to use in
- * loom.yaml permission-modes overrides — and a per-tool DEFAULT
+ * their REAL function names (mcp_<server>_<tool>) - the name to use in
+ * loom.yaml permission-modes overrides - and a per-tool DEFAULT
  * permission picked right here. */
 "use strict";
 
@@ -82,7 +82,7 @@ function renderMcpTab() {
         el("p", { class: "mods-hint",
           text: "An entry like this wins over the defaults above for that "
             + "one mode. The exact function names are listed on each "
-            + "tool row — click one to copy it." }))));
+            + "tool row - click one to copy it." }))));
   }
 
   panel.append(wrap);
@@ -123,7 +123,7 @@ function mcpServerCard(s) {
 
   for (const t of s.tools || []) {
     const fn = el("code", { class: "mcp-fn", text: t.fullName,
-      title: "The real function name — use it in permission-modes. Click "
+      title: "The real function name - use it in permission-modes. Click "
         + "to copy." });
     fn.addEventListener("click", async () => {
       await copyText(t.fullName);
@@ -163,11 +163,11 @@ function mcpWizard() {
   const body = el("div", { class: "wiz-body" });
   modal("New MCP server", [body], [{ label: "Cancel" }], { id: "mcp-wizard" });
   const nameIn = el("input", { type: "text",
-    placeholder: "name — letters/digits/-/_ (part of tool function names)" });
+    placeholder: "name - letters/digits/-/_ (part of tool function names)" });
   const cmdIn = el("input", { type: "text",
     placeholder: "command, e.g. npx -y @modelcontextprotocol/server-filesystem /tmp" });
   const envIn = el("textarea", { class: "mcp-env",
-    placeholder: "environment (optional) — one KEY=value per line", rows: "3" });
+    placeholder: "environment (optional) - one KEY=value per line", rows: "3" });
   const add = el("button", { class: "btn btn-acc", text: "Add to loom.yaml",
     onclick: async () => {
       const env = {};
@@ -185,7 +185,7 @@ function mcpWizard() {
       closeTopModal();
       renderMcpTab();
       libReloadIfOpen(st.lib.configFile || "loom.yaml");
-      toast("Added — enable it to connect and see its tools.", "ok");
+      toast("Added - enable it to connect and see its tools.", "ok");
     } });
   body.append(
     el("p", { class: "wiz-hint",

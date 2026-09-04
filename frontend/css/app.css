@@ -17,7 +17,7 @@ button { font: inherit; color: inherit; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* =========================================================
-   library picker — the first screen
+   library picker - the first screen
    ========================================================= */
 #picker {
   height: 100%; display: flex; flex-direction: column;
@@ -66,7 +66,7 @@ button { font: inherit; color: inherit; }
   font-weight: 600;
 }
 /* opacity, not brightness: the primary is white in dark mode and near-
-   black in light mode — opacity hover reads correctly in both */
+   black in light mode - opacity hover reads correctly in both */
 .btn-acc:hover { opacity: .85; background: var(--acc); }
 .btn-danger { border-color: var(--err); color: var(--err); }
 .btn-danger:hover { background: var(--err-bg); }
@@ -112,7 +112,7 @@ body.frameless #topbar { user-select: none; }
 /* rounded window corners: the WINDOW is transparent; #app / #picker paint
    the rounded background and the corners show the desktop through */
 :root { --win-radius: 10px; }
-/* BOTH html and body must go transparent — either one painting --bg-0
+/* BOTH html and body must go transparent - either one painting --bg-0
    would fill the corner cutouts */
 html.frameless, html.frameless body { background: transparent; }
 body.frameless #app,
@@ -162,12 +162,12 @@ body.maximized #frame-border { display: none; }
 }
 #tabstrip::-webkit-scrollbar { display: none; }
 /* Tabs must read on color-inaccurate monitors: inactive tabs are FLAT
-   (no card, no near-invisible border — shape comes from hover only); the
+   (no card, no near-invisible border - shape comes from hover only); the
    active tab gets a strong border plus a maximal-contrast accent bar on
    top (white in dark mode, black in light). Nothing relies on telling
    two near-identical grays apart. */
 /* tabs shrink browser-style as the strip fills (names ellipsize, icon +
-   close stay); past the min width the strip falls back to scrolling —
+   close stay); past the min width the strip falls back to scrolling -
    wheel anywhere on it, and the active tab is kept in view */
 .tab {
   display: flex; align-items: center; gap: 7px;
@@ -290,7 +290,7 @@ body.maximized #frame-border { display: none; }
    servers tab
    ========================================================= */
 /* .tabpanel is display:flex (a row) for the library/chat layouts; the
-   servers and archive tabs are document-flow pages — without this their
+   servers and archive tabs are document-flow pages - without this their
    heading and cards flow SIDEWAYS as flex items */
 .tabpanel.srvtab, .tabpanel.arctab, .tabpanel.alrtab { display: block; }
 .srvtab { flex: 1; overflow-y: auto; padding: 18px; }
@@ -368,6 +368,13 @@ body.maximized #frame-border { display: none; }
 .srv-note { margin-top: 6px; color: var(--fg-1); font-size: var(--fs-sm); }
 .srv-detail { color: var(--fg-2); }
 .srv-detail.error { color: var(--err); white-space: pre-wrap; }
+/* the provider's model list (pulled from its API) */
+.srv-models { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
+.srv-model-row {
+  display: flex; gap: 10px; align-items: baseline;
+  font-size: var(--fs-sm); font-family: var(--font-mono);
+}
+.srv-model-ctx { color: var(--fg-2); font-size: var(--fs-xs); }
 .srv-logbar {
   margin-top: 10px; display: flex; align-items: center; gap: 6px;
 }
@@ -419,7 +426,7 @@ body.maximized #frame-border { display: none; }
 }
 
 /* native selects (wizard backend, terminal container): themed control AND
-   themed option list — the default popup is unreadable on dark */
+   themed option list - the default popup is unreadable on dark */
 select {
   padding: 6px 10px; border-radius: var(--r-md);
   border: 1px solid var(--bd-1); background: var(--bg-2); color: var(--fg-0);
@@ -571,7 +578,7 @@ select option { background: var(--bg-2); color: var(--fg-0); }
 .alr-list { max-width: 900px; margin: 0 auto; }
 
 /* keyboard-only focus ring: the button reset kills outlines, which left
- * Tab focus invisible — :focus-visible restores it without flashing on
+ * Tab focus invisible - :focus-visible restores it without flashing on
  * mouse clicks. Buttons/selects only: text fields show their caret, and
  * ringing the composer textarea painted a stray border around it. */
 button:focus-visible, .btn:focus-visible, .iconbtn:focus-visible,
@@ -588,8 +595,8 @@ select:focus-visible {
 /* ---------- the Environments tab + composer env pill ---------- */
 .tabpanel.envstab { display: block; }
 .envstab { flex: 1; overflow-y: auto; padding: 18px; }
-.envs-wrap { max-width: 860px; margin: 0 auto; display: flex; gap: 14px;
-  align-items: flex-start; }
+/* width comes from the shared .mods-wrap column around the whole tab */
+.envs-wrap { display: flex; gap: 14px; align-items: flex-start; }
 .envs-list { flex: 0 0 220px; display: flex; flex-direction: column; gap: 2px; }
 .env-editor { flex: 1; min-width: 0; background: var(--bg-2);
   border: 1px solid var(--bd-0); border-radius: var(--r-lg); padding: 12px; }
@@ -614,8 +621,20 @@ select:focus-visible {
   display: inline-block; width: 9px; height: 9px; border-radius: 2px;
   vertical-align: baseline;
 }
+/* summary tiles: the session's headline numbers, groups vanish whole */
+.diag-tiles {
+  display: flex; flex-wrap: wrap; gap: 6px; flex: none;
+}
+.diag-tile {
+  display: flex; flex-direction: column; gap: 1px; min-width: 86px;
+  padding: 5px 10px; border: 1px solid var(--bd-0);
+  border-radius: var(--r-md); background: var(--bg-1);
+}
+.diag-tile b { font-size: var(--fs-md); font-family: var(--font-mono); }
+.diag-tile span { font-size: var(--fs-xs); color: var(--fg-2); }
+
 .diag-graph {
-  flex: none; height: 220px; border: 1px solid var(--bd-0);
+  flex: none; height: 200px; border: 1px solid var(--bd-0);
   border-radius: var(--r-md); background: var(--bg-1); overflow: hidden;
 }
 .diag-canvas { width: 100%; height: 100%; display: block; cursor: grab; outline: none; }
@@ -623,10 +642,12 @@ select:focus-visible {
 .diag-canvas:focus-visible { outline: 1px solid var(--acc); outline-offset: -1px; }
 .diag-table {
   flex: 1; min-height: 0; overflow-y: auto; border: 1px solid var(--bd-0);
-  border-radius: var(--r-md); font-size: var(--fs-sm);
+  border-radius: var(--r-md); font-size: var(--fs-sm); outline: none;
 }
+.diag-table:focus-visible { outline: 1px solid var(--acc); outline-offset: -1px; }
 .diag-row {
-  display: grid; grid-template-columns: 44px 84px 92px 64px 62px 140px 1fr;
+  display: grid;
+  grid-template-columns: 40px 78px 88px 58px 60px 56px 56px 120px 1fr;
   gap: 8px; padding: 3px 10px; align-items: baseline; cursor: pointer;
   border-bottom: 1px solid var(--bd-0);
 }

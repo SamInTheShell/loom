@@ -8,18 +8,18 @@ server), qt backend, fully local DevTools.
 
 Read in this order:
 
-- **app-skeleton.md** — project layout, dependencies, the complete
+- **app-skeleton.md** - project layout, dependencies, the complete
   minimal `app.py`, why `file://` matters, and the new-project checklist.
-- **js-api-bridge.md** — the `JsApi` class: how Python methods become
+- **js-api-bridge.md** - the `JsApi` class: how Python methods become
   `window.pywebview.api.*` calls, async semantics, and the classic
   mistakes ("is not a function", un-awaited Promises).
-- **frameless-windows.md** — the borderless-window field guide: window
+- **frameless-windows.md** - the borderless-window field guide: window
   setup, compositor-native drag/resize, a page-drawn titlebar whose
   buttons and double-click work, and modals whose click-blocking
   backdrop leaves the titlebar functional.
-- **devtools.md** — wiring up classic local Chromium DevTools with
+- **devtools.md** - wiring up classic local Chromium DevTools with
   `setDevToolsPage` instead of the appspot remote-debugging redirect,
   plus its troubleshooting list.
-- **debugging.md** — day-to-day workflows: smoke-testing backend modules
+- **debugging.md** - day-to-day workflows: smoke-testing backend modules
   with `uv run python -c`, driving the Python side from the DevTools
   console, pure-UI iteration in a normal browser, and reload behavior.

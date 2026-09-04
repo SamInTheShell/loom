@@ -1,4 +1,4 @@
-/* hotkeys.js — hold Ctrl to reveal what the keyboard can do, right where
+/* hotkeys.js - hold Ctrl to reveal what the keyboard can do, right where
  * it can do it. Any element carrying data-hotkey gets a small chip pinned
  * to its corner while Ctrl is held. Chips are drawn only for elements
  * actually visible right now, so the reveal is context-aware by
@@ -69,7 +69,7 @@ function installHotkeyReveal() {
     timer = setTimeout(() => {
       draw();
       // the view can change while Ctrl stays held (Ctrl+L, menus opening,
-      // permission cards resolving) — keep the chips honest
+      // permission cards resolving) - keep the chips honest
       ticker = setInterval(draw, 350);
     }, HOTKEY_REVEAL_DELAY);
   }, true);

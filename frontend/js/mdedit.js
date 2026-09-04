@@ -1,19 +1,19 @@
-/* mdedit.js — the decorated-source editor, lifted from databox's personal
+/* mdedit.js - the decorated-source editor, lifted from databox's personal
  * cloud markdown editor and stripped of its collaboration layer (no ops,
- * no SSE, no presence — the file on disk is the document).
+ * no SSE, no presence - the file on disk is the document).
  *
  * It is a SOURCE view: the `#` markers, fences, and emphasis asterisks
- * stay visible, and the styling happens around them — neon per-depth
+ * stay visible, and the styling happens around them - neon per-depth
  * heading blocks, syntax-highlighted fenced code with copy buttons,
  * dimmed markers. Two modes:
  *   'md'    markdown decoration + per-fence code highlighting
  *   'code'  the whole file highlighted as one language (yaml, sh, ...)
  *
  * SAFETY: every rendered fragment is built from TEXT NODES and class-only
- * spans — no innerHTML of file content anywhere.
+ * spans - no innerHTML of file content anywhere.
  *
  * Caret rule (hard-won upstream): re-rendering the line under the caret
- * moves the caret — every re-render captures the character offset first
+ * moves the caret - every re-render captures the character offset first
  * and restores it after; decoration waits out IME composition and any
  * live multi-line selection.
  *
@@ -59,11 +59,11 @@ for (const [l, words] of Object.entries(ED_KW)) edKwSets[l] = new Set(words.spli
 const YAML_KEY_RE = /^(\s*(?:-\s+)?)((?:"[^"]*"|'[^']*'|[^\s:#][^:#]*?))(:)(\s|$)/;
 
 /* find-in-file: matches past this cap aren't tracked (the counter shows
- * "2000+") — keeps a 1-char query in a huge file from stalling the UI */
+ * "2000+") - keeps a 1-char query in a huge file from stalling the UI */
 const ED_FIND_MAX = 2000;
 
 /* scan lines for a plain-text query → [{line, start, end}], non-
- * overlapping, capped at `max`. Pure — node-testable. */
+ * overlapping, capped at `max`. Pure - node-testable. */
 function edFindMatches(lines, query, caseSense, max = ED_FIND_MAX) {
   const out = [];
   if (!query) return out;
@@ -84,7 +84,7 @@ function edFindMatches(lines, query, caseSense, max = ED_FIND_MAX) {
  * every non-blank line already commented → uncomment them all; otherwise
  * comment every non-blank line, inserting `marker + space` at the run's
  * minimum indentation. An all-blank run gets commented at column 0 (so a
- * lone empty line still toggles). Pure: returns {texts, deltas} — deltas
+ * lone empty line still toggles). Pure: returns {texts, deltas} - deltas
  * are per-line length changes, for caret restoration. */
 function edToggleCommentLines(texts, marker) {
   const escMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -193,7 +193,7 @@ function edInlineSegs(text) {
   const segs = [];
   let last = 0;
   // emphasis wraps other inline syntax all the time (**[link](doc.md)**
-  // — the docs do exactly this) — recurse into the inner text so a link
+  // - the docs do exactly this) - recurse into the inner text so a link
   // inside bold stays a clickable md-link, just also styled bold
   const nest = (inner, cls) => edInlineSegs(inner).map(([t, c, href]) =>
     [t, c ? c + ' ' + cls : cls, href]);
@@ -264,7 +264,7 @@ class LoomEditor {
     const v = localStorage.getItem('loom-md-' + k);
     return v === null ? dflt : v !== '0';
   }
-  /* wrap is OFF by default and remembered PER FILE TYPE — markdown, yaml,
+  /* wrap is OFF by default and remembered PER FILE TYPE - markdown, yaml,
    * python… each keeps its own toggle (the wizard's yaml editor shares
    * the yaml preference) */
   _wrapKey() {
@@ -287,9 +287,9 @@ class LoomEditor {
       tbtn('Undo', 'Undo (Ctrl+Z)', () => { this._diff(); this._undoStep(); });
       tbtn('Redo', 'Redo (Ctrl+Y)', () => { this._diff(); this._redoStep(); });
       if (this.mode === 'md') {
-        tbtn('B', 'Bold — wrap selection in ** (Ctrl+B)', () => this._wrapSel('**'));
-        tbtn('I', 'Italic — wrap selection in * (Ctrl+I)', () => this._wrapSel('*'));
-        tbtn('`', 'Inline code — wrap selection in backticks (Ctrl+E)', () => this._wrapSel('`'));
+        tbtn('B', 'Bold - wrap selection in ** (Ctrl+B)', () => this._wrapSel('**'));
+        tbtn('I', 'Italic - wrap selection in * (Ctrl+I)', () => this._wrapSel('*'));
+        tbtn('`', 'Inline code - wrap selection in backticks (Ctrl+E)', () => this._wrapSel('`'));
       }
     }
     tbtn('Find', 'Find in file (Ctrl+F)', () => this.openFind());
@@ -445,7 +445,7 @@ class LoomEditor {
         const sp = document.createElement('span');
         sp.className = c;
         sp.textContent = text;
-        if (href) { sp.dataset.href = href; sp.title = href + ' — Ctrl+Click to open'; }
+        if (href) { sp.dataset.href = href; sp.title = href + ' - Ctrl+Click to open'; }
         e.append(sp);
       } else {
         e.append(document.createTextNode(text));
@@ -538,7 +538,7 @@ class LoomEditor {
     this.copyLayer.replaceChildren();
     for (const e of fenceOpens) this._addCopyBtn(e);
     this._positionCopyBtns();
-    // re-render pass killed the highlight ranges on rewritten lines —
+    // re-render pass killed the highlight ranges on rewritten lines -
     // rebuild them (and recount: the text may have changed)
     if (this._find && this._find.open) this._findApply(false);
   }
@@ -576,7 +576,7 @@ class LoomEditor {
           const sp = document.createElement('span');
           sp.className = c;
           sp.textContent = t;
-          if (href) { sp.dataset.href = href; sp.title = href + ' — Ctrl+Click to open'; }
+          if (href) { sp.dataset.href = href; sp.title = href + ' - Ctrl+Click to open'; }
           cell.append(sp);
         } else {
           cell.append(document.createTextNode(t));
@@ -620,7 +620,7 @@ class LoomEditor {
 
   /* ---- find in file (Ctrl+F) ----
    * Matches are highlighted via the CSS Custom Highlight API (no DOM
-   * mutation — the decorator's sig cache and the caret walker never see
+   * mutation - the decorator's sig cache and the caret walker never see
    * them; ranges are simply rebuilt after every decorate pass). Where the
    * API is missing the current match falls back to a plain selection. */
   _buildFindbar() {
@@ -687,18 +687,25 @@ class LoomEditor {
     const f = this._find;
     if (!f.open) return;
     const m = f.matches[f.cur];
+    const r = m ? this._matchRange(m) : null;   // resolve BEFORE teardown
     f.open = false;
     f.matches = [];
     f.cur = -1;
     this.findbar.style.display = 'none';
     this.findCount.textContent = '';
     this._clearFindHl();
-    this.surface.focus();
+    // preventScroll is the whole fix: a bare focus() scrolls the tall
+    // surface into view, which reads as "jump to the top" and throws
+    // away the position find just earned
+    this.surface.focus({ preventScroll: true });
     if (m && !this.readOnly) {
       // leave the caret ON the match the user was looking at
       const line = this.surface.children[m.line];
       if (line) this._setCaret(line, m.start);
     }
+    // and leave the VIEWPORT there too - ending up at the match is the
+    // point of the feature
+    if (r) this._scrollToRange(r);
   }
   _findApply(userAction) {
     const f = this._find;
@@ -908,7 +915,7 @@ class LoomEditor {
       + ' characters · ' + lines + (lines === 1 ? ' line' : ' lines');
   }
 
-  /* Ctrl+/ — toggle line comments on the caret line / selected lines.
+  /* Ctrl+/ - toggle line comments on the caret line / selected lines.
    * Code mode only, and only for languages with a line-comment marker
    * (yaml, sh, py, js, dockerfile, ...). */
   _toggleComment() {
@@ -963,7 +970,7 @@ class LoomEditor {
   /* Enter is handled BY HAND: the browser's split clones the current line's
    * class onto the new one (a heading's neon block flashes tall then
    * collapses when decorate catches up). Splitting ourselves renders both
-   * halves plain and decorates synchronously — no flash. */
+   * halves plain and decorates synchronously - no flash. */
   _splitAtCaret() {
     const s = getSelection();
     if (!s || !s.rangeCount || !this.surface.contains(s.anchorNode)) return;
@@ -1025,7 +1032,7 @@ class LoomEditor {
 
     this.surface.addEventListener('keydown', (e) => {
       const mod = e.ctrlKey || e.metaKey;
-      // find works in read-only editors too — handled before the gate
+      // find works in read-only editors too - handled before the gate
       if (mod && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
         e.preventDefault();
         this.openFind();
@@ -1068,7 +1075,7 @@ class LoomEditor {
       }
     });
 
-    // Ctrl/Cmd+Click follows a link (this is a SOURCE editor — a plain
+    // Ctrl/Cmd+Click follows a link (this is a SOURCE editor - a plain
     // click is the user placing the caret to edit). Web URLs open
     // externally; relative targets go to the host app's resolver.
     this.surface.addEventListener('click', (e) => {

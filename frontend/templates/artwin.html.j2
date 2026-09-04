@@ -1,0 +1,52 @@
+<!doctype html>
+<!--
+  GENERATED FILE - do not edit artwin.html directly.
+  Source of truth: frontend/templates/ (rendered by loom/compose.py at app
+  launch, or manually via `uv run python -m loom.compose`).
+
+  The artifact preview window: one artifact from a chat's /artifacts
+  folder in a real OS window. Text opens in the markdown/code editor and
+  saves back IN PLACE (the model reads the edited file on its next tool
+  call); images render; everything else offers a download. Closes with
+  the main window.
+-->
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Artifact</title>
+{% for href in styles %}
+  <link rel="stylesheet" href="{{ href }}">
+{% endfor %}
+  <style>
+    html, body { height: 100%; }
+    body { background: var(--bg-0); display: flex; flex-direction: column; }
+    #artbar {
+      flex: none; display: flex; gap: 10px; align-items: center;
+      padding: 8px 12px; border-bottom: 1px solid var(--bd-0);
+      background: var(--bg-1);
+    }
+    #artbar .spacer { flex: 1; }
+    #artbar .arc-meta { color: var(--fg-2); font-size: var(--fs-xs); }
+    #arthost { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .art-center {
+      margin: auto; text-align: center; color: var(--fg-1);
+      display: flex; flex-direction: column; gap: 12px; align-items: center;
+    }
+    .art-center img {
+      max-width: 90vw; max-height: 75vh; border-radius: var(--r-md);
+      border: 1px solid var(--bd-0);
+    }
+  </style>
+</head>
+<body>
+  <div id="artbar"></div>
+  <div id="arthost"></div>
+  <div id="ctx-root"></div>
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+{% for src in scripts %}
+  <script src="{{ src }}"></script>
+{% endfor %}
+</body>
+</html>

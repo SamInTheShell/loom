@@ -1,8 +1,8 @@
-"""Compose frontend/index.html from the Jinja2 template — no HTTP server.
+"""Compose frontend/index.html from the Jinja2 template - no HTTP server.
 
 The frontend loads straight off disk via ``file://``: Chromium blocks
 ES-module imports and fetch() there, but classic <script src> and
-<link rel=stylesheet> work fine — so the page is plain .js/.css files and
+<link rel=stylesheet> work fine - so the page is plain .js/.css files and
 only index.html itself is assembled, at app launch (~1 ms).
 
 Regenerate manually with:  uv run python -m loom.compose
@@ -17,6 +17,8 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 TEMPLATES_DIR = FRONTEND_DIR / "templates"
 OUTPUT = FRONTEND_DIR / "index.html"
+DIAG_OUTPUT = FRONTEND_DIR / "diagwin.html"
+ART_OUTPUT = FRONTEND_DIR / "artwin.html"
 
 # Order matters: plain script tags, no modules. Later files may use
 # globals defined by earlier ones.
@@ -45,8 +47,6 @@ APP_SCRIPTS = [
     "js/servers.js",
     "js/chat.js",
     "js/terminal.js",
-    "js/modelstab.js",
-    "js/downloader.js",
     "js/apisrv.js",
     "js/mcptab.js",
     "js/archive.js",
@@ -54,6 +54,39 @@ APP_SCRIPTS = [
     "js/envstab.js",
     "js/diag.js",
     "js/main.js",
+]
+
+
+# the popped-out diagnostics window: a lean page reusing the same css
+# and the diag view, plus a tiny bootstrap (diagwin.js). No chat.js, no
+# tabs - the window shows ONE chat's diagnostics and nothing else.
+DIAG_STYLES = [
+    "css/tokens.css",
+    "css/app.css",
+    "css/term.css",
+]
+
+DIAG_SCRIPTS = [
+    "js/util.js",
+    "js/api.js",
+    "js/diag.js",
+    "js/diagwin.js",
+]
+
+# the artifact preview/editor window: the real markdown/code editor over
+# one artifact file (text saves back IN PLACE), images render, anything
+# else gets a download button.
+ART_STYLES = [
+    "css/tokens.css",
+    "css/app.css",
+    "css/mdedit.css",
+]
+
+ART_SCRIPTS = [
+    "js/util.js",
+    "js/api.js",
+    "js/mdedit.js",
+    "js/artwin.js",
 ]
 
 
@@ -70,6 +103,16 @@ def compose() -> Path:
         scripts=THIRD_PARTY + APP_SCRIPTS,
     )
     OUTPUT.write_text(html, encoding="utf-8")
+    diag = env.get_template("diagwin.html.j2").render(
+        styles=DIAG_STYLES,
+        scripts=DIAG_SCRIPTS,
+    )
+    DIAG_OUTPUT.write_text(diag, encoding="utf-8")
+    art = env.get_template("artwin.html.j2").render(
+        styles=ART_STYLES,
+        scripts=ART_SCRIPTS,
+    )
+    ART_OUTPUT.write_text(art, encoding="utf-8")
     return OUTPUT
 
 

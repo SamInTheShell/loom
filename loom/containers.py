@@ -1,23 +1,24 @@
-"""Container-backed shell execution for chats — never on the host.
+"""Container-backed shell execution for chats - never on the host.
 
 Distilled from CodeTree's containers.py to the essentials:
 
   * podman preferred, docker fallback (loom.yaml `containers.engine` pins).
   * images build from the library's container files (loom.yaml
     `containers.definitions: [{name, file}]`) into `loom/<name>:latest`,
-    with an EMPTY build context — a build can never slurp the library in.
+    with an EMPTY build context - a build can never slurp the library in.
   * every command runs `<engine> run --rm` as an UNPRIVILEGED user:
     the image's USER (the scaffolded Containerfile creates uid-1000
     `loom`), reinforced with --user 1000:1000, and `--userns keep-id` on
     rootless podman so mounted files keep sane ownership.
-  * networking is OFF (--network=none). There is deliberately no yaml key
-    to switch it on — library content must not widen a security boundary.
+  * networking is OFF by default (see NET_MODES: none / loopback / on -
+    per chat or terminal, user-chosen). There is deliberately no yaml key
+    to switch it on - library content must not widen a security boundary.
   * attached folders mount at /mnt/<name> (ro for view mode, rw for write
     mode); the library knowledge base mounts read-only at /knowledge and
     the chat's artifact folder read-write at /artifacts; a per-chat home
     persists at ~/.loom/homes/<chat-id> so state survives between
     commands within a chat.
-  * timeout / cancel: `<engine> rm -f <name>` — the unique per-exec name
+  * timeout / cancel: `<engine> rm -f <name>` - the unique per-exec name
     means we always kill exactly ours.
 """
 
@@ -34,6 +35,51 @@ from pathlib import Path
 from loom import store
 
 EXEC_TIMEOUT_DEFAULT = 300
+
+# ---------------------------------------------------------------------------
+# network modes. Three, not two:
+#   none      --network=none. The container keeps its OWN private loopback
+#             (an in-container server + curl 127.0.0.1 works); nothing
+#             outside the container is reachable.
+#   loopback  the HOST's loopback services (a llama-server on
+#             127.0.0.1:8080, a local database...) are reachable at
+#             10.0.2.2 - and nothing else is. Implemented with
+#             slirp4netns: allow_host_loopback maps the host loopback in,
+#             and outbound_addr=127.0.0.1 binds every outbound socket to
+#             the host's loopback, which makes external destinations
+#             unroutable AT THE KERNEL - no firewall rules, fully
+#             rootless. podman only (docker has no rootless equivalent).
+#   on        the engine's default network.
+
+NET_MODES = ("none", "loopback", "on")
+
+LOOPBACK_NET_ARG = ("--network=slirp4netns:allow_host_loopback=true,"
+                    "outbound_addr=127.0.0.1")
+
+
+def net_mode(value) -> str:
+    """Normalize a chat/terminal network setting. Legacy booleans (the
+    old on/off toggle) map to on/none; unknown values fail closed."""
+    if value is True:
+        return "on"
+    if isinstance(value, str) and value in NET_MODES:
+        return value
+    return "none"
+
+
+def net_args(engine: str, value) -> list[str]:
+    """The engine argv for a network mode."""
+    mode = net_mode(value)
+    if mode == "on":
+        return []
+    if mode == "none":
+        return ["--network=none"]
+    if "docker" in str(engine or ""):
+        raise ContainerError(
+            "loopback-only networking needs podman (slirp4netns) - docker "
+            "has no rootless equivalent. Switch this chat to no network "
+            "or network on, or use podman.")
+    return [LOOPBACK_NET_ARG]
 EXEC_TIMEOUT_MAX = 3600
 MAX_OUTPUT = 200_000
 BUILD_TIMEOUT = 1800
@@ -59,7 +105,7 @@ def resolve_engine(preference: str = "auto") -> str:
             _detected[pref] = found
     if not found:
         raise ContainerError(
-            "no container engine found — install podman (preferred) or "
+            "no container engine found - install podman (preferred) or "
             "docker, or set containers.engine in loom.yaml")
     return found
 
@@ -200,7 +246,7 @@ def run_shell(engine: str, image: str, chat_id: str, command: str,
               folders: list[dict] | None = None,
               timeout: int = EXEC_TIMEOUT_DEFAULT,
               cancel: threading.Event | None = None,
-              on_output=None, network: bool = False,
+              on_output=None, network="none",
               knowledge: Path | None = None,
               artifacts: Path | None = None,
               extra_env: dict | None = None) -> ExecResult:
@@ -210,7 +256,7 @@ def run_shell(engine: str, image: str, chat_id: str, command: str,
 
     knowledge mounts READ-ONLY at /knowledge; artifacts mounts READ-WRITE
     at /artifacts (the chat's delivery folder). extra_env vars reach the
-    container via a 0600 --env-file, NEVER the argv — secrets must not
+    container via a 0600 --env-file, NEVER the argv - secrets must not
     show in the host process list."""
     timeout = max(1, min(int(timeout or EXEC_TIMEOUT_DEFAULT), EXEC_TIMEOUT_MAX))
     name = f"loom-exec-{uuid.uuid4().hex[:12]}"
@@ -230,7 +276,7 @@ def run_shell(engine: str, image: str, chat_id: str, command: str,
         vol += ["--env-file", str(env_file)]
     home = chat_home(chat_id)
     argv = [engine, "run", "--rm", "--name", name,
-            *([] if network else ["--network=none"]),
+            *net_args(engine, network),
             "-v", f"{home}:/home/loom:rw",
             *vol, *_user_args(engine),
             "-e", "HOME=/home/loom", "-w", "/home/loom",
@@ -272,7 +318,7 @@ def run_shell(engine: str, image: str, chat_id: str, command: str,
             break
         if cancel is not None and cancel.is_set():
             # EAGER cancel: the kill runs in the background and the caller
-            # unblocks immediately — the output is being discarded anyway
+            # unblocks immediately - the output is being discarded anyway
             cancelled = True
             threading.Thread(target=_kill, daemon=True,
                              name=f"kill-{name}").start()

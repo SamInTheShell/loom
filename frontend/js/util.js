@@ -1,4 +1,4 @@
-/* util.js — DOM helpers, icons, toasts, context menus, modals.
+/* util.js - DOM helpers, icons, toasts, context menus, modals.
  * No frameworks, no modules (file:// origin). */
 "use strict";
 
@@ -47,7 +47,6 @@ const ICONS = {
   md: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 17v-4l2 2 2-2v4"/>',
   bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
   terminal: '<path d="M4 17l6-5-6-5"/><path d="M12 19h8"/>',
-  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/>',
   copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   send: '<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/>',
   up: '<path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>',
@@ -85,7 +84,7 @@ function iconFor(fileName) {
 
 /* ---------- toasts + the notification log ----------
  * Every toast is also recorded in NotifLog, so a message that auto-
- * dismissed is never lost — the bell in the top bar opens the history.
+ * dismissed is never lost - the bell in the top bar opens the history.
  * Toasts are selectable, hover pauses the auto-dismiss, × dismisses. */
 const NotifLog = { items: [], unseen: 0 };
 
@@ -141,7 +140,7 @@ function copyText(text) {
 /* ---------- context menus / overlay bookkeeping ----------
  * ONE overlay (#ctx-root) hosts every context menu and popup. Its
  * outside-click listeners MUST be torn down on close: #ctx-root persists,
- * so a listener left behind still points at its old, detached menu —
+ * so a listener left behind still points at its old, detached menu -
  * menu.contains() is then false for everything, and any click (even
  * inside the next menu) instantly closes it. _overlayCleanup owns the
  * teardown; closeCtx() runs it. */
@@ -172,7 +171,7 @@ function _menuItems(menu) {
   return [...menu.querySelectorAll(MENU_ITEM_SEL)];
 }
 
-/* every menu item gets a faint number — its hotkey while the menu is open.
+/* every menu item gets a faint number - its hotkey while the menu is open.
  * Idempotent: the MutationObserver that calls it must settle. */
 function _numberMenuItems(menu) {
   _menuItems(menu).forEach((it, i) => {
@@ -196,6 +195,7 @@ function _menuKeyHandler(menu, close) {
       item.scrollIntoView({ block: "nearest" });
     }
   };
+  menu._kbdSetSel = setSel;   // menus re-seed the cursor after re-renders
   const move = (delta) => {
     const items = _menuItems(menu);
     if (!items.length) return;
@@ -220,6 +220,27 @@ function _menuKeyHandler(menu, close) {
       e.preventDefault();
       e.stopPropagation();
       move(e.key === "ArrowDown" ? 1 : -1);
+    } else if (e.key === "ArrowRight" && !inField) {
+      // descend into a submenu: rows whose CLICK descends carry
+      // data-submenu; rows whose click picks a value but still have a
+      // deeper layer (a model's reasoning) register row._submenu instead
+      const cur = selected() || menu.querySelector(MENU_ITEM_SEL + ".sel");
+      if (cur && typeof cur._submenu === "function") {
+        e.preventDefault();
+        e.stopPropagation();
+        cur._submenu();
+      } else if (cur && cur.dataset.submenu !== undefined) {
+        e.preventDefault();
+        e.stopPropagation();
+        cur.click();
+      }
+    } else if (e.key === "ArrowLeft" && !inField) {
+      // ascend: the menu registers its back action as menu._back
+      if (typeof menu._back === "function") {
+        e.preventDefault();
+        e.stopPropagation();
+        menu._back();
+      }
     } else if ((e.key === "Home" || e.key === "End") && !inField) {
       e.preventDefault();
       e.stopPropagation();
@@ -255,10 +276,20 @@ function _armOverlay(menu, close) {
   root.addEventListener("contextmenu", onCtxEv);
   const onKeys = _menuKeyHandler(menu, close);
   document.addEventListener("keydown", onKeys, true);
-  // popup menus fill their lists asynchronously — number whatever appears
-  const obs = new MutationObserver(() => _numberMenuItems(menu));
+  // the ACTIVE row is where Up/Down start from - seed the keyboard cursor
+  // on it the moment it exists, and RE-seed after any async re-render
+  // that wiped it (lists that fill in later, live state redraws). This is
+  // what makes the first arrow press move relative to the current value
+  // instead of jumping to the top of the list.
+  const seedCursor = () => {
+    if (menu.querySelector(MENU_ITEM_SEL + ".kbd-sel")) return;
+    menu.querySelector(MENU_ITEM_SEL + ".sel")?.classList.add("kbd-sel");
+  };
+  // popup menus fill their lists asynchronously - number whatever appears
+  const obs = new MutationObserver(() => { _numberMenuItems(menu); seedCursor(); });
   obs.observe(menu, { childList: true, subtree: true });
   _numberMenuItems(menu);
+  seedCursor();
   _overlayClose = close;
   _overlayCleanup = () => {
     root.removeEventListener("mousedown", onDown);
@@ -290,7 +321,7 @@ function ctxMenu(x, y, items) {
 }
 
 /* ---------- anchored popup menus ----------
- * A rounded popup that opens ABOVE its anchor (right edges aligned) —
+ * A rounded popup that opens ABOVE its anchor (right edges aligned) -
  * for controls near the bottom of the window, e.g. the composer's model
  * and permission-mode menus. Falls below only when there is no room.
  * build(menu, close) fills it; returns {menu, close}. */
@@ -336,7 +367,7 @@ function closeTopModal() {
 function modal(title, bodyNodes, buttons, opts) {
   const root = $("#modal-root");
   // opts.id makes the modal a SINGLETON: a second open with the same id
-  // replaces the first — repeated triggers (quit clicks, repeated events)
+  // replaces the first - repeated triggers (quit clicks, repeated events)
   // must never stack copies on screen
   if (opts && opts.id) {
     for (const old of root.querySelectorAll(
@@ -359,7 +390,7 @@ function modal(title, bodyNodes, buttons, opts) {
 }
 
 /* ---------- dialog keyboard ----------
- * Esc closes (global handler); Enter fires the primary action — the last
+ * Esc closes (global handler); Enter fires the primary action - the last
  * enabled .btn-acc/.btn-danger anywhere in the dialog, so multi-step
  * bodies (the model wizard) get their Next/Add button too. Ctrl+Enter and
  * Ctrl+Esc work identically ("same deal" as permission cards). Tab is
@@ -371,7 +402,7 @@ function _modalPrimary(m) {
 }
 
 function _wireModalKeys(m) {
-  // dialogs BORROW focus — closing must hand it back to whatever had it
+  // dialogs BORROW focus - closing must hand it back to whatever had it
   // (the composer keeps its caret through a "start the model?" detour)
   const prevFocus = document.activeElement;
   const origRemove = m.remove.bind(m);
@@ -424,7 +455,7 @@ function _wireModalKeys(m) {
 }
 
 function confirmModal(title, text, okLabel, fn, danger, id) {
-  // id makes the confirm a SINGLETON — repeated triggers (Enter spam on a
+  // id makes the confirm a SINGLETON - repeated triggers (Enter spam on a
   // gated send, repeated events) replace the dialog instead of stacking
   modal(title, [el("p", { text })], [
     { label: "Cancel" },
@@ -446,7 +477,7 @@ function promptModal(title, text, initial, fn, okLabel) {
 
 /* ---------- links ----------
  * The rule: a target with a REAL URI scheme (https:, mailto:, …) belongs
- * to the OS — but only after the user confirms in-app; anything else is
+ * to the OS - but only after the user confirms in-app; anything else is
  * a library document. The webview itself never navigates. */
 function isAbsoluteUri(s) {
   return /^[a-z][a-z0-9+.-]*:/i.test(String(s || ""));
@@ -479,7 +510,7 @@ function timeAgo(ts) {
 }
 
 /* a live relative timestamp: the element carries its epoch and a global
- * ticker (main.js) refreshes every one on screen — "just now" must not
+ * ticker (main.js) refreshes every one on screen - "just now" must not
  * stay "just now" while the window sits open */
 function tago(ts) {
   return el("span", { "data-tago": String(ts || 0), text: timeAgo(ts) });
@@ -488,6 +519,20 @@ function tago(ts) {
 function baseName(p) {
   const parts = String(p || "").replace(/\/+$/, "").split("/");
   return parts[parts.length - 1] || p;
+}
+
+function fmtTok(n) {
+  n = Number(n);
+  if (!Number.isFinite(n) || n < 0) n = 0;
+  return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(Math.round(n));
+}
+
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1024 ** 3) return (n / 1024 ** 2).toFixed(1) + " MB";
+  return (n / 1024 ** 3).toFixed(2) + " GB";
 }
 
 function debounce(fn, ms) {
@@ -505,7 +550,7 @@ function renderMarkdown(text) {
   }
 }
 
-/* Full-panel re-renders (replaceChildren) destroy the focused input —
+/* Full-panel re-renders (replaceChildren) destroy the focused input -
  * mid-typing, a background event would silently steal the caret. Inputs
  * that must survive carry data-keep="<key>"; capture before the rebuild,
  * restore after. */

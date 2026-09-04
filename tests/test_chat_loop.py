@@ -1,47 +1,50 @@
-"""End-to-end chat loop test against a FAKE llama-server speaking SSE over
-a unix socket — exercises streaming deltas, a tool call (knowledge_search,
-allowed by default), the second turn, stats injection, persistence, and
-the ask-gate deny path. No GUI, no real model.
+"""End-to-end chat loop test against a FAKE inference provider speaking
+SSE over plain HTTP (exactly how Loom reaches llama-server / ninfer now)
+- exercises streaming deltas, live timings + prompt-progress forwarding,
+a tool call (knowledge_search, allowed by default), the second turn,
+stats injection, persistence, and the ask-gate deny path. No GUI, no
+real model.
 
 Run: uv run python tests/test_chat_loop.py
 """
 
 import json
 import os
-import socketserver
 import sys
 import tempfile
 import threading
 import time
-from http.server import BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 os.environ["LOOM_HOME"] = tempfile.mkdtemp(prefix="loomtest-home-")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from loom import chat, chats, libconfig, library, srv  # noqa: E402
+from loom import chat, chats, libconfig, library, providers  # noqa: E402
 
 FAILS = []
 
 
 def check(name, cond, detail=""):
-    print(("ok  " if cond else "FAIL") + f"  {name}" + (f" — {detail}" if not cond else ""))
+    print(("ok  " if cond else "FAIL") + f"  {name}" + (f" - {detail}" if not cond else ""))
     if not cond:
         FAILS.append(name)
 
 
-# ---------- the fake llama-server ----------
+# ---------- the fake provider ----------
 class FakeLlama(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-
-    def address_string(self):
-        return "unix"
 
     def log_message(self, *a):
         pass
 
     def do_GET(self):
-        body = b'{"status":"ok"}'
+        if self.path.startswith("/v1/models"):
+            body = json.dumps({"object": "list", "data": [
+                {"id": "fake", "object": "model",
+                 "meta": {"n_ctx": 4096, "n_ctx_train": 32768}}]}).encode()
+        else:
+            body = b'{"status":"ok"}'
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -53,7 +56,7 @@ class FakeLlama(BaseHTTPRequestHandler):
         self.server.requests.append(req)
         if self.server.mode == "stall":
             # a busy server chewing a huge prompt: NO response headers for
-            # a long time — cancels must not have to wait this out
+            # a long time - cancels must not have to wait this out
             time.sleep(30)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -71,6 +74,21 @@ class FakeLlama(BaseHTTPRequestHandler):
             self.wfile.flush()
             return
 
+        # prompt-processing progress, llama.cpp/ninfer shape
+        sse({"choices": [{"delta": {}}],
+             "prompt_progress": {"total": 7, "cache": 2, "processed": 7,
+                                 "time_ms": 12}})
+        # thinkonly: the model burns tokens thinking and halts without an
+        # answer, EVERY time. flaky: only the first attempt does.
+        if self.server.mode == "thinkonly" or (
+                self.server.mode == "flaky" and len(self.server.requests) == 1):
+            sse({"choices": [{"delta": {"reasoning_content": "hmm hmm "}}]})
+            sse({"choices": [], "usage": {"prompt_tokens": 7,
+                                          "completion_tokens": 3,
+                                          "total_tokens": 10}})
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+            return
         has_tool_result = any(m.get("role") == "tool" for m in req["messages"])
         if not has_tool_result and self.server.mode == "tools":
             sse({"choices": [{"delta": {"reasoning_content": "hmm "}}]})
@@ -81,20 +99,20 @@ class FakeLlama(BaseHTTPRequestHandler):
                 {"index": 0, "function": {"arguments": json.dumps(self.server.tool_args)}}]}}]})
         else:
             for piece in ("Hello ", "from ", "fake llama"):
-                sse({"choices": [{"delta": {"content": piece}}]})
+                sse({"choices": [{"delta": {"content": piece}}],
+                     "timings": {"predicted_per_second": 42.5}})
         sse({"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3,
                                       "total_tokens": 10},
-             "timings": {"predicted_per_second": 42.5, "predicted_n": 3}})
+             "timings": {"predicted_per_second": 42.5, "predicted_n": 3,
+                         "prompt_n": 5, "cache_n": 2, "prompt_ms": 10.0,
+                         "predicted_ms": 70.0, "prompt_per_second": 500.0}})
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
 
-class UnixHTTPServer(socketserver.ThreadingUnixStreamServer):
-    daemon_threads = True
-
-
-def start_fake(sock_path, mode, tool_name="knowledge_search", tool_args=None):
-    server = UnixHTTPServer(sock_path, FakeLlama)
+def start_fake(mode, tool_name="knowledge_search", tool_args=None):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeLlama)
+    server.daemon_threads = True
     server.mode = mode
     server.tool_name = tool_name
     server.tool_args = tool_args or {"query": "needle"}
@@ -103,12 +121,24 @@ def start_fake(sock_path, mode, tool_name="knowledge_search", tool_args=None):
     return server
 
 
-def run_chat(root, model_name, sock, mode, tool_name="knowledge_search",
+def point_config(root, server):
+    (root / "loom.yaml").write_text(
+        "providers:\n- name: fakeprov\n  type: llama-cpp\n"
+        f"  url: http://127.0.0.1:{server.server_address[1]}\n"
+        "chat:\n  model: fake\n"
+        "permissions:\n  tools:\n    knowledge_search: allow\n"
+        "    shell: ask\n")
+
+
+def endpoint(root):
+    return chat.resolve_endpoint(libconfig.load(root),
+                                 {"provider": "", "model": "fake"})
+
+
+def run_chat(root, model_name, mode, tool_name="knowledge_search",
              tool_args=None, answer=None, folders=None, shutdown_after=True):
-    server = start_fake(sock, mode, tool_name, tool_args)
-    mid = libconfig.load(root)["models"][0]["id"]
-    with srv._lock:
-        srv._servers[mid] = {"id": mid, "state": "running", "sock": sock}
+    server = start_fake(mode, tool_name, tool_args)
+    point_config(root, server)
     c = chats.new_chat(root, model_name)
     if folders:
         c["folders"] = folders
@@ -140,22 +170,25 @@ def _drive(root, c, server, mode, answer, shutdown_after=True):
 with tempfile.TemporaryDirectory() as d:
     root = library.create_library(d + "/lib")
     (root / "knowledge" / "notes.md").write_text("the needle is here")
-    (root / "loom.yaml").write_text(
-        "models:\n- name: fake\n  model: /x.gguf\n  context: 4096\n"
-        "permissions:\n  mode: ask\n  tools:\n    knowledge_search: allow\n"
-        "    shell: ask\n")
 
-    sock1 = os.environ["LOOM_HOME"] + "/fake1.sock"
-    cid, events, reqs, finished = run_chat(root, "fake", sock1, mode="tools")
+    cid, events, reqs, finished = run_chat(root, "fake", mode="tools")
     kinds = [e["kind"] for e in events]
     check("loop finished", finished, str(kinds))
     check("think delta arrived", "think" in kinds)
+    check("prompt progress forwarded",
+          any(e["kind"] == "progress"
+              and e.get("progress", {}).get("total") == 7 for e in events),
+          str(kinds))
     check("tool_call fired", "tool_call" in kinds)
     check("tool executed without asking (allow)", "tool_wait" not in kinds)
     tr = next((e for e in events if e["kind"] == "tool_result"), {})
     check("knowledge_search found the file", "notes.md" in str(tr.get("result", "")), str(tr))
     check("final content streamed", any(e["kind"] == "delta" and "fake llama" in e.get("text", "") or e.get("text") == "Hello " for e in events))
     check("stats pushed", any(e["kind"] == "stats" and (e.get("usage") or {}).get("total_tokens") == 10 for e in events))
+    check("live timings pushed at least once",
+          any(e["kind"] == "live_stats"
+              and (e.get("timings") or {}).get("predicted_per_second")
+              for e in events), str(kinds))
     check("done event", kinds[-1] == "done")
 
     saved = chats.load_chat(root, cid)
@@ -164,6 +197,14 @@ with tempfile.TemporaryDirectory() as d:
           roles == ["user", "assistant", "tool", "assistant"], str(roles))
     check("timings persisted on assistant msg",
           any(m.get("timings") for m in saved["messages"] if m["role"] == "assistant"))
+    check("ttft persisted on assistant msg",
+          any(m.get("ttftMs") is not None
+              for m in saved["messages"] if m["role"] == "assistant"),
+          str([m.get("ttftMs") for m in saved["messages"]]))
+    speeds = chat._measured_speeds(saved)
+    check("measured speeds from real timings",
+          speeds["prompt"] == 500.0 and speeds["gen"] == 42.5
+          and speeds["cached"] == 2, str(speeds))
 
     def wait_title(chat_id, timeout=15):
         t0 = time.time()
@@ -178,9 +219,11 @@ with tempfile.TemporaryDirectory() as d:
     # the model path fails and the first-words fallback must land
     check("auto-title fallback set", wait_title(cid).startswith("find the needle"),
           wait_title(cid, 1))
-    check("stream stats injected into request",
+    check("stream stats + progress injected into request",
           reqs and reqs[0].get("timings_per_token") is True
+          and reqs[0].get("return_progress") is True
           and (reqs[0].get("stream_options") or {}).get("include_usage") is True)
+    check("request names the model id", reqs[0].get("model") == "fake")
     check("tools offered to the model",
           any(t["function"]["name"] == "knowledge_search" for t in reqs[0].get("tools", [])))
     check("write_file offered without write folders (/artifacts is rw)",
@@ -189,9 +232,8 @@ with tempfile.TemporaryDirectory() as d:
     # ---------- ask-gate: user denies a shell call (write folder attached,
     # so shell is available and the gate genuinely asks) ----------
     workdir = tempfile.mkdtemp(prefix="loomtest-work-")
-    sock2 = os.environ["LOOM_HOME"] + "/fake2.sock"
     cid2, events2, reqs2, finished2 = run_chat(
-        root, "fake", sock2, mode="tools", tool_name="shell",
+        root, "fake", mode="tools", tool_name="shell",
         tool_args={"command": "echo hi"}, answer="deny",
         folders=[{"path": workdir, "mode": "write"}])
     kinds2 = [e["kind"] for e in events2]
@@ -202,12 +244,11 @@ with tempfile.TemporaryDirectory() as d:
     check("deny: shell was offered (write folder)",
           any(t["function"]["name"] == "shell" for t in reqs2[0].get("tools", [])))
 
-    # ---------- shell without write folders: a READ-ONLY tooling option —
+    # ---------- shell without write folders: a READ-ONLY tooling option -
     # view mounts and /knowledge are :ro in the container, so the tool is
     # offered and goes through the NORMAL permission gate ----------
-    sock3 = os.environ["LOOM_HOME"] + "/fake3.sock"
     cid3, events3, reqs3, finished3 = run_chat(
-        root, "fake", sock3, mode="tools", tool_name="shell",
+        root, "fake", mode="tools", tool_name="shell",
         tool_args={"command": "echo hi"}, answer="deny")   # no folders at all
     kinds3 = [e["kind"] for e in events3]
     check("no-folder shell: loop finished", finished3, str(kinds3))
@@ -219,15 +260,80 @@ with tempfile.TemporaryDirectory() as d:
     check("no-folder shell: deny respected",
           tr3.get("ok") is False and "declined" in str(tr3.get("result")), str(tr3))
 
+    # ---------- answerless turns retry, then give up honestly ----------
+    # a model that halts mid-thought gets the turn passed back up to 3
+    # times; if it never answers, done carries gaveUp for the frontend
+    cidH, evH, reqH, okH = run_chat(root, "fake", mode="thinkonly")
+    doneH = [e for e in evH if e["kind"] == "done"][-1]
+    retriesH = [e for e in evH if e["kind"] == "retry"]
+    check("thinking-only halts retried exactly 3 times",
+          okH and len(reqH) == 4 and len(retriesH) == 3
+          and retriesH[-1]["attempt"] == 3, str((len(reqH), retriesH)))
+    check("exhausted retries report gaveUp", doneH.get("gaveUp") is True)
+    savedH = chats.load_chat(root, cidH)
+    check("every halted thought is preserved",
+          sum(1 for m in savedH["messages"]
+              if m["role"] == "assistant" and m.get("thinking")
+              and not m.get("content")) == 4, str(savedH["messages"]))
+
+    # one bad attempt, then a real answer: the retry recovers quietly
+    cidK, evK, reqK, okK = run_chat(root, "fake", mode="flaky")
+    doneK = [e for e in evK if e["kind"] == "done"][-1]
+    check("a single retry recovers",
+          okK and len(reqK) == 2 and not doneK.get("gaveUp")
+          and len([e for e in evK if e["kind"] == "retry"]) == 1,
+          str(len(reqK)))
+    savedK = chats.load_chat(root, cidK)
+    check("the recovered run ends on a real answer",
+          savedK["messages"][-1]["role"] == "assistant"
+          and savedK["messages"][-1]["content"] == "Hello from fake llama")
+
+    # ---------- tool outcomes: ok / failed / cancelled ----------
+    # the shell reports (text, status); a cancelled or nonzero-exit run
+    # must never persist (or render) as "ok". _exec_tool is patched so no
+    # container engine is needed.
+    _orig_exec = chat._exec_tool
+    try:
+        chat._exec_tool = lambda *a, **k: ("exit -1\n[cancelled]\npartial",
+                                           "cancelled")
+        cidX, evX, _rX, okX = run_chat(
+            root, "fake", mode="tools", tool_name="shell",
+            tool_args={"command": "sleep 99"}, answer="allow")
+        trX = next(e for e in evX if e["kind"] == "tool_result")
+        check("cancelled shell: event says cancelled, not ok",
+              okX and trX["ok"] is False and trX.get("cancelled") is True,
+              str(trX))
+        mX = next(m for m in chats.load_chat(root, cidX)["messages"]
+                  if m["role"] == "tool")
+        check("cancelled shell persisted as cancelled",
+              mX["ok"] is False and mX.get("cancelled") is True, str(mX))
+
+        chat._exec_tool = lambda *a, **k: ("exit 2\nboom", "failed")
+        cidY, _evY, _rY, okY = run_chat(
+            root, "fake", mode="tools", tool_name="shell",
+            tool_args={"command": "false"}, answer="allow")
+        mY = next(m for m in chats.load_chat(root, cidY)["messages"]
+                  if m["role"] == "tool")
+        check("nonzero-exit shell persisted as failed",
+              okY and mY["ok"] is False and not mY.get("cancelled"), str(mY))
+
+        chat._exec_tool = lambda *a, **k: ("exit 0\nfine", "ok")
+        cidZ, _evZ, _rZ, okZ = run_chat(
+            root, "fake", mode="tools", tool_name="shell",
+            tool_args={"command": "true"}, answer="allow")
+        mZ = next(m for m in chats.load_chat(root, cidZ)["messages"]
+                  if m["role"] == "tool")
+        check("exit-0 shell stays ok",
+              okZ and mZ["ok"] is True and not mZ.get("cancelled"), str(mZ))
+    finally:
+        chat._exec_tool = _orig_exec
+
     # ---------- a mode switch re-decides calls already waiting at the gate
     # (the plumbing chat_set_mode drives: pending_for → permission_for →
     # answer) ----------
-    sock4 = os.environ["LOOM_HOME"] + "/fake4.sock"
-    server4 = start_fake(sock4, "tools", "write_file",
+    server4 = start_fake("tools", "write_file",
                          {"path": "/artifacts/x.txt", "content": "hey"})
-    mid4 = libconfig.load(root)["models"][0]["id"]
-    with srv._lock:
-        srv._servers[mid4] = {"id": mid4, "state": "running", "sock": sock4}
+    point_config(root, server4)
     c4 = chats.new_chat(root, "fake")
     c4["messages"].append({"role": "user", "content": "write it"})
     chats.save_chat(root, c4)
@@ -243,7 +349,7 @@ with tempfile.TemporaryDirectory() as d:
     # a live, UNCANCELLED stream must not be waited out (send stays refused)
     check("cancel-race: live stream refuses the wait",
           chat.wait_if_cancelling(c4["id"], 0.1) is False)
-    # the user flips the mode WHILE the call waits — exactly what
+    # the user flips the mode WHILE the call waits - exactly what
     # chat_set_mode does on disk before it re-decides the pending call
     _mid = chats.load_chat(root, c4["id"])
     _mid["permMode"] = "always-allow"
@@ -269,11 +375,8 @@ with tempfile.TemporaryDirectory() as d:
     # ---------- cancel ABORTS a request still waiting for headers ----------
     # (a server mid-prompt sends nothing; stop() must rip the connection
     # down instantly, end the worker quietly, and leave NO error text)
-    sock5 = os.environ["LOOM_HOME"] + "/fake5.sock"
-    server5 = start_fake(sock5, "stall")
-    mid5 = libconfig.load(root)["models"][0]["id"]
-    with srv._lock:
-        srv._servers[mid5] = {"id": mid5, "state": "running", "sock": sock5}
+    server5 = start_fake("stall")
+    point_config(root, server5)
     c5 = chats.new_chat(root, "fake")
     c5["messages"].append({"role": "user", "content": "stall out"})
     chats.save_chat(root, c5)
@@ -291,16 +394,16 @@ with tempfile.TemporaryDirectory() as d:
     check("stall-cancel: under two seconds", time.time() - t0 < 2.0,
           f"{time.time() - t0:.1f}s")
     _errs = [e for e in ev5 if e["kind"] == "error"]
-    check("stall-cancel: quiet — no error event, no tracebacks",
+    check("stall-cancel: quiet - no error event, no tracebacks",
           not _errs and not any("AttributeError" in str(e) for e in ev5),
           str(_errs))
     server5.shutdown()
 
     # ---------- generation progress callback (compaction liveness) ----------
-    sockP = os.environ["LOOM_HOME"] + "/fakeP.sock"
-    serverP = start_fake(sockP, "plain")
+    serverP = start_fake("plain")
+    point_config(root, serverP)
     progress = []
-    outP = chat._gen_once("prog-test", {"name": "fake", "host": "", "sock": sockP},
+    outP = chat._gen_once("prog-test", endpoint(root),
                           [{"role": "user", "content": "hi"}],
                           threading.Event(),
                           on_progress=lambda n: progress.append(n))
@@ -311,24 +414,41 @@ with tempfile.TemporaryDirectory() as d:
           outP == "Hello from fake llama", outP)
     serverP.shutdown()
 
+    # ---------- provider probing feeds the context window ----------
+    serverN = start_fake("plain")
+    point_config(root, serverN)
+    provN = libconfig.load(root)["providers"][0]
+    gotN = providers.probe(provN)
+    check("probe lists the model with its served n_ctx",
+          gotN["state"] == "ok" and gotN["models"] == [{"id": "fake",
+                                                        "ctx": 4096}],
+          str(gotN))
+    check("nctx resolves through the registry",
+          chat._nctx_for(libconfig.load(root),
+                         {"provider": "", "model": "fake"}) == 4096)
+    # a stale model id against a KNOWN model list is an honest error,
+    # not a silent chat with whatever the server has loaded
+    try:
+        chat.resolve_endpoint(libconfig.load(root),
+                              {"provider": "", "model": "gone-model"})
+        check("stale model id raises", False)
+    except chats.ChatError as e:
+        check("stale model id raises", "gone-model" in str(e), str(e))
+    serverN.shutdown()
+
     # ---------- model-generated titles + uniqueness ----------
-    sockT1 = os.environ["LOOM_HOME"] + "/fakeT1.sock"
-    cidT1, _e1, _r1, _ok1 = run_chat(root, "fake", sockT1, mode="plain",
+    cidT1, _e1, _r1, _ok1 = run_chat(root, "fake", mode="plain",
                                      shutdown_after=False)
     t1 = wait_title(cidT1)
     check("model generates the title", t1 == "Hello from fake llama", t1)
-    sockT2 = os.environ["LOOM_HOME"] + "/fakeT2.sock"
-    cidT2, _e2, _r2, _ok2 = run_chat(root, "fake", sockT2, mode="plain",
+    cidT2, _e2, _r2, _ok2 = run_chat(root, "fake", mode="plain",
                                      shutdown_after=False)
     t2 = wait_title(cidT2)
     check("duplicate titles get a suffix", t2 == "Hello from fake llama (2)", t2)
 
     # ---------- compaction: manual trigger + wiring ----------
-    sockC = os.environ["LOOM_HOME"] + "/fakeC.sock"
-    serverC = start_fake(sockC, "plain")
-    midC = libconfig.load(root)["models"][0]["id"]
-    with srv._lock:
-        srv._servers[midC] = {"id": midC, "state": "running", "sock": sockC}
+    serverC = start_fake("plain")
+    point_config(root, serverC)
     cc = chats.new_chat(root, "fake")
     cc["messages"] = [
         {"role": "user", "content": "remember the magic number 42"},
@@ -356,13 +476,12 @@ with tempfile.TemporaryDirectory() as d:
           any("Hello from fake llama" in str(m.get("content")) for m in wireC)
           and not any("magic number" in str(m.get("content")) for m in wireC),
           str(wireC))
+    serverC.shutdown()
 
     # ---------- compaction: a server error SURFACES (not 'came back
     # empty') and leaves no marker ----------
-    sockE = os.environ["LOOM_HOME"] + "/fakeE.sock"
-    serverE = start_fake(sockE, "error")
-    with srv._lock:
-        srv._servers[midC] = {"id": midC, "state": "running", "sock": sockE}
+    serverE = start_fake("error")
+    point_config(root, serverE)
     ce = chats.new_chat(root, "fake")
     ce["messages"] = [{"role": "user", "content": "hello"},
                       {"role": "assistant", "content": "hi"}]
@@ -384,10 +503,8 @@ with tempfile.TemporaryDirectory() as d:
 
     # ---------- compaction: cancellable even while the server stalls
     # pre-headers (the 'no stop button' failure) ----------
-    sockF = os.environ["LOOM_HOME"] + "/fakeF.sock"
-    serverF = start_fake(sockF, "stall")
-    with srv._lock:
-        srv._servers[midC] = {"id": midC, "state": "running", "sock": sockF}
+    serverF = start_fake("stall")
+    point_config(root, serverF)
     cf = chats.new_chat(root, "fake")
     cf["messages"] = [{"role": "user", "content": "hello"},
                       {"role": "assistant", "content": "hi"}]
@@ -410,11 +527,11 @@ with tempfile.TemporaryDirectory() as d:
     serverF.shutdown()
 
     # ---------- compaction at an OVER-FULL window: the request itself is
-    # budgeted to fit nctx with generation room to spare ----------
-    sockG = os.environ["LOOM_HOME"] + "/fakeG.sock"
-    serverG = start_fake(sockG, "plain")
-    with srv._lock:
-        srv._servers[midC] = {"id": midC, "state": "running", "sock": sockG}
+    # budgeted to fit nctx with generation room to spare (n_ctx comes from
+    # the provider's own /v1/models metadata: 4096) ----------
+    serverG = start_fake("plain")
+    point_config(root, serverG)
+    providers.probe(libconfig.load(root)["providers"][0])
     cg = chats.new_chat(root, "fake")
     cg["messages"] = [{"role": "user", "content": "w " * 20000},  # ~10k tok
                       {"role": "assistant", "content": "ok"},
@@ -446,10 +563,9 @@ with tempfile.TemporaryDirectory() as d:
     serverG.shutdown()
 
     # ---------- auto-compaction at the threshold ----------
-    sockD = os.environ["LOOM_HOME"] + "/fakeD.sock"
-    serverD = start_fake(sockD, "plain")
-    with srv._lock:
-        srv._servers[midC] = {"id": midC, "state": "running", "sock": sockD}
+    serverD = start_fake("plain")
+    point_config(root, serverD)
+    providers.probe(libconfig.load(root)["providers"][0])
     cd = chats.new_chat(root, "fake")
     # ctx is 4096, threshold 0.8 → ~3277 tokens; ~16k chars trips it
     cd["messages"].append({"role": "user", "content": "x " * 8000})

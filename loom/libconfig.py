@@ -1,34 +1,34 @@
-"""loom.yaml — the library's configuration, parsed fresh on every read.
+"""loom.yaml - the library's configuration, parsed fresh on every read.
 
 The file is user-owned and hand-edited (in the Library tab); this module
 never writes it. Parsing is deliberately forgiving about absent sections
-and strict about shape errors, and every model entry gets a DETERMINISTIC
-id (slug of name + short hash of name+ssh) so srv.py's on-host state dirs
-stay stable across app restarts and yaml edits that don't rename.
+and strict about shape errors.
 
-    models:
-    - name: Qwen 3.8 27B 128k
-      ssh: ""            # ssh destination; empty = this machine
-      context: 128000
-      model: ~/.lmstudio/models/.../Qwen3.8-27B-Q4_K_M.gguf
-      mmproj: ~/.lmstudio/models/.../mmproj-Qwen3.8-27B-BF16.gguf
-      binary: llama-server   # optional
-      # OR run llama-server inside a container instead of a host binary:
-      # an engine `run` command; loom appends `--host <socket>` plus the
-      # composed args after it, and bind-mounts the socket dir and the
-      # model's directories at identical paths inside. The image's
-      # entrypoint must be llama-server. No -t/-it (detached, no TTY),
-      # no port mapping needed (unix socket, like every managed server).
-      container: >-
-        podman run --rm --device /dev/dri llama-server-vulkan:latest
-      flags: |
-        -ngl 99
-        -fa on
-"""
+Loom does NOT launch inference. It talks to inference servers you run
+yourself, over their HTTP APIs - llama.cpp's llama-server and ninfer -
+directly, or through an SSH tunnel (key auth only):
+
+    providers:
+    - name: workstation          # how this endpoint shows up in the UI
+      type: llama-cpp            # llama-cpp | ninfer
+      url: http://127.0.0.1:8080 # the API's base URL
+      ssh: ""                    # optional ssh destination - the url is
+                                 # then resolved FROM that host, and all
+                                 # traffic rides an ssh stdio tunnel
+    - name: gpu-box
+      type: ninfer
+      url: http://127.0.0.1:11434
+      ssh: sam@gpu-box
+
+    chat:
+      provider: workstation      # default provider for new chats
+      model: qwen3-coder         # default model id (as listed by the API)
+
+Models are pulled live from each provider's API - nothing about model
+files, flags, or process management lives here."""
 
 from __future__ import annotations
 
-import hashlib
 import re
 from pathlib import Path
 
@@ -80,19 +80,12 @@ DEFAULT_CONTAINERS = {
 }
 
 
-def _slug(name: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-") or "model"
-    return s[:32]
-
-
-def model_id(name: str, ssh: str) -> str:
-    h = hashlib.sha256(f"{name}\x00{ssh}".encode()).hexdigest()[:8]
-    return f"{_slug(name)}-{h}"
+PROVIDER_TYPES = ("llama-cpp", "ninfer")
 
 
 def load(root: Path) -> dict:
     """Parse the library's loom.yaml/yml into
-    {models, chat, permissions, containers}. Raises ConfigError with a
+    {providers, chat, permissions, containers}. Raises ConfigError with a
     message worth showing the user."""
     p = library.config_path(root)
     if p is None:
@@ -105,10 +98,16 @@ def load(root: Path) -> dict:
         raise ConfigError(f"cannot read {p.name}: {e}")
     if not isinstance(raw, dict):
         raise ConfigError(f"{p.name} must be a mapping at the top level")
+    if raw.get("models") and not raw.get("providers"):
+        raise ConfigError(
+            "this loom.yaml uses the old `models:` scheme - Loom no "
+            "longer launches llama-server. Run your inference server "
+            "yourself and define `providers:` entries pointing at its "
+            "HTTP API (see documentation/models-servers.md)")
 
     out = {
         "configFile": p.name,
-        "models": _models(raw.get("models")),
+        "providers": _providers(raw.get("providers")),
         "chat": _chat(raw.get("chat")),
         "permissionModes": _permission_modes(
             raw.get("permission-modes", raw.get("permission_modes")),
@@ -125,44 +124,46 @@ def load(root: Path) -> dict:
     return out
 
 
-def _models(sec) -> list[dict]:
+def _providers(sec) -> list[dict]:
     if sec is None:
         return []
     if not isinstance(sec, list):
-        raise ConfigError("`models` must be a list")
+        raise ConfigError("`providers` must be a list")
     out, names = [], set()
     for i, m in enumerate(sec):
         if not isinstance(m, dict):
-            raise ConfigError(f"models[{i}] must be a mapping")
+            raise ConfigError(f"providers[{i}] must be a mapping")
         name = str(m.get("name") or "").strip()
         if not name:
-            raise ConfigError(f"models[{i}] has no name")
+            raise ConfigError(f"providers[{i}] has no name")
         if name in names:
-            raise ConfigError(f"two models share the name {name!r}")
+            raise ConfigError(f"two providers share the name {name!r}")
         names.add(name)
-        model = str(m.get("model") or "").strip()
-        if not model:
-            raise ConfigError(f"model {name!r} has no `model` (GGUF path)")
+        ptype = str(m.get("type") or "llama-cpp").strip().lower()
+        if ptype not in PROVIDER_TYPES:
+            raise ConfigError(
+                f"provider {name!r}: type must be one of "
+                + ", ".join(PROVIDER_TYPES) + f" - not {ptype!r}")
+        url = str(m.get("url") or "").strip().rstrip("/")
+        if not url:
+            raise ConfigError(f"provider {name!r} has no `url`")
+        if not re.match(r"^https?://", url):
+            raise ConfigError(
+                f"provider {name!r}: url must start with http:// or "
+                f"https:// - got {url!r}")
         ssh = str(m.get("ssh") or "").strip()
-        ctx = m.get("context", 0)
-        try:
-            ctx = max(0, int(ctx or 0))
-        except (TypeError, ValueError):
-            raise ConfigError(f"model {name!r}: context must be a number")
-        out.append({
-            "id": model_id(name, ssh),
-            "name": name,
-            # srv.py's vocabulary: host = ssh destination, ctx = context
-            "host": ssh,
-            "model": model,
-            "mmproj": str(m.get("mmproj") or "").strip(),
-            "ctx": ctx,
-            "flags": str(m.get("flags") or ""),
-            "serverBin": str(m.get("binary") or "").strip(),
-            # a container run command replaces the host binary entirely
-            "container": str(m.get("container") or "").strip(),
-        })
+        if ssh.startswith("-"):
+            raise ConfigError(
+                f"provider {name!r}: ssh must be a destination "
+                "(user@host or a ~/.ssh/config alias), not flags")
+        out.append({"name": name, "type": ptype, "url": url, "ssh": ssh})
     return out
+
+
+def provider_by_name(cfg: dict, name: str) -> dict | None:
+    provs = cfg.get("providers") or []
+    return next((p for p in provs if p["name"] == name), None) \
+        or (provs[0] if provs and not name else None)
 
 
 def _chat(sec) -> dict:
@@ -178,6 +179,7 @@ def _chat(sec) -> dict:
         raise ConfigError("chat.compaction.threshold must be between "
                           "0.2 and 0.95")
     return {
+        "provider": str(sec.get("provider") or "").strip(),
         "model": str(sec.get("model") or "").strip(),
         "permission_mode": str(sec.get("permission_mode")
                                or DEFAULT_MODE).strip(),
@@ -253,7 +255,7 @@ DEFAULT_API = {"interface": "127.0.0.1", "port": 1234}
 
 
 def _api(sec) -> dict:
-    """`api:` — where the OpenAI-compatible API binds when toggled on.
+    """`api:` - where the OpenAI-compatible API binds when toggled on.
     Only interface + port persist here; on/off is process state (always
     off at launch)."""
     sec = sec if isinstance(sec, dict) else {}
@@ -269,7 +271,7 @@ def _api(sec) -> dict:
 
 
 def _mcp_servers(sec) -> list[dict]:
-    """`mcp-servers:` — stdio MCP servers the chats may call.
+    """`mcp-servers:` - stdio MCP servers the chats may call.
 
         mcp-servers:
         - name: files
@@ -292,7 +294,7 @@ def _mcp_servers(sec) -> list[dict]:
             raise ConfigError(f"mcp-servers[{i}] has no name")
         if not re.match(r"^[\w-]+$", name):
             raise ConfigError(
-                f"mcp-servers[{i}]: name {name!r} — letters, digits, - and _ "
+                f"mcp-servers[{i}]: name {name!r} - letters, digits, - and _ "
                 "only (it becomes part of tool function names)")
         if name in names:
             raise ConfigError(f"two mcp servers share the name {name!r}")

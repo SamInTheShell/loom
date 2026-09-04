@@ -1,4 +1,4 @@
-"""Chat persistence — one JSON file per chat in <library>/chats/.
+"""Chat persistence - one JSON file per chat in <library>/chats/.
 
 A chat file: {id, title, createdTs, updatedTs, archived, model,
 folders: [{path, mode}], messages: [...]}.
@@ -6,7 +6,7 @@ folders: [{path, mode}], messages: [...]}.
 `archived` is the tab-close semantic: closing a chat tab flips it true;
 the Chat Archive tab lists archived chats and re-opening one flips it
 back. On library open, chats with archived=false are the tabs to restore
-— a quit with chats open resumes where the user left off.
+- a quit with chats open resumes where the user left off.
 
 Message shapes mirror the wire (OpenAI-style role/content) plus UI-only
 fields the loop emits (thoughts, tool cards); chat.py owns those.
@@ -40,14 +40,15 @@ def _path(root: Path, chat_id: str) -> Path:
     return p
 
 
-def new_chat(root: Path, model: str = "") -> dict:
+def new_chat(root: Path, model: str = "", provider: str = "") -> dict:
     chat = {
         "id": uuid.uuid4().hex[:12],
         "title": "New chat",
         "createdTs": int(time.time() * 1000),
         "updatedTs": int(time.time() * 1000),
         "archived": False,
-        "model": model,
+        "provider": provider,   # config provider name; "" = the default
+        "model": model,         # model id as the provider's API lists it
         "folders": [],
         "images": [],
         "messages": [],
@@ -74,7 +75,7 @@ def save_chat(root: Path, chat: dict) -> None:
     p = _path(root, str(chat["id"]))
     chats_dir(root)
     # pid AND thread: the bridge thread and a chat worker can save the
-    # same doc concurrently — they must never share a tmp file
+    # same doc concurrently - they must never share a tmp file
     tmp = p.with_name(p.name + f".{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         tmp.write_text(json.dumps(chat, indent=1), encoding="utf-8")
@@ -98,6 +99,7 @@ def list_chats(root: Path) -> list[dict]:
         out.append({"id": c["id"], "title": c.get("title") or "Untitled",
                     "archived": bool(c.get("archived")),
                     "model": c.get("model") or "",
+                    "provider": c.get("provider") or "",
                     "updatedTs": c.get("updatedTs") or 0,
                     "messages": len(c.get("messages") or [])})
     out.sort(key=lambda c: -(c.get("updatedTs") or 0))
@@ -105,7 +107,7 @@ def list_chats(root: Path) -> list[dict]:
 
 
 def purge_empty_archived(root: Path) -> int:
-    """Delete archived chats with no messages — dead weight from tabs that
+    """Delete archived chats with no messages - dead weight from tabs that
     were opened and abandoned before this rule existed."""
     n = 0
     for c in list_chats(root):

@@ -1,4 +1,4 @@
-/* api.js — bridge to the Python backend.
+/* api.js - bridge to the Python backend.
  *
  * Every call resolves to {ok, ...}. In a plain browser (no pywebview)
  * calls short-circuit to an error so the UI stays inspectable for CSS

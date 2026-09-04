@@ -1,6 +1,6 @@
 # Reliable testing in Go
 
-How to write Go tests that fail only when the code is wrong — never
+How to write Go tests that fail only when the code is wrong - never
 because of timing, ordering, or leftover state. For distributed systems
 this is the foundation: an untested replication protocol is a rumor.
 
@@ -46,7 +46,7 @@ this is the foundation: an untested replication protocol is a rumor.
 ## Waiting on asynchronous conditions
 
 When real concurrency is unavoidable, poll the condition with a deadline
-— never a bare sleep:
+- never a bare sleep:
 
 ```go
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool, msg string) {
@@ -66,7 +66,7 @@ waitFor(t, 5*time.Second, func() bool {
 }, "leader election")
 ```
 
-## Injected clocks — remove real time from the code under test
+## Injected clocks - remove real time from the code under test
 
 Code that calls `time.Now()` or `time.After` directly cannot be tested
 deterministically. Inject a clock interface; production passes the real
@@ -81,14 +81,14 @@ type Clock interface {
 
 For raft-style code, drive ticks explicitly in tests: call `node.Tick()`
 N times to force an election instead of waiting real milliseconds. This
-is the single biggest de-flaker for consensus tests — see
+is the single biggest de-flaker for consensus tests - see
 `distributed-kv/etcd-raft.md`, whose loop is built around an explicit
 Tick for exactly this reason.
 
 ## In-process cluster harness
 
 Test a distributed system as N nodes in ONE process wired by an
-in-memory transport — no real network, no containers, milliseconds per
+in-memory transport - no real network, no containers, milliseconds per
 test. The pattern:
 
 1. Define the transport as an interface in production code
@@ -126,7 +126,7 @@ func TestMain(m *testing.M) {
 }
 ```
 
-A leaked goroutine in a node test usually means shutdown is broken —
+A leaked goroutine in a node test usually means shutdown is broken -
 that is a real bug, not test noise. Same for file handles: close DBs in
 `t.Cleanup(func() { db.Close() })`.
 
@@ -145,7 +145,7 @@ func FuzzDecodeFrame(f *testing.F) {
 ```
 
 Property tests for storage: write a random sequence of Put/Delete
-against both the real engine and a Go map, then compare full contents —
+against both the real engine and a Go map, then compare full contents -
 finds ordering and iterator bugs no example-based test will.
 
 ## Rules

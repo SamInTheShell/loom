@@ -1,22 +1,18 @@
 """App-data layout and state persistence under ~/.loom.
 
-Loom's own data is small — the library concept means almost everything the
+Loom's own data is small - the library concept means almost everything the
 user cares about (prompts, knowledge, config, chats) lives INSIDE the
 selected library folder. What remains here is app-level:
 
     ~/.loom/
       state.json           theme + the recent-libraries list
-      run/                 unix sockets, transient state (askpass, ssh mux)
-      bin/                 the askpass helper executable
-      loom.log             stdout/stderr when detached (not used yet)
-
-Server STATE (pid, socket, log) lives on the host that runs the server,
-under ~/.loom/servers/<id>/ THERE — see srv.py.
+      run/                 transient state (ssh mux control sockets)
+      loom.log             stdout/stderr when detached
 
 The recents list drives the library picker:
     recents: [{path, lastOpened, omitted}]
 `omitted` folders stay in the file (so the omission is durable) but are
-never shown — re-opening one requires a manual Select, which un-omits it
+never shown - re-opening one requires a manual Select, which un-omits it
 only if the user asks.
 """
 
@@ -39,17 +35,12 @@ def run_dir() -> Path:
     return home() / "run"
 
 
-def bin_dir() -> Path:
-    return home() / "bin"
-
-
 def state_path() -> Path:
     return home() / "state.json"
 
 
 def ensure_dirs() -> None:
-    for d in (run_dir(), bin_dir()):
-        d.mkdir(parents=True, exist_ok=True)
+    run_dir().mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(run_dir(), 0o700)
     except OSError:
@@ -58,30 +49,27 @@ def ensure_dirs() -> None:
 
 DEFAULT_STATE = {
     "theme": "dark",
+    # last main-window geometry: {x, y, width, height, maximized} - the
+    # app reopens where and how it was closed
+    "window": {},
     "recents": [],   # [{path, lastOpened, omitted}]
     # per-library UI sessions, keyed by resolved library path:
     #   {tabs: [{type, chatId}], activeTab, lib: {open, expanded, leftWidth}}
-    # — "where I left off" when a library is reopened
+    # - "where I left off" when a library is reopened
     "sessions": {},
     # per-library alert history, keyed by resolved library path:
-    #   [{ts, level, msg}] — survives app restarts until the user clears it
+    #   [{ts, level, msg}] - survives app restarts until the user clears it
     "alerts": {},
     # per-library reasoning preferences, keyed by resolved library path:
-    #   {model id: {method, level}} — absent means "send nothing" (the
+    #   {model id: {method, level}} - absent means "send nothing" (the
     #   server's own default), which is also what clearing restores
     "reasoning": {},
-    # per-library pinned model ids (shown first in pickers), keyed by
-    # resolved library path: [model id, ...] in pin order
+    # per-library pinned model keys ("provider::model", shown first in
+    # pickers), keyed by resolved library path, in pin order
     "modelPins": {},
-    # per-ssh-host llama-server concurrency: {host: n} — how many servers
-    # may run at once on that host ("" = this machine). Default 1 (model
-    # RAM use is unmeasured — one at a time is the only safe default);
-    # -1 = no limit. Machine state, not library config: the limit models
-    # the host's RAM, which travels with the machine, not the library.
-    "serverLimits": {},
     # per-library MCP state, keyed by resolved library path:
-    #   mcpRunning:   [server names] — running at last close → autostart
-    #   mcpToolPerms: {mcp_<server>_<tool>: level} — the tab-chosen
+    #   mcpRunning:   [server names] - running at last close → autostart
+    #   mcpToolPerms: {mcp_<server>_<tool>: level} - the tab-chosen
     #                 DEFAULT permission (loom.yaml per-mode entries win)
     "mcpRunning": {},
     "mcpToolPerms": {},
@@ -107,8 +95,6 @@ def load_state() -> dict:
         merged["reasoning"] = {}
     if not isinstance(merged.get("modelPins"), dict):
         merged["modelPins"] = {}
-    if not isinstance(merged.get("serverLimits"), dict):
-        merged["serverLimits"] = {}
     if not isinstance(merged.get("mcpRunning"), dict):
         merged["mcpRunning"] = {}
     if not isinstance(merged.get("mcpToolPerms"), dict):
@@ -136,7 +122,7 @@ def save_state(st: dict) -> None:
 
 
 def mutate_state(fn):
-    """Atomic read-modify-write of state.json — fn(state) mutates in place
+    """Atomic read-modify-write of state.json - fn(state) mutates in place
     (or returns a replacement). Returns the state as saved."""
     with _mutate_lock:
         st = load_state()
@@ -171,7 +157,7 @@ def visible_recents() -> list[dict]:
 
 
 def touch_recent(path: str) -> None:
-    """Record that `path` was opened. An omitted entry stays omitted — a
+    """Record that `path` was opened. An omitted entry stays omitted - a
     manual Select opens it without resurrecting it in the list."""
     p = str(Path(path).expanduser().resolve())
 
@@ -202,6 +188,22 @@ def remove_recent(path: str, omit: bool = False) -> None:
             st["recents"].append({"path": p, "lastOpened": 0, "omitted": True})
         else:
             st["recents"] = [r for r in st["recents"] if r.get("path") != p]
+    mutate_state(fn)
+
+
+def window_geometry() -> dict:
+    """The last saved main-window geometry ({} when never saved)."""
+    g = load_state().get("window")
+    return dict(g) if isinstance(g, dict) else {}
+
+
+def set_window_geometry(geo: dict) -> None:
+    """Persist the main window's geometry for the next launch."""
+    keep = {k: geo[k] for k in ("x", "y", "width", "height", "maximized")
+            if k in geo}
+
+    def fn(st):
+        st["window"] = keep
     mutate_state(fn)
 
 
@@ -257,7 +259,7 @@ def alerts_clear(path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# pinned models (per library) — pickers list these first
+# pinned models (per library) - pickers list these first
 
 def pins_all(path: str) -> list[str]:
     p = load_state()["modelPins"].get(str(path))
@@ -318,47 +320,11 @@ def reasoning_set(path: str, model_id: str, pref: dict | None) -> None:
 
 
 def clear_recents() -> None:
-    """Clear the visible list. Omitted entries stay — that flag is the
+    """Clear the visible list. Omitted entries stay - that flag is the
     user's durable 'never show this' decision, not a cache."""
     def fn(st):
         st["recents"] = [r for r in st["recents"] if r.get("omitted")]
     mutate_state(fn)
-
-
-# ---------------------------------------------------------------------------
-# per-host llama-server concurrency limits
-
-SERVER_LIMIT_MAX = 16
-
-
-def server_limits() -> dict:
-    got = load_state().get("serverLimits")
-    return {str(k): v for k, v in got.items()} if isinstance(got, dict) else {}
-
-
-def server_limit(host: str) -> int:
-    """How many llama-servers may run at once on `host` ('' = local).
-    Default 1; -1 means no limit."""
-    try:
-        n = int(server_limits().get(str(host or ""), 1))
-    except (TypeError, ValueError):
-        return 1
-    return n if n == -1 or 1 <= n <= SERVER_LIMIT_MAX else 1
-
-
-def set_server_limit(host: str, n: int) -> dict:
-    """Persist a host's limit. Returns the full limits map."""
-    n = int(n)
-    if n != -1 and not (1 <= n <= SERVER_LIMIT_MAX):
-        raise ValueError(
-            f"the limit must be 1-{SERVER_LIMIT_MAX}, or -1 for no limit")
-
-    def fn(st):
-        cur = st.get("serverLimits")
-        cur = cur if isinstance(cur, dict) else {}
-        cur[str(host or "")] = n
-        st["serverLimits"] = cur
-    return mutate_state(fn).get("serverLimits", {})
 
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 # Administrative and user frontends
 
 The HTTP surfaces of a databox-style system: a JSON client API and an
-HTML admin UI. Both come from the standard library — `net/http` routing
-(Go 1.22+ pattern syntax), `html/template`, `embed` — no framework, no
+HTML admin UI. Both come from the standard library - `net/http` routing
+(Go 1.22+ pattern syntax), `html/template`, `embed` - no framework, no
 external assets. One binary serves everything it needs.
 
 ## Routing with the enhanced ServeMux (Go 1.22+)
@@ -20,7 +20,7 @@ mux.HandleFunc("DELETE /api/v1/kv/{key...}", s.handleDelete)
 mux.HandleFunc("GET /api/v1/blobs/{id}", s.handleBlobGet)  // supports Range
 mux.HandleFunc("POST /api/v1/blobs", s.handleBlobPut)
 
-// admin UI (HTML) — separate mux, separate listener (see below)
+// admin UI (HTML) - separate mux, separate listener (see below)
 adm.HandleFunc("GET /{$}", s.admOverview)                  // {$} = exactly "/"
 adm.HandleFunc("GET /shards", s.admShards)
 adm.HandleFunc("GET /nodes/{id}", s.admNode)
@@ -34,7 +34,7 @@ everything. If the module must support pre-1.22 Go, take
 `github.com/go-chi/chi/v5` (same shape, tiny); do not hand-roll prefix
 matching.
 
-## Middleware — the seam auth and logging share
+## Middleware - the seam auth and logging share
 
 ```go
 type mw func(http.Handler) http.Handler
@@ -47,20 +47,20 @@ func chain(h http.Handler, m ...mw) http.Handler {
 srv := &http.Server{
     Addr:              cfg.APIAddr,
     Handler:           chain(mux, withRecover, withLog, withAuth(auth)),
-    ReadHeaderTimeout: 5 * time.Second,     // slowloris guard — always set
+    ReadHeaderTimeout: 5 * time.Second,     // slowloris guard - always set
 }
 ```
 
 `withAuth` resolves the bearer token to an `AuthCtx` (user-systems.md)
 and stores it in the request context; handlers declare the permission
 they need. The admin mux gets the same chain plus a PermAdmin check.
-Run admin on its OWN listener/port so the network can fence it — not a
+Run admin on its OWN listener/port so the network can fence it - not a
 path prefix on the public API.
 
 ## JSON API conventions
 
 - Encode errors as one shape everywhere:
-  `{"error": {"code": "wrong_shard", "epoch": 7}}` — the routing
+  `{"error": {"code": "wrong_shard", "epoch": 7}}` - the routing
   errors from sharding.md must survive HTTP translation with their
   data intact.
 - Write helpers once (`writeJSON(w, code, v)`, `readJSON(r, &req,
@@ -68,7 +68,7 @@ path prefix on the public API.
   handler; per-handler encoding drift is where API bugs breed.
 - Blob upload is a streaming `POST` (chunked encoding), download
   supports `Range` (`http.ServeContent` if you can seek, manual ranges
-  over chunk manifests otherwise — blob-storage.md read path).
+  over chunk manifests otherwise - blob-storage.md read path).
 - Version the path (`/api/v1/`); additive changes only within a
   version.
 
@@ -97,7 +97,7 @@ func (s *Server) admShards(w http.ResponseWriter, r *http.Request) {
 
 Template layout that stays maintainable: one `base.html` with
 `{{block "content" .}}`, one file per page defining that block, tiny
-view-model structs per page (never hand templates raw internal types —
+view-model structs per page (never hand templates raw internal types -
 the view model is the seam that keeps refactors from breaking pages).
 `html/template` escapes by default; never use `template.HTML` on
 anything derived from user input.
@@ -113,7 +113,7 @@ From day one (build-plan.md wires these to gates):
 
 - **Cluster**: nodes with liveness state, capacity, leader counts.
 - **Shards**: the table with ranges, groups, replicas, epoch, and any
-  running op with its current step (metadata-group.md `op/<id>` —
+  running op with its current step (metadata-group.md `op/<id>` -
   this is your window into a stuck split).
 - **Storage**: per-node engine metrics (pebble.md `db.Metrics()`),
   scrub queue depth and last-pass age (blob-storage.md).

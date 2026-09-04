@@ -1,4 +1,4 @@
-/* librarytab.js — the Library tab: a resizable navigation tree on the
+/* librarytab.js - the Library tab: a resizable navigation tree on the
  * left (right-click to create/rename/delete), ONE open file on the right
  * (save or discard before navigating away), and fuzzy find-in-files in
  * the search box (file-path matches and content-line matches, ranked). */
@@ -87,7 +87,7 @@ async function loadLibTree() {
   if (!res.ok) { toast(res.error, "err"); return; }
   st.lib.tree = res.data.tree;
   st.lib.configFile = res.data.configFile;
-  // first visit: collapse every top-level folder except documentation/ —
+  // first visit: collapse every top-level folder except documentation/ -
   // the seeded expansion is saved, so it (and every later toggle) is what
   // the library reopens with from then on
   if (st.lib.seedCollapse) {
@@ -188,7 +188,7 @@ function wireLibTreeKeys(treeHost) {
   });
 }
 
-/* Ctrl+\ — bounce focus between the tree (left) and the editor (right) */
+/* Ctrl+\ - bounce focus between the tree (left) and the editor (right) */
 function libToggleFocus() {
   if (st.activeTab !== "library" || !st.lib.ui) return;
   const { panel, treeHost, editorHost } = st.lib.ui;
@@ -382,7 +382,7 @@ async function openLibFile(rel) {
     const res = await Api.call("lib_read", rel);
     if (!res.ok) { toast(res.error, "err"); return; }
     if (res.data.binary) {
-      toast(rel + " is a binary file — the editor only opens text.", "warn");
+      toast(rel + " is a binary file - the editor only opens text.", "warn");
       return;
     }
     if (st.lib.editor) { st.lib.editor.destroy(); st.lib.editor = null; }
@@ -408,7 +408,7 @@ async function openLibFile(rel) {
     st.lib.scrollPos = 0;
     const sc = st.lib.editor.scroller;
     sc.addEventListener("scroll", () => {
-      if (!sc.clientHeight) return;   // hidden tab reads 0 — keep the real pos
+      if (!sc.clientHeight) return;   // hidden tab reads 0 - keep the real pos
       st.lib.scrollPos = sc.scrollTop;
       saveSession();
     }, { passive: true });
@@ -511,12 +511,12 @@ function libDeletePrompt(node, isDir) {
 
 /* a file was rewritten OUTSIDE the editor (the model wizard appends to
  * loom.yaml, the Environments tab writes environments.yaml): reload the
- * open buffer so it never shows — or worse, SAVES — a stale version.
+ * open buffer so it never shows - or worse, SAVES - a stale version.
  * Unsaved user edits are never clobbered; they get a warning instead. */
 async function libReloadIfOpen(rel) {
   if (!st.lib.editor || st.lib.open !== rel) return;
   if (st.lib.dirty) {
-    toast(rel + " changed on disk. Your unsaved edits are kept — Discard "
+    toast(rel + " changed on disk. Your unsaved edits are kept - Discard "
       + "to load the new version, or save to overwrite it.", "warn", 8000);
     return;
   }

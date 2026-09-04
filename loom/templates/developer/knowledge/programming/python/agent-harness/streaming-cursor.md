@@ -1,11 +1,11 @@
-# Streaming rendering — live markdown, the cursor, and patch-not-rebuild
+# Streaming rendering - live markdown, the cursor, and patch-not-rebuild
 
 Streamed model output must LOOK live: markdown that reflows as tokens
 arrive, a blinking cursor riding the end of the text, thoughts that
-stay open while the model reasons, tool cards that update in place —
+stay open while the model reasons, tool cards that update in place -
 all without eating the user's clicks, focus, or text selection. The
 backend side is trivial (push a `delta {text}` event per streamed
-chunk — agent-loop.md defines the vocabulary, ui-bridge.md the
+chunk - agent-loop.md defines the vocabulary, ui-bridge.md the
 delivery); everything hard is on the page. This file is the frontend
 recipe, verified pitfalls included.
 
@@ -22,7 +22,7 @@ sanitizeChatLinks(body, chat);
 appendCursor(body);
 ```
 
-Re-parsing the whole message per delta is fine — only the last bubble
+Re-parsing the whole message per delta is fine - only the last bubble
 is touched, and markdown parsers are fast at chat-message sizes. The
 payoff: half-open constructs (an unclosed code fence, a table mid-row)
 always render as the parser's best current interpretation and snap
@@ -38,13 +38,13 @@ function renderMarkdown(src) {
   const html = marked.parse(src ?? "", { gfm: true, breaks: false });
   return DOMPurify.sanitize(html);
 }
-function renderThoughtMarkdown(src) {   // breaks: true — see below
+function renderThoughtMarkdown(src) {   // breaks: true - see below
   return DOMPurify.sanitize(marked.parse(src ?? "",
     { gfm: true, breaks: true }));
 }
 ```
 
-DOMPurify runs on EVERY render, partial text included — model output
+DOMPurify runs on EVERY render, partial text included - model output
 is untrusted HTML the moment marked converts it. Thoughts get
 `breaks: true` because reasoning models separate thought paragraphs
 with single `\n`; under normal markdown rules those collapse into one
@@ -53,13 +53,13 @@ unreadable wall of text.
 After every innerHTML set, repair links: validate `#/`-style hrefs
 against the app's real route table, rewrite recognizable hallucinated
 hrefs (a bare commit sha → the commit page, a path-looking href → the
-file on the chat's branch), and demote the rest to literal text — a
+file on the chat's branch), and demote the rest to literal text - a
 model-invented link must never render as a dead clickable.
 
 ## The cursor
 
 The cursor is a `<span class="cursor">` (CSS blink) injected at the
-END of the streamed text — INLINE after the last character, never
+END of the streamed text - INLINE after the last character, never
 after the markdown blocks where it would sit on a line of its own.
 Walk into the deepest trailing block-level element and append there:
 
@@ -90,16 +90,16 @@ function appendCursor(el) {
 Two verified gotchas live in that function:
 
 - Markdown renderers emit `"\n"` TEXT nodes between blocks, so "last
-  child" must mean last MEANINGFUL child — skip whitespace-only text
+  child" must mean last MEANINGFUL child - skip whitespace-only text
   and comment nodes, or the descent stops at the container and the
   cursor lands on its own line.
 - Code fences keep a trailing newline inside `<code>`; appending the
   cursor after it drops it a line down INSIDE the box. Trim exactly
-  that one `\n` — the next delta re-renders from source anyway, so
+  that one `\n` - the next delta re-renders from source anyway, so
   nothing is lost.
 
 A turn that is streaming but has produced no text yet still shows an
-empty bubble containing only the cursor — silence with a heartbeat.
+empty bubble containing only the cursor - silence with a heartbeat.
 
 ## Thoughts stay open and cursored
 
@@ -109,7 +109,7 @@ models). Split the text into ordered thought/text segments; an
 UNCLOSED `<think>` mid-stream runs to the end of the text and renders
 as an open, cursored thought block. While a thought streams, skip
 markdown: set `textContent` with `white-space: pre-wrap` and append
-the cursor — plain text keeps per-tick updates cheap; the block gets
+the cursor - plain text keeps per-tick updates cheap; the block gets
 its markdown render once it closes. Closed thoughts collapse to a
 "thoughts (N tokens)" line, click to expand.
 
@@ -119,8 +119,8 @@ The renderer has two paths. A STRUCTURAL change (new message, tool
 card, status flip) rebuilds the thread. A stream tick takes the patch
 path: snapshot `{thread el, message count, status}` when the view is
 built; on each tick, if count and status are unchanged, patch in
-place — update the last bubble's innerHTML + cursor, tick the token
-counter, swap the context meter, autoscroll — and return. Any
+place - update the last bubble's innerHTML + cursor, tick the token
+counter, swap the context meter, autoscroll - and return. Any
 structural drift makes the patch report failure and the caller does a
 full render. Specific patch rules that took debugging to learn:
 
@@ -135,7 +135,7 @@ full render. Specific patch rules that took debugging to learn:
   throttle. An immediate full render per call/result starves the
   main thread AND destroys nodes mid-click. Live shell output appends
   to its card through the same throttle, capped (e.g. last 40 kB).
-- Permission "ask" renders IMMEDIATELY, bypassing the throttle — a
+- Permission "ask" renders IMMEDIATELY, bypassing the throttle - a
   question for the user must not lag.
 
 Park renders during interaction: a rebuild between mousedown and
@@ -143,7 +143,7 @@ mouseup destroys the node under the pointer and the browser silently
 drops the click; a rebuild also closes open context menus and clears
 text selections. Track pointer-held / menu-open flags, queue the
 refresh ("full" outranks "light"), and replay it one macrotask after
-release — the click dispatches first, on a still-live target. Also
+release - the click dispatches first, on a still-live target. Also
 reset the flag on window blur, or a drag out of the window parks
 every future render. Inputs that must survive full rebuilds (the
 composer, find-in-chat) save value/focus/caret before `render()` and
@@ -153,7 +153,7 @@ restore after.
 
 Stick-to-bottom, user-in-control: autoscroll after each patch only
 while the user IS at the bottom (within ~48 px). Scrolling up
-disengages — reading history stays put through streams and rebuilds —
+disengages - reading history stays put through streams and rebuilds -
 and a floating "Latest" button jumps down and re-engages. On a full
 rebuild, restore the saved scroll position when disengaged; when
 sticking, scroll again ~150 ms later to catch late height changes
@@ -166,15 +166,15 @@ assistant message, the streaming thought message, and the last tool
 card by callId. `thought` opens (or grows) the thought; `delta`
 closes any open thought and opens/grows the bubble; `turn_break` and
 `tool_call` freeze the bubble (set `streaming = false`, stamp the end
-time — the timing stamps back tok/s and TTFT diagnostics); `done`,
+time - the timing stamps back tok/s and TTFT diagnostics); `done`,
 `error`, and `retry` freeze both. Persist the transcript per
-tool-result and on done — never per token.
+tool-result and on done - never per token.
 
 ## Rules
 
 - Re-render streamed markdown from the full accumulated source;
   never append raw HTML fragments per delta.
-- DOMPurify after EVERY marked.parse — partial or complete, message
+- DOMPurify after EVERY marked.parse - partial or complete, message
   or thought. No exceptions.
 - Cursor injection is a DOM walk to the deepest trailing block,
   skipping whitespace/comment nodes; trim the code-fence trailing
@@ -184,7 +184,7 @@ tool-result and on done — never per token.
   bursty tool/shell renders ~200 ms; render permission asks
   immediately.
 - Park renders while the pointer is down or a menu is open; replay
-  after — and clear the flag on window blur.
+  after - and clear the flag on window blur.
 - Autoscroll only while stuck to the bottom; never teleport a user
   who scrolled up.
 - Keep marked + DOMPurify vendored and pinned; the renderer is a

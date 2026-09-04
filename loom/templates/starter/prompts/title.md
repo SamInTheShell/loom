@@ -1,4 +1,4 @@
-Name this conversation. Reply with ONLY the title — 2 to 6 words, no
+Name this conversation. Reply with ONLY the title - 2 to 6 words, no
 quotes, no trailing punctuation.
 
 If the conversation has a concrete subject, be specific about it. If it is

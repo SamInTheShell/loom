@@ -1,5 +1,5 @@
 // Ctrl+F match scanning (edFindMatches in mdedit.js).
-// Script-style: node tests/test_find_matches.js — nonzero exit on failure.
+// Script-style: node tests/test_find_matches.js - nonzero exit on failure.
 "use strict";
 
 const fs = require("fs");
@@ -17,7 +17,7 @@ let fails = 0;
 function check(name, got, want) {
   const ok = JSON.stringify(got) === JSON.stringify(want);
   console.log((ok ? "ok  " : "FAIL") + "  " + name
-    + (ok ? "" : ` — got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`));
+    + (ok ? "" : ` - got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`));
   if (!ok) fails++;
 }
 

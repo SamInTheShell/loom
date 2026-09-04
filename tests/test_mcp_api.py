@@ -4,7 +4,7 @@ MCP: config parsing, yaml injection, a REAL stdio round-trip against a
 stub MCP server, permission layering (tab default vs loom.yaml override).
 API: config parsing/injection, routing (models list, unknown model,
 stopped model), and a REAL proxy round-trip to a llama-server stand-in on
-a unix socket — embeddings included.
+a unix socket - embeddings included.
 
 Run: uv run python tests/test_mcp_api.py
 """
@@ -25,14 +25,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml  # noqa: E402
 
-from loom import apiserver, chat, libconfig, mcp, srv, store  # noqa: E402
+from loom import apiserver, chat, libconfig, mcp, providers, store  # noqa: E402
 
 FAILS = []
 
 
 def check(name, cond, detail=""):
     print(("ok  " if cond else "FAIL") + f"  {name}"
-          + (f" — {detail}" if not cond else ""))
+          + (f" - {detail}" if not cond else ""))
     if not cond:
         FAILS.append(name)
 
@@ -66,7 +66,7 @@ for bad in ([{"command": "x"}], [{"name": "a b", "command": "x"}],
 
 # =========================================================================
 # apiserver: loom.yaml injection
-base = "models: []\n# tail comment\nchat:\n  model: ''\n"
+base = "providers: []\n# tail comment\nchat:\n  model: ''\n"
 t1 = apiserver.inject_api_config(base, "127.0.0.1", 4321)
 check("api inject appends a block",
       yaml.safe_load(t1)["api"] == {"interface": "127.0.0.1", "port": 4321}
@@ -77,12 +77,23 @@ check("api inject replaces in place",
       and t2.count("api:") == 1 and "# tail comment" in t2, t2)
 
 # =========================================================================
-# apiserver: live routing + proxy to a unix-socket llama-server stand-in
+# apiserver: live routing + proxy to a fake provider
 
 
 class FakeLlama(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
+    def do_GET(self):
+        # the API server re-probes stale providers on a routing miss -
+        # answer like a real llama-server
+        body = json.dumps({"object": "list", "data": [
+            {"id": "test-model", "meta": {"n_ctx": 4096}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
@@ -95,27 +106,22 @@ class FakeLlama(BaseHTTPRequestHandler):
         self.wfile.write(out)
 
 
-class UnixHTTPServer(ThreadingHTTPServer):
-    address_family = socket.AF_UNIX
-
-    def client_address_string(self):
-        return "unix"
-
-
-sock_path = os.path.join(tempfile.mkdtemp(prefix="loomtest-sock-"), "s.sock")
-uhttpd = UnixHTTPServer(sock_path, FakeLlama)
+uhttpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeLlama)
+uhttpd.daemon_threads = True
 threading.Thread(target=uhttpd.serve_forever, daemon=True).start()
+_uport = uhttpd.server_address[1]
 
-with srv._lock:
-    srv._servers["m1"] = {"id": "m1", "state": "running", "sock": sock_path,
-                          "host": "", "name": "Test Model"}
-    srv._servers["m2"] = {"id": "m2", "state": "stopped", "host": ""}
-
-MODELS = [{"name": "Test Model", "id": "m1", "host": ""},
-          {"name": "Down Model", "id": "m2", "host": ""}]
+PROVIDERS = [{"name": "prov1", "type": "llama-cpp",
+              "url": f"http://127.0.0.1:{_uport}", "ssh": ""}]
+# the API routes by the CACHED model lists - seed the registry the way a
+# probe would
+with providers._lock:
+    providers._providers["prov1"] = {
+        "name": "prov1", "state": "ok", "detail": "",
+        "models": [{"id": "test-model", "ctx": 4096}]}
 
 check("api off at start", apiserver.status()["running"] is False)
-got = apiserver.start("127.0.0.1", 0, lambda: MODELS)
+got = apiserver.start("127.0.0.1", 0, lambda: PROVIDERS)
 check("api starts", got["running"] and got["port"] > 0, str(got))
 base_url = f"http://127.0.0.1:{got['port']}"
 
@@ -137,38 +143,122 @@ def post(path, obj):
 
 
 code, body = get("/v1/models")
-check("GET /v1/models lists configured models",
-      code == 200 and [m["id"] for m in body["data"]]
-      == ["Test Model", "Down Model"], str(body))
-check("models carry live state",
-      body["data"][0]["state"] == "running"
-      and body["data"][1]["state"] == "stopped", str(body))
+check("GET /v1/models lists every provider's models",
+      code == 200 and [m["id"] for m in body["data"]] == ["test-model"]
+      and body["data"][0]["provider"] == "prov1", str(body))
 
 code, body = post("/v1/chat/completions",
-                  {"model": "Test Model", "messages": []})
-check("chat completions proxied to the socket",
+                  {"model": "test-model", "messages": []})
+check("chat completions proxied to the provider",
       code == 200 and body["echo_path"] == "/v1/chat/completions"
-      and body["echo"]["model"] == "Test Model", str(body))
+      and body["echo"]["model"] == "test-model", str(body))
 
-code, body = post("/v1/embeddings", {"model": "Test Model", "input": "hi"})
+code, body = post("/v1/chat/completions",
+                  {"model": "prov1/test-model", "messages": []})
+check("provider/model spelling routes and rewrites the id",
+      code == 200 and body["echo"]["model"] == "test-model", str(body))
+
+code, body = post("/v1/embeddings", {"model": "test-model", "input": "hi"})
 check("embeddings proxied",
       code == 200 and body["echo_path"] == "/v1/embeddings"
       and body["echo"]["input"] == "hi", str(body))
 
 code, body = post("/v1/chat/completions", {"model": "gpt-4o", "messages": []})
-check("unknown model with ONE running model routes to it",
-      code == 200 and body["echo"]["model"] == "gpt-4o", str(body))
-
-code, body = post("/v1/chat/completions", {"model": "Down Model"})
-check("stopped model → 503 with a hint",
-      code == 503 and "not running" in body["error"]["message"], str(body))
+check("unknown model with ONE known model routes to it",
+      code == 200 and body["echo"]["model"] == "test-model", str(body))
 
 code, body = post("/v1/nope", {})
 check("unknown route → 404", code == 404)
 
 apiserver.stop()
 check("api stops", apiserver.status()["running"] is False)
+
+# ---- API key: everything except /health requires it ----
+got = apiserver.start("127.0.0.1", 0, lambda: PROVIDERS, api_key="sekret")
+check("keyed start reports it", got["running"] and got["keyed"] is True,
+      str(got))
+base_url = f"http://127.0.0.1:{got['port']}"
+
+
+def get_h(path, headers=None):
+    req = urllib.request.Request(base_url + path, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+code, body = get_h("/v1/models")
+check("no key → 401 with a hint",
+      code == 401 and "API key" in body["error"]["message"], str(body))
+code, body = get_h("/v1/models", {"Authorization": "Bearer sekret"})
+check("Bearer key admits", code == 200, str(body))
+code, body = get_h("/v1/models", {"x-api-key": "sekret"})
+check("x-api-key admits", code == 200)
+code, body = get_h("/v1/models", {"Authorization": "Bearer wrong"})
+check("wrong key → 401", code == 401)
+code, body = get_h("/health")
+check("/health stays public (reachability probes need no secret)",
+      code == 200 and body["status"] == "ok", str(body))
+req = urllib.request.Request(
+    base_url + "/v1/chat/completions",
+    data=json.dumps({"model": "test-model", "messages": []}).encode(),
+    headers={"Content-Type": "application/json"})
+try:
+    with urllib.request.urlopen(req, timeout=10) as r:
+        code = r.status
+except urllib.error.HTTPError as e:
+    code = e.code
+check("POST without key → 401", code == 401)
+
+apiserver.stop()
+check("stop clears the key", apiserver.status()["keyed"] is False)
 uhttpd.shutdown()
+with providers._lock:
+    providers._providers.clear()
+
+# =========================================================================
+# provider-side API keys ride every provider request as Bearer
+
+
+class EchoAuth(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        body = json.dumps(
+            {"auth": self.headers.get("Authorization") or ""}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+eauth = ThreadingHTTPServer(("127.0.0.1", 0), EchoAuth)
+eauth.daemon_threads = True
+threading.Thread(target=eauth.serve_forever, daemon=True).start()
+_eport = eauth.server_address[1]
+_eprov = {"name": "kp", "type": "llama-cpp",
+          "url": f"http://127.0.0.1:{_eport}", "ssh": ""}
+
+
+def _echo_auth(prov):
+    with providers.request(prov, "GET", "/x") as r:
+        return json.loads(r.read())["auth"]
+
+
+check("no key: no auth header", _echo_auth(_eprov) == "")
+check("inline record key rides as Bearer",
+      _echo_auth({**_eprov, "key": "abc"}) == "Bearer abc")
+providers.set_key_resolver(lambda n: "resolved" if n == "kp" else "")
+check("resolver key rides as Bearer",
+      _echo_auth(_eprov) == "Bearer resolved")
+check("inline key beats the resolver",
+      _echo_auth({**_eprov, "key": "abc"}) == "Bearer abc")
+providers.set_key_resolver(None)
+check("cleared resolver: open again", _echo_auth(_eprov) == "")
+eauth.shutdown()
 
 # =========================================================================
 # mcp: yaml injection
@@ -274,45 +364,10 @@ mcp.stop_server("stub")
 check("mcp server stops", mcp.running() == {}, str(mcp.running()))
 
 # =========================================================================
-# ejecting a server cancels the chats generating on that model
 from loom import chats  # noqa: E402
 import threading as _t  # noqa: E402
 
 chat_root = Path(tempfile.mkdtemp(prefix="loomtest-chatroot-"))
-doc_a = chats.new_chat(chat_root, model="Test Model")
-doc_b = chats.new_chat(chat_root, model="Other Model")
-holds = []
-for doc in (doc_a, doc_b):
-    ev = _t.Event()
-    th = _t.Thread(target=ev.wait, args=(30,), daemon=True)
-    th.start()
-    holds.append(ev)
-    with chat._lock:
-        chat._running[doc["id"]] = {"thread": th, "cancel": _t.Event()}
-CFG2 = {"models": [{"name": "Test Model"}, {"name": "Other Model"}],
-        "chat": {}}
-got = chat.stop_chats_on_models(chat_root, CFG2, {"Test Model"})
-check("eject cancels the chats on that model", got == [doc_a["id"]], str(got))
-check("their cancel event is set",
-      chat._running[doc_a["id"]]["cancel"].is_set())
-check("chats on other models keep streaming",
-      not chat._running[doc_b["id"]]["cancel"].is_set())
-# a chat with NO model of its own follows the config default
-doc_c = chats.new_chat(chat_root, model="")
-ev = _t.Event()
-th = _t.Thread(target=ev.wait, args=(30,), daemon=True)
-th.start()
-holds.append(ev)
-with chat._lock:
-    chat._running[doc_c["id"]] = {"thread": th, "cancel": _t.Event()}
-got = chat.stop_chats_on_models(
-    chat_root, {**CFG2, "chat": {"model": "Other Model"}}, {"Other Model"})
-check("default-model chats cancel with the default's server",
-      sorted(got) == sorted([doc_b["id"], doc_c["id"]]), str(got))
-for ev in holds:
-    ev.set()
-with chat._lock:
-    chat._running.clear()
 
 # a cancelled worker still blocked waiting for headers (stop() raced the
 # abort registration) is freed when wait_if_cancelling re-fires the close

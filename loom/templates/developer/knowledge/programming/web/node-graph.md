@@ -1,19 +1,19 @@
-# Node-graph visualization — interactive SVG map in plain JS
+# Node-graph visualization - interactive SVG map in plain JS
 
-An explorable node-and-edge map — cluster topology, service mesh,
-pipeline DAG — built with zero libraries: SVG elements for the scene,
+An explorable node-and-edge map - cluster topology, service mesh,
+pipeline DAG - built with zero libraries: SVG elements for the scene,
 CSS for node state, one transform group for pan/zoom, and short
 `requestAnimationFrame` loops for transient activity pulses. Choose
 SVG-in-the-DOM over `<canvas>` when the graph is tens-to-hundreds of
 nodes: hit-testing, hover, tooltips, and state animation come free
 from the DOM/CSS, text stays crisp at every zoom, and a full re-render
-is one cheap subtree rebuild. Canvas only wins past ~1–2k moving
+is one cheap subtree rebuild. Canvas only wins past ~1-2k moving
 elements, where you pay for it by hand-rolling picking and text.
 
 ## Scene structure
 
 One full-viewport `<svg>`, one `world` group that carries the ENTIRE
-pan/zoom transform, and three child layers in paint order — edges
+pan/zoom transform, and three child layers in paint order - edges
 under pulses under nodes:
 
 ```js
@@ -30,7 +30,7 @@ svg.appendChild(world);
 ```
 
 A decorative background grid is a separate fixed `<div>` behind the
-svg — `pointer-events: none`, two 1px `linear-gradient`s repeated at
+svg - `pointer-events: none`, two 1px `linear-gradient`s repeated at
 44px, opacity .5. It deliberately does NOT pan: a static backdrop is
 free and nobody notices. The svg itself gets `cursor: grab` (class
 `grabbing` while panning) and the body `overflow: hidden;
@@ -56,16 +56,16 @@ function emit(evt, d) {
 }
 ```
 
-Two channels matter to the graph: `change` (state differs — redraw
+Two channels matter to the graph: `change` (state differs - redraw
 everything) and `activity` (transient event `{ kind, segs: [[fromId,
-toId], …] }` — animate pulses, no redraw). Every mutation in the state
+toId], …] }` - animate pulses, no redraw). Every mutation in the state
 layer ends with `emit('change')`; persistence is a debounced (~300 ms)
 `localStorage.setItem(key, JSON.stringify(state))` so drag storms
 don't hammer storage.
 
 ## Pan/zoom transform math
 
-The view is three numbers. Apply them ONLY on the world group — never
+The view is three numbers. Apply them ONLY on the world group - never
 touch per-element coordinates when panning:
 
 ```js
@@ -110,14 +110,14 @@ function fit() {
 }
 ```
 
-Clamp k (0.3–3 here, fit caps at 1.4) or one wild wheel flick strands
+Clamp k (0.3-3 here, fit caps at 1.4) or one wild wheel flick strands
 the user in deep space.
 
 ## Placement
 
 Force simulation is NOT required. Computed initial placement plus
 user drag (positions persisted with the state) is calmer and cheaper:
-seed N nodes on a ring starting at 12 o'clock —
+seed N nodes on a ring starting at 12 o'clock -
 
 ```js
 const a = -Math.PI / 2 + i * (2 * Math.PI / N);       // i = 0..N-1
@@ -125,7 +125,7 @@ node.x = Math.round(cx + Math.cos(a) * 250);          // rx 250
 node.y = Math.round(cy + Math.sin(a) * 205);          // ry 205 (wide screens)
 ```
 
-— and drop later nodes where the user right-clicked, or offset from
+- and drop later nodes where the user right-clicked, or offset from
 the last node with jitter (`x + 90 + rand*40, y - 30 + rand*80`).
 If you do want an automatic untangle (dense unknown topologies), run
 a bounded force relax over the same x/y fields, then STOP and let the
@@ -157,7 +157,7 @@ for (let it = 0; it < 300; it++) {
 }
 ```
 
-## Rendering — coalesced full rebuild
+## Rendering - coalesced full rebuild
 
 Don't diff. On every `change`, wipe the edges and nodes layers and
 rebuild them from state; coalesce bursts through one rAF gate:
@@ -177,7 +177,7 @@ function render() {
 }
 ```
 
-The pulse layer is never cleared by `render` — in-flight animations
+The pulse layer is never cleared by `render` - in-flight animations
 survive state rebuilds. Ten mutations in one tick still cost one
 rebuild; a few hundred SVG elements rebuild in well under a frame.
 
@@ -198,7 +198,7 @@ function addPair(aId, bId, label, isMeta) {
 
 Each pair renders a thin visible `<line x1 y1 x2 y2>` (stroke-width
 1.2; dashed variant per class for special links) PLUS an invisible
-fat twin for hover — a 1px line is unhoverable:
+fat twin for hover - a 1px line is unhoverable:
 
 ```css
 .edge     { stroke: #27334f; stroke-width: 1.2; }
@@ -206,7 +206,7 @@ fat twin for hover — a 1px line is unhoverable:
 ```
 
 The hit twin carries `pointerenter/move/leave` and drives an HTML
-tooltip — a `position: fixed` div appended to `document.body`
+tooltip - a `position: fixed` div appended to `document.body`
 (HTML wraps and styles better than SVG `<text>`), offset from the
 cursor and clamped to the viewport:
 
@@ -216,7 +216,7 @@ tip.style.top  = Math.min(y + 12, innerHeight -  90) + 'px';
 ```
 
 Hover-highlighting a node's peers re-appends bright copies of EXACTLY
-the drawn links touching it (class `edge-hot`) — never invent
+the drawn links touching it (class `edge-hot`) - never invent
 highlight edges the map doesn't draw, or you telegraph traffic that
 doesn't exist.
 
@@ -243,7 +243,7 @@ function txt(s, x, y, cls) {
 }
 ```
 
-State transitions are pure CSS — rebuilding with a different class is
+State transitions are pure CSS - rebuilding with a different class is
 the whole animation system for standing states:
 
 ```css
@@ -260,10 +260,10 @@ hit target. Badges (leader star, role diamond) are extra `<text>`
 children at corner offsets like `(26,-24)`; an SVG `<title>` child
 inside a badge yields a free native tooltip.
 
-## Interaction — drag vs pan vs click
+## Interaction - drag vs pan vs click
 
 One `pointerdown` on the svg dispatches everything. No manual
-hit-testing: the browser did it — walk up from `e.target`:
+hit-testing: the browser did it - walk up from `e.target`:
 
 ```js
 svg.addEventListener('pointerdown', e => {
@@ -274,7 +274,7 @@ svg.addEventListener('pointerdown', e => {
 ```
 
 Both gestures attach `pointermove`/`pointerup` to `window` (not the
-svg — the pointer leaves it mid-drag) and detach on up. Pan stores
+svg - the pointer leaves it mid-drag) and detach on up. Pan stores
 the grab offset in screen space; node drag works in WORLD space via
 `toWorld` and keeps the grab offset so the node doesn't jump to the
 cursor. Click and drag share the button: a drag only "starts" after
@@ -308,7 +308,7 @@ e.clientY)` so the node lands under the cursor). The menu is a fixed
 HTML div clamped to the viewport, removed by any `pointerdown`
 outside `.ctx-menu`.
 
-## Activity pulses — animating data movement
+## Activity pulses - animating data movement
 
 Discrete events (write replication, election, chunk repair) animate
 as pulses: for each `[from, to]` segment, a colored line plus a dot
@@ -350,25 +350,25 @@ function flash(N, color) {                            // arrival ring
 
 Pulses use WORLD coordinates and live inside the world group, so
 pan/zoom applies to them for free. They sample node positions at
-launch; a node dragged mid-flight leaves a half-second stale pulse —
+launch; a node dragged mid-flight leaves a half-second stale pulse -
 fine, don't chase it.
 
 ## Driving the graph from live data
 
 The graph is a pure subscriber. The state layer (simulation, poller,
-websocket mirror — anything) mutates a single state object, then
+websocket mirror - anything) mutates a single state object, then
 emits; the graph's only obligations are `on('change', queueRender)`
 and `on('activity', animate)`. This buys two big features cheaply:
 
 - **Tick loop**: a `setInterval(tick, TICK_MS / speed)` advances the
   world (elections, repairs, TTL expiry) and each mutating step emits
-  its own activity — the map narrates itself. Rebuild the interval to
+  its own activity - the map narrates itself. Rebuild the interval to
   change speed; a `paused` flag skips it.
 - **DVR time travel**: because state is one JSON-serializable object,
   `snapshot() = JSON.stringify(S)` per tick into an array gives a
   scrubbable timeline. Scrubbing sets a `frozen` message and pauses
-  the ticker; every mutating entry point is wrapped once —
-  `const guard = fn => (...a) => frozenCheck() || fn(...a)` — so a
+  the ticker; every mutating entry point is wrapped once -
+  `const guard = fn => (...a) => frozenCheck() || fn(...a)` - so a
   frozen world REFUSES writes with a human explanation instead of
   silently forking history. `restore(json, {persist:false})` while
   reviewing; restore the saved live-edge snapshot (persist true) to
@@ -385,7 +385,7 @@ only `init(svg, onInspect)`, `fit()`, `zoom(f)`, `render()`.
 ## Rules
 
 - All SVG elements via `createElementNS('http://www.w3.org/2000/svg',
-  …)` — `createElement('svg')` and friends silently render nothing.
+  …)` - `createElement('svg')` and friends silently render nothing.
 - Pan/zoom is ONE transform on the world group. Never loop over
   elements updating x/y for a pan; that's the canvas tax without
   canvas.
@@ -396,17 +396,17 @@ only `init(svg, onInspect)`, `fit()`, `zoom(f)`, `render()`.
 - Full rebuild + rAF coalescing beats diffing at this scale; but keep
   transient animation elements in their OWN layer that render never
   clears, and hide any tooltip on rebuild (its anchor may be gone).
-- 1px lines are unhoverable — pair every visible edge with a
+- 1px lines are unhoverable - pair every visible edge with a
   transparent 12px hit twin.
 - Text inside nodes gets `pointer-events: none`; the shape is the hit
   target, `closest('.gnode') + dataset.id` is the whole hit test.
 - Distinguish click from drag with a movement threshold (~4 units),
   not with timers.
-- Clamp zoom (~0.3–3) and clamp every fixed-position popup (tooltip,
+- Clamp zoom (~0.3-3) and clamp every fixed-position popup (tooltip,
   context menu, toast) to the viewport.
-- HTML overlays for tooltips/menus/windows, SVG for the scene — each
+- HTML overlays for tooltips/menus/windows, SVG for the scene - each
   layer does what it's good at; give overlays explicit z-index bands.
-- Persist node positions with the data (debounced) — a layout the
+- Persist node positions with the data (debounced) - a layout the
   user arranged is state, and losing it on refresh reads as a bug.
 - Standing states are CSS classes (dashes, keyframes); rAF loops are
   only for transient, self-removing elements.

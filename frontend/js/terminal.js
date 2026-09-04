@@ -1,11 +1,11 @@
-/* terminal.js — terminal tabs (Ctrl+T), lifted from CodeTree's emulator.
+/* terminal.js - terminal tabs (Ctrl+T), lifted from CodeTree's emulator.
  *
  * A VT100/xterm subset broad enough for modern full-screen programs
  * (nvim, less, htop): alternate screen, scroll regions, insert/delete
  * lines & cells, 16/256/truecolor SGR, application cursor keys, mouse
  * reporting (SGR + legacy), bracketed paste, OSC titles and OSC 52
  * clipboard, DEC line drawing, and the query/reply pairs programs probe
- * with. No vendored xterm — the app ships no external resources.
+ * with. No vendored xterm - the app ships no external resources.
  *
  * Gated "modern features" (alt screen, mouse, bracketed paste, title,
  * clipboard) go through ask/allow/deny; "ask" prompts stack in the
@@ -30,9 +30,9 @@ const TERM_FEATURES = [
   { id: "title", name: "Set the tab title", def: "allow", pause: false,
     desc: "The program renames this terminal tab (OSC 0/2)." },
   { id: "clipboardWrite", name: "Write the system clipboard", def: "ask", pause: false,
-    desc: "OSC 52 — the program places text on your clipboard. It can do this invisibly, hence the prompt." },
+    desc: "OSC 52 - the program places text on your clipboard. It can do this invisibly, hence the prompt." },
   { id: "clipboardRead", name: "Read the system clipboard", def: "ask", pause: false,
-    desc: "OSC 52 query — the program reads your clipboard contents." },
+    desc: "OSC 52 query - the program reads your clipboard contents." },
 ];
 
 function termFeatureLevel(id) {
@@ -575,18 +575,21 @@ function _termRowHtml(row, cols, curCol, shape) {
 /* ==================== Loom tab integration ==================== */
 
 /* st.terms: termId -> {container, folders:[{path,mode}], network,
- * title, started, running} — the tab's config, persisted in the session */
+ * title, started, running} - the tab's config, persisted in the session */
 function termState(id) {
   return st.terms[id] || (st.terms[id] = {
     container: st.config?.containers?.default || "sandbox",
-    folders: [], network: false, env: "",
+    folders: [], network: "none", env: "",
     title: null, started: false, running: false,
   });
 }
 
+const NET_LABELS = { none: "no network", loopback: "loopback only",
+                     on: "network on" };
+
 function newTerminal() {
   if (!st.library) return;
-  // a new terminal inherits its setup from the active terminal tab —
+  // a new terminal inherits its setup from the active terminal tab -
   // or, when launched from elsewhere, from the most recently used
   // terminal, or the last terminal tab in the strip
   const active = tabById(st.activeTab);
@@ -701,9 +704,12 @@ function termSetupForm(id) {
   };
   renderMounts();
 
-  const netChk = el("input", { type: "checkbox" });
-  netChk.checked = !!t.network;
-  netChk.addEventListener("change", () => { t.network = netChk.checked; saveSession(); });
+  const netSel = el("select", { class: "compose-model term-sel" });
+  for (const [val, label] of Object.entries(NET_LABELS)) {
+    netSel.append(el("option", { value: val, text: label }));
+  }
+  netSel.value = netMode(t.network);
+  netSel.addEventListener("change", () => { t.network = netSel.value; saveSession(); });
 
   const envSel = el("select", { class: "compose-model term-sel" });
   envSel.append(el("option", { value: "", text: "no environment" }));
@@ -720,19 +726,18 @@ function termSetupForm(id) {
     el("h2", { text: "New terminal" }),
     el("div", { class: "ts-row" }, el("label", { text: "Container" }), contSel),
     el("div", { class: "ts-row" }, el("label", { text: "Mounts" }), mounts),
-    el("div", { class: "ts-row" }, el("label", { text: "Network" }),
-      el("label", { class: "chk" }, netChk, "allow network access (off = --network=none)")),
+    el("div", { class: "ts-row" }, el("label", { text: "Network" }), netSel),
     el("div", { class: "ts-row" }, el("label", { text: "Environment" }), envSel),
     el("div", { class: "ts-row" }, el("span"),
       el("button", {
         class: "btn btn-acc", text: "Start shell",
         onclick: () => { t.started = true; saveSession(); renderTermTab(id); },
       })),
-    el("p", { class: "ts-hint", text: "Folders mount at /mnt/<name> (view = read-only). The shell runs as an unprivileged user in the container you pick." }));
+    el("p", { class: "ts-hint", text: "Folders mount at /mnt/<name> (view = read-only). The shell runs as an unprivileged user in the container you pick. Loopback only reaches the HOST's 127.0.0.1 services at 10.0.2.2 and nothing else (podman/slirp4netns)." }));
 }
 
 /* change a LIVE terminal's setup (container / network). The running
- * container is killed and a fresh shell starts with the new setup —
+ * container is killed and a fresh shell starts with the new setup -
  * the scrollback buffer is kept (the view keeps feeding into the same
  * screen, and the backend replays carried history above the new shell). */
 async function switchTermSetup(id, changes, onCancel) {
@@ -754,8 +759,8 @@ async function switchTermSetup(id, changes, onCancel) {
       : "env" in changes
         ? (changes.env ? "loading environment " + changes.env
                        : "clearing the environment")
-        : changes.network ? "enabling network" : "disabling network";
-    v.screen.feed("\r\n\x1b[2m[loom] " + what + " — restarting shell…\x1b[0m\r\n");
+        : "network → " + (NET_LABELS[netMode(changes.network)] || "no network");
+    v.screen.feed("\r\n\x1b[2m[loom] " + what + " - restarting shell…\x1b[0m\r\n");
     v.opening = false;
     v.exited = false;
     openTermSession(id, v);
@@ -772,12 +777,12 @@ async function switchTermSetup(id, changes, onCancel) {
 
 function termHeaderBar(id) {
   const t = termState(id);
-  // container: a live selector — switching restarts into the new image
+  // container: a live selector - switching restarts into the new image
   const defs = (st.config?.containers?.definitions || []).map((d) => d.name);
   if (!defs.includes(t.container)) defs.unshift(t.container);
   const contSel = el("select", {
     class: "term-sel term-head-sel",
-    title: "Switch container — restarts the shell; scrollback is kept",
+    title: "Switch container - restarts the shell; scrollback is kept",
   });
   for (const name of defs) contSel.append(el("option", { value: name, text: name }));
   contSel.value = t.container;
@@ -786,21 +791,28 @@ function termHeaderBar(id) {
     switchTermSetup(id, { container: contSel.value },
       () => { contSel.value = t.container; });
   });
+  const tnet = netMode(t.network);
   const netBtn = el("button", {
-    class: "pill term-net" + (t.network ? " on" : ""),
-    text: t.network ? "network" : "no network",
-    title: (t.network
-      ? "The container CAN reach the network — click to turn off"
-      : "The container runs with --network=none — click to allow network")
+    class: "pill term-net" + (tnet === "on" ? " on"
+      : tnet === "loopback" ? " loop" : ""),
+    text: NET_LABELS[tnet],
+    title: (tnet === "on"
+      ? "The container CAN reach the network - click for no network"
+      : tnet === "loopback"
+        ? "Only the host's 127.0.0.1 services are reachable (at "
+          + "10.0.2.2) - click for full network"
+        : "The container runs with --network=none - click for loopback only")
       + " (restarts the shell; scrollback is kept)",
   });
   netBtn.addEventListener("click", () => {
-    switchTermSetup(id, { network: !t.network });
+    const order = ["none", "loopback", "on"];
+    switchTermSetup(id, {
+      network: order[(order.indexOf(tnet) + 1) % 3] });
   });
   // environment: another live selector, same restart semantics
   const envSel = el("select", {
     class: "term-sel term-head-sel",
-    title: "Switch environment — restarts the shell; scrollback is kept",
+    title: "Switch environment - restarts the shell; scrollback is kept",
   });
   envSel.append(el("option", { value: "", text: "no env" }));
   Api.call("envs_list").then((r) => {
@@ -1211,7 +1223,7 @@ async function termAttachOrOpen(id, v) {
 }
 
 /* Resync after the page was hidden (close-to-tray, minimize): rAF stops
- * firing in hidden windows, so pending paints stall — on visibility/focus
+ * firing in hidden windows, so pending paints stall - on visibility/focus
  * every live terminal re-measures and repaints, and the ACTIVE terminal
  * reattaches if its session was lost while away. */
 function resyncTerms() {
@@ -1287,7 +1299,7 @@ function onTermEvent(ev) {
   } else if (ev.kind === "exit") {
     v.opening = false; v.exited = true;
     if (t) t.running = false;
-    v.screen.feed(`\r\n\x1b[2m[session ended — exit ${ev.code ?? "?"} · Enter restarts the shell]\x1b[0m\r\n`);
+    v.screen.feed(`\r\n\x1b[2m[session ended - exit ${ev.code ?? "?"} · Enter restarts the shell]\x1b[0m\r\n`);
     renderTabs();
   } else if (ev.kind === "error") {
     v.opening = false; v.exited = true;

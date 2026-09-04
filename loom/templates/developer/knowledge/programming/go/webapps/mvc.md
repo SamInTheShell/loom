@@ -1,11 +1,11 @@
-# MVC monolith structure — kernel, apps, domain
+# MVC monolith structure - kernel, apps, domain
 
 How to structure a multi-app Go web monolith (e.g. a personal-cloud
 suite: drive, mail, calendar, contacts behind one launcher) as three
 layers in one binary: a KERNEL package holding the shared runtime
 (router, sessions, auth wrappers, page chrome, audit), APP packages
 holding controllers and co-located views, and DOMAIN packages holding
-models and persistence. One process, one router, one design system —
+models and persistence. One process, one router, one design system -
 but each app stays a package you can read, test, and delete in
 isolation. This is MVC with Go package boundaries as the enforcement
 mechanism: the compiler rejects a dependency in the wrong direction.
@@ -19,7 +19,7 @@ cmd/<binary>/main.go      composition root: wires everything, fatals
 pkg/apps/<name>/          controllers + views (handlers, *.tpl, assets)
         │   imports kernel, domain, ui
         ▼
-pkg/kernel/               shared runtime; imports domain, ui — NEVER apps
+pkg/kernel/               shared runtime; imports domain, ui - NEVER apps
         ▼
 pkg/domain/<name>/        models + persistence; imports ONLY the storage
                           client and pkg/domain/kvx helpers
@@ -29,14 +29,14 @@ pkg/ui/                   design system: base shell template, CSS/JS/font
 
 The rule, stated once and enforced by imports: apps → kernel → domain
 → storage. Domain packages never import the kernel, any app, or the ui
-package — they know nothing about HTTP. The kernel never imports an
+package - they know nothing about HTTP. The kernel never imports an
 app; it defines the registration types (`Route`, `Mount`) apps satisfy.
 The router is therefore closed over an interface-shaped contract, not a
 package list, and deleting an app is deleting its directory plus one
 line in main.
 
-When a LOWER domain needs an UPPER one — users must create a personal
-drive at signup, but drives imports users — do not invert the imports.
+When a LOWER domain needs an UPPER one - users must create a personal
+drive at signup, but drives imports users - do not invert the imports.
 Give the lower package a function field and wire it in main:
 
 ```go
@@ -76,7 +76,7 @@ type App struct {
     MaxUpload     int64
     SSE  *Hub                 // live-stream hub, wired by Router
     // rate limiters, parsed auth-page templates: unexported,
-    // initialized in Router via sync.Once — no package-level state
+    // initialized in Router via sync.Once - no package-level state
 }
 
 // Ctx bounds one request's storage work.
@@ -103,7 +103,7 @@ against two kernel types:
 
 ```go
 type Route struct {
-    Pattern string        // "GET /contacts" — net/http 1.22 patterns
+    Pattern string        // "GET /contacts" - net/http 1.22 patterns
     Handler http.Handler  // (gorilla-mux.md if you need richer routing)
 }
 type Mount struct {
@@ -115,7 +115,7 @@ type Mount struct {
 Main passes every Mount to `k.Router(launcher.Mount(k),
 drive.Mount(k), …)` and fatals on error. Router registers its own
 kernel routes first, then every app's, and returns an error on ANY
-duplicate pattern — naming the two apps that collided. Three
+duplicate pattern - naming the two apps that collided. Three
 consequences worth copying:
 
 - NO `init()` side effects, no blank imports, no global route table.
@@ -132,16 +132,16 @@ consequences worth copying:
   it exists); `k.FeatureGateHTTP(id, h)` is the plain-handler variant
   for asset and anonymous routes.
 
-Internally each app builds a small `handlers` struct at Mount time —
-the app's parsed template set alongside the kernel pointer — and hangs
+Internally each app builds a small `handlers` struct at Mount time -
+the app's parsed template set alongside the kernel pointer - and hangs
 its handler methods off it. No package-level state in apps either.
 
 ## Request lifecycle
 
 `GET /contacts` walks: ServeMux pattern match → `Authed` wrapper
-(reads the session cookie, loads the session record from the store —
+(reads the session cookie, loads the session record from the store -
 any replica can serve any request because sessions live in the shared
-store, not process memory — loads the user, destroys the session and
+store, not process memory - loads the user, destroys the session and
 bounces to `/login?next=…` on any failure, rejects banned accounts) →
 `FeatureGate` (404 when the feature is off) → the handler. Authed's
 shape upgrades the handler signature so identity is an argument, never
@@ -180,11 +180,11 @@ progressive enhancement for free: every page works without JS.
 
 ## Views: typed page structs and Chrome
 
-Chrome is the shell data every page embeds — title, site name, theme,
+Chrome is the shell data every page embeds - title, site name, theme,
 current-app id for the switcher highlight, user, session, feature
 switches, quota meter, unread badge, and the canonical app list that
 both the switcher and the launcher grid iterate (ONE list, so they
-can never drift). Pages are TYPED structs embedding it — never
+can never drift). Pages are TYPED structs embedding it - never
 `Data any`:
 
 ```go
@@ -210,7 +210,7 @@ func (h *handlers) page(w http.ResponseWriter, r *http.Request,
 Reuse a domain struct directly when the template shows the record;
 mint a small VM struct when the view needs a projection, a join, or a
 JSON shape for the page's fetch API. Chrome construction soft-fails
-every lookup (log a warning, render a zero badge) — a chrome widget is
+every lookup (log a warning, render a zero badge) - a chrome widget is
 never worth failing the page for.
 
 Templates and assets are CO-LOCATED and embedded, one set per app,
@@ -226,7 +226,7 @@ h := &handlers{k: k, views: ui.MustParse(tplFS)}
 ```
 
 `ui.MustParse` parses the base shell plus the app's `*.tpl` with the
-shared FuncMap and panics on error — a parse error is a programming
+shared FuncMap and panics on error - a parse error is a programming
 error and must die at startup, not per request (html-templates.md).
 The app serves its own JS/CSS at `/<app>/assets/` from the embedded FS
 with the same cache policy as the global `/static/`: long-lived
@@ -236,12 +236,12 @@ never reads as "didn't land".
 ## Domain packages: key schemas instead of an ORM
 
 A domain package is a `Store` struct over the KV client plus the types
-it owns. There is no ORM and no SQL — the schema IS the key design,
+it owns. There is no ORM and no SQL - the schema IS the key design,
 and it lives in code review, not migrations:
 
 - ONE shared helper package (call it `kvx`) holds the storage idioms
-  every domain uses — random key-safe IDs, JSON get/set, prefix
-  scan/delete, OCC-conflict detection — and, critically, its `doc.go`
+  every domain uses - random key-safe IDs, JSON get/set, prefix
+  scan/delete, OCC-conflict detection - and, critically, its `doc.go`
   is the CANONICAL KEY TABLE: every key family the whole platform
   writes, one line each (`/app/users/<username> → users.User`). Any
   new key is a review of that file. One namespace root (`/app/…`)
@@ -249,7 +249,7 @@ and it lives in code review, not migrations:
 - Each domain declares its own prefixes as consts and never touches
   another domain's. List-by-owner needs a REVERSE INDEX row
   (`/app/userdrives/<user>/<driveID>`) written in the SAME transaction
-  as the canonical row — an index that can drift from its source is a
+  as the canonical row - an index that can drift from its source is a
   bug factory.
 - Newest-first listings use inverted-timestamp IDs so a plain
   ascending prefix scan returns newest first, with no ORDER BY
@@ -264,9 +264,9 @@ func InvIDAt(t time.Time) string {
 ```
 
 - Uniqueness (usernames, name claims) comes from OCC transactions:
-  read the key (recording "did not exist"), write it, commit — racing
+  read the key (recording "did not exist"), write it, commit - racing
   writers conflict and one wins. Retry on the conflict error.
-- IDs arrive in URLs — attacker-controlled — and become key segments.
+- IDs arrive in URLs - attacker-controlled - and become key segments.
   Validate EVERY user-supplied segment before it reaches a key: IDs
   must match the generator's alphabet (no separator character exists
   in it, so an id can never traverse out of its key position);
@@ -296,12 +296,12 @@ as a periodic worker, never a per-request piggyback.
 
 ## Adding a new app end-to-end
 
-1. Domain first: `pkg/domain/<name>/` — types, Store over the KV
+1. Domain first: `pkg/domain/<name>/` - types, Store over the KV
    client, key prefixes. Add every new key family to the kvx key
    table doc. Unit-test against the fake store before any HTTP exists.
 2. Register the feature id in the site feature registry so the flag,
    the launcher card, and the app switcher light up from one list.
-3. `pkg/apps/<name>/` — `Mount(k *kernel.App) kernel.Mount`, a
+3. `pkg/apps/<name>/` - `Mount(k *kernel.App) kernel.Mount`, a
    `handlers` struct, embedded `*.tpl` + `assets/`, typed page structs
    embedding `kernel.Chrome`. Wrap pages in
    `k.Authed(k.FeatureGate(id, …))`, mutations additionally behind
@@ -318,7 +318,7 @@ as a periodic worker, never a per-request piggyback.
 Each layer has a natural seam; use all three (../testing.md):
 
 - **Domain**: a test-only in-memory fake of the storage server behind
-  `httptest.NewTLSServer`, speaking exactly the client's wire shapes —
+  `httptest.NewTLSServer`, speaking exactly the client's wire shapes -
   so tests exercise the REAL store code (JSON plumbing, OCC
   transactions, blob paths) with no running cluster. `kvxtest.New(t)`
   returns a connected client; the server dies with the test. Compose
@@ -329,7 +329,7 @@ Each layer has a natural seam; use all three (../testing.md):
   This catches template/struct drift with zero HTTP.
 - **Web** (`*_web_test.go`): a harness = fake store + a minimal
   `kernel.App` (logger to `io.Discard`) + `k.Router(Mount(k))`, driven
-  by `httptest.NewRequest`/`NewRecorder` through the REAL router — so
+  by `httptest.NewRequest`/`NewRecorder` through the REAL router - so
   auth wrappers, feature gates, CSRF, and respond semantics are all in
   the loop. Give the harness `signIn(t, user)` returning a client that
   carries the session cookie and CSRF token, and `get`/`post` helpers;
@@ -341,14 +341,14 @@ Each layer has a natural seam; use all three (../testing.md):
 
 - Dependency direction is law: apps → kernel → domain → storage. A
   domain package importing the kernel, an app, or the ui package is a
-  layering bug — fix it with a function-field seam wired in main.
+  layering bug - fix it with a function-field seam wired in main.
 - One composition root. All construction, wiring, env parsing, and
   worker startup live in main; `init()` does nothing anywhere.
 - Route registration is explicit and collision-checked at startup. If
   your router can't name the two owners of a duplicate pattern, add
   the owner map.
 - Handlers receive identity (`sess, user`) as parameters from the auth
-  wrapper — never from context lookups scattered through the stack.
+  wrapper - never from context lookups scattered through the stack.
 - Every signed-in mutation: CSRF check first, dual-mode Respond last.
   Every mutation route is a POST; GETs never mutate.
 - Typed page structs embedding Chrome, always. `Data any` templates

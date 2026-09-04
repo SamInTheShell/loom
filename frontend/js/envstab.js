@@ -1,12 +1,12 @@
-/* envstab.js — the Environments tab (singleton). An environment is a
+/* envstab.js - the Environments tab (singleton). An environment is a
  * named set of env vars a chat can load into its shell containers.
  *
  * Storage split (the whole point):
- *   - definitions — names, PLAIN values, and secret STUBS — live in the
+ *   - definitions - names, PLAIN values, and secret STUBS - live in the
  *     library's environments.yaml: shareable, and the stubs document
  *     which variables a container needs;
  *   - secret VALUES live in this machine's OS keyring only. They never
- *     enter the library and never even cross back into this UI — the
+ *     enter the library and never even cross back into this UI - the
  *     editor only shows whether a value is set here.
  */
 "use strict";
@@ -47,8 +47,11 @@ function renderEnvsTab() {
   if (!panel) return;
   const es = envsState();
   panel.replaceChildren();
+  // one centered column like the other utility tabs - without it the
+  // hint paragraph spanned the whole window while the editor didn't
+  const page = el("div", { class: "mods-wrap" });
 
-  panel.append(el("div", { class: "srv-head" },
+  page.append(el("div", { class: "srv-head" },
     el("h2", { text: "Environments" }),
     el("button", {
       class: "btn btn-sm btn-acc", text: "New environment…",
@@ -63,11 +66,11 @@ function renderEnvsTab() {
           libReloadIfOpen("environments.yaml");
         }, "Create"),
     })));
-  panel.append(el("p", { class: "mods-hint",
+  page.append(el("p", { class: "mods-hint",
     text: "Chats load an environment from the pill next to the "
       + "permission mode. Plain values live in the library's "
       + "environments.yaml; secret values live in THIS machine's system "
-      + "keyring — the library only carries the stub, so anyone opening "
+      + "keyring - the library only carries the stub, so anyone opening "
       + "it can see which variables a container needs." }));
 
   const wrap = el("div", { class: "envs-wrap" });
@@ -87,7 +90,8 @@ function renderEnvsTab() {
   wrap.append(list);
 
   if (es.open) wrap.append(envEditor(es));
-  panel.append(wrap);
+  page.append(wrap);
+  panel.append(page);
 }
 
 function envEditor(es) {
@@ -108,8 +112,8 @@ function envEditor(es) {
         valIn = el("input", {
           type: "password", class: "env-val", value: r._newSecret,
           placeholder: r.hasSecret
-            ? "stored in the keyring — type to replace"
-            : "not set on this machine — type to set",
+            ? "stored in the keyring - type to replace"
+            : "not set on this machine - type to set",
         });
         valIn.addEventListener("input", () => { r._newSecret = valIn.value; });
       } else {

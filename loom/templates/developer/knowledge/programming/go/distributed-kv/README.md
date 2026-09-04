@@ -1,4 +1,4 @@
-# Distributed KV + blob store — the assembly map
+# Distributed KV + blob store - the assembly map
 
 This folder is a component catalog for building a databox-style
 distributed key-value and blob store in Go. Each file covers one part
@@ -35,28 +35,28 @@ erasure-coding.md     erasure-coded across nodes; KV holds manifests
 Pick the smallest configuration that meets the need; every larger one
 contains the smaller ones unchanged.
 
-1. **Single-node KV** — pebble.md (or badgerdb.md) + wire-protocols.md
+1. **Single-node KV** - pebble.md (or badgerdb.md) + wire-protocols.md
    + frontends.md. No raft, no shards. The storage API you define here
    is reused verbatim by every later configuration.
-2. **Replicated KV (one shard)** — add etcd-raft.md: one raft group,
+2. **Replicated KV (one shard)** - add etcd-raft.md: one raft group,
    the state machine applies to the storage engine. The "cluster" and
    the "metadata group" are the same single group.
-3. **Sharded KV** — add metadata-group.md, multigroup-raft.md,
+3. **Sharded KV** - add metadata-group.md, multigroup-raft.md,
    sharding.md: a dedicated metadata group routes clients to many data
    groups; shards split and move.
-4. **KV + blob store** — add blob-storage.md + erasure-coding.md: the
+4. **KV + blob store** - add blob-storage.md + erasure-coding.md: the
    KV (any of the above) stores blob manifests; blob chunks live on a
    separate flat chunk store across nodes.
 
 ## Reading order for building (see build-plan.md for the full ladder)
 
-1. `../testing.md` — the harness patterns everything below depends on.
-2. `build-plan.md` — how to sequence the work and verify each step.
-3. `pebble.md` (or `badgerdb.md`) — the storage engine and key schema.
-4. `etcd-raft.md` — the Ready loop; the heart of replication.
-5. `metadata-group.md`, `multigroup-raft.md`, `sharding.md` — scale-out.
-6. `wire-protocols.md`, `user-systems.md`, `frontends.md` — the edges.
-7. `blob-storage.md`, `erasure-coding.md` — large data.
+1. `../testing.md` - the harness patterns everything below depends on.
+2. `build-plan.md` - how to sequence the work and verify each step.
+3. `pebble.md` (or `badgerdb.md`) - the storage engine and key schema.
+4. `etcd-raft.md` - the Ready loop; the heart of replication.
+5. `metadata-group.md`, `multigroup-raft.md`, `sharding.md` - scale-out.
+6. `wire-protocols.md`, `user-systems.md`, `frontends.md` - the edges.
+7. `blob-storage.md`, `erasure-coding.md` - large data.
 
 ## Contracts that keep the parts composable
 
@@ -102,9 +102,9 @@ Rules that make the composition work:
 
 ## Siblings
 
-- `../git-hosting/` — a complete git forge whose storage backend is
+- `../git-hosting/` - a complete git forge whose storage backend is
   the KV + blob store this folder builds.
-- `../urfave-cli-v3.md` — the CLI shell for the server/ops/client
+- `../urfave-cli-v3.md` - the CLI shell for the server/ops/client
   commands frontends.md describes.
-- `../../web/node-graph.md` — an interactive SVG node-graph for
+- `../../web/node-graph.md` - an interactive SVG node-graph for
   visualizing the cluster topology this folder builds.

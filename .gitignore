@@ -9,8 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
-# Generated at app launch by loom/compose.py — templates/ is the source
+# Generated at app launch by loom/compose.py - templates/ is the source
 frontend/index.html
+frontend/diagwin.html
 
 .idea
 REFERENCES

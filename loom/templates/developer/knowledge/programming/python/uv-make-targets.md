@@ -1,7 +1,7 @@
-# uv projects in Makefiles — build, install, publish
+# uv projects in Makefiles - build, install, publish
 
 The Makefile conventions (help by default, self-documenting `##`
-targets — see programming/containers/makefile-conventions.md) apply to
+targets - see programming/containers/makefile-conventions.md) apply to
 Python projects too; the recipes just call uv. The standard block for a
 uv-managed project:
 
@@ -36,23 +36,23 @@ clean: ## remove build artifacts
 
 ## The targets, and their sharp edges
 
-- **build** — `uv build` produces both the sdist and the wheel in
+- **build** - `uv build` produces both the sdist and the wheel in
   `dist/`. It needs a `[build-system]` in pyproject.toml; projects that
   deliberately run from source (no build-system) simply don't get
-  build/publish targets — don't add packaging just to have them.
-- **install** — for a project that ships a CLI, `uv tool install
+  build/publish targets - don't add packaging just to have them.
+- **install** - for a project that ships a CLI, `uv tool install
   --force .` puts the entry points on the user's PATH in an isolated
   env; `--force` makes the target idempotent (re-running upgrades the
   installed copy instead of erroring). For libraries there is nothing
-  to "install" — developers `uv add` them; skip the target.
-- **publish** — always `clean build` first: `uv publish` uploads
+  to "install" - developers `uv add` them; skip the target.
+- **publish** - always `clean build` first: `uv publish` uploads
   whatever sits in `dist/`, and a stale wheel from last week is the
-  classic wrong-version release. Auth comes from the environment —
-  `UV_PUBLISH_TOKEN` (a PyPI API token) — never hard-coded in the
+  classic wrong-version release. Auth comes from the environment -
+  `UV_PUBLISH_TOKEN` (a PyPI API token) - never hard-coded in the
   Makefile; in Loom, that's exactly what a secret stub in an
   environment is for. Remember PyPI versions are immutable: a botched
   upload burns the version number, so bump `version` in pyproject.toml
-  before publishing (metadata edits by hand are fine — only
+  before publishing (metadata edits by hand are fine - only
   dependencies must go through `uv add`).
 
 ## Version discipline

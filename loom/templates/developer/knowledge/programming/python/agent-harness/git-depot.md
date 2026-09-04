@@ -1,11 +1,11 @@
-# Git depot — bare repositories as the app's storage core
+# Git depot - bare repositories as the app's storage core
 
 The workbench stores every project as a BARE git repository under the
 app data dir (`~/.yourapp/repos/<id>.git`). Bare repos give you
 versioned, branchable, diffable storage with zero invented formats:
 the UI reads files with plumbing commands against refs, agents commit
 through the same path, and any external git tool interoperates for
-free. The catch is that bare repos have no worktree — every read and
+free. The catch is that bare repos have no worktree - every read and
 every commit must go through plumbing, and network operations must
 never be allowed to prompt on a TTY the app doesn't have. This file is
 the complete recipe; git-local-sync.md covers mirroring depot repos to
@@ -20,11 +20,11 @@ operations onto agent tools.
   repos/<id>.git      the depot: one bare repo per project
   bin/askpass-helper  injected into git/ssh for secret prompts
   run/                unix sockets, temp indexes, transient state
-  config.json         app config (0600 — may hold API keys)
+  config.json         app config (0600 - may hold API keys)
 ```
 
 Make the data root overridable by one env var (`YOURAPP_HOME`) so
-tests point it at a temp dir. Repo IDs are directory names — validate
+tests point it at a temp dir. Repo IDs are directory names - validate
 with `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$`, reject `..` and a trailing
 `.git`, and raise before ever joining the path. Keep the user-facing
 display name separate from the id (a small text file inside the bare
@@ -44,7 +44,7 @@ class GitResult:
     code: int
     out: str          # stdout decoded utf-8/replace
     err: str
-    out_bytes: bytes  # raw stdout — needed for blobs and patches
+    out_bytes: bytes  # raw stdout - needed for blobs and patches
 
 def run(args, *, cwd=None, env=None, input_bytes=None, timeout=60):
     p = subprocess.run(["git", *args], cwd=cwd, env=env or base_env(),
@@ -57,9 +57,9 @@ def must(args, **kw):     # raise GitError on nonzero, keep the result
     ...
 ```
 
-`base_env()` copies `os.environ` and sets `GIT_TERMINAL_PROMPT=0` —
+`base_env()` copies `os.environ` and sets `GIT_TERMINAL_PROMPT=0` -
 git must fail, never hang, if anything tries to prompt outside the
-askpass path below. Every call gets a timeout (60 s default; 300–900 s
+askpass path below. Every call gets a timeout (60 s default; 300-900 s
 for clone/fetch/push/checkout-scale work). Keep `out_bytes`: file
 reads and patches are bytes first, text second.
 
@@ -73,17 +73,17 @@ COMMITTER stays the configured user. Carry the current agent name in a
 that window inherits attribution without threading a parameter through
 every layer.
 
-## Reading against refs — no worktree needed
+## Reading against refs - no worktree needed
 
 All reads take `ref:path` specs. Sanitize the relative path first:
 strip slashes, reject any `..` segment and any leading `-` (argument
 injection), and pass `--` before free-form revs where git accepts it.
 
-- Directory listing: `ls-tree -l <ref>:<dir>` — each line is
+- Directory listing: `ls-tree -l <ref>:<dir>` - each line is
   `<mode> <type> <sha> <size>\t<name>`; `size` is `-` for trees, mode
   `120000` marks symlinks. List lazily per directory, not the whole
   tree.
-- File content: `cat-file blob <ref>:<path>` — bytes. Sniff binary by
+- File content: `cat-file blob <ref>:<path>` - bytes. Sniff binary by
   NUL in the first ~8 KB; cap text returned to the UI (e.g. 2 MB) and
   report `truncated`.
 - Resolve a ref: `rev-parse <ref>`; tree of a commit:
@@ -91,12 +91,12 @@ injection), and pass `--` before free-form revs where git accepts it.
   refs/heads/<b>` (exit code only).
 - Branch list: `for-each-ref refs/heads` with a `--format` of
   `%(refname:short)%09%(objectname:short)%09%(committerdate:unix)`
-  `%09%(authorname)` — one machine-parseable line per branch,
+  `%09%(authorname)` - one machine-parseable line per branch,
   tab-separated.
 - Ahead/behind: `rev-list --left-right --count A...B` (three dots)
   prints two numbers. Use it branch-vs-default and branch-vs-tracking.
 - History: `log --format='%H%x09%h%x09%an%x09%ct%x09%P%x09%D%x09%s'
-  --max-count=N --skip=M <ref> --` — `%x09` embeds literal tabs so
+  --max-count=N --skip=M <ref> --` - `%x09` embeds literal tabs so
   splitting is trivial; `%P` gives parents for graph drawing.
 - One commit: `show -s --format=...` for metadata, `show --format=
   --stat=110 <sha>` for the stat block, `show --format= --patch
@@ -107,7 +107,7 @@ injection), and pass `--` before free-form revs where git accepts it.
 - Default branch of a bare repo: `symbolic-ref --short HEAD`; set it
   with `symbolic-ref HEAD refs/heads/<b>`.
 
-## Worktree-less commits — the temp-index recipe
+## Worktree-less commits - the temp-index recipe
 
 A commit is just objects: blobs → tree → commit → ref move. Any
 number of file writes and deletions become ONE commit with no
@@ -149,18 +149,18 @@ def commit_files(repo, branch, files, message):
 ```
 
 The details that matter: `GIT_INDEX_FILE` is what makes the index
-private — never touch the repo's real index. Deletions must go through
+private - never touch the repo's real index. Deletions must go through
 `update-index --index-info` with the all-zeros sha (`rm --cached`
 paths misbehave in bare repos). Compare new tree to old tree to reject
 empty commits. Always pass the old sha as `update-ref`'s third
-argument — that makes the ref move a compare-and-swap, so a concurrent
+argument - that makes the ref move a compare-and-swap, so a concurrent
 writer gets a clean error instead of silently clobbering. Fire commit
 observers (UI refresh hooks) after, and never let an observer
 exception break the commit.
 
 A branch only exists once it has a commit, and an empty repo breaks
 everything downstream (pickers, clones, agents). Seed new repos with a
-root commit — an empty one is fine: `mktree` with empty stdin →
+root commit - an empty one is fine: `mktree` with empty stdin →
 `commit-tree <tree> -m "Initial commit"` → `update-ref
 refs/heads/<b> <sha>`.
 
@@ -169,7 +169,7 @@ refs/heads/<b> <sha>`.
 - Create: `init --bare --initial-branch=<name> <path>`, then the seed
   commit above (or a README via `commit_files`).
 - Import an existing repo: `clone --bare <src> <dest>` mirrors all
-  refs — then ALWAYS `remote remove origin`, because a bare clone's
+  refs - then ALWAYS `remote remove origin`, because a bare clone's
   origin points at the local source path; re-add the source's real
   remotes only on explicit opt-in, so an imported repo can never
   accidentally push anywhere. Preserve its default branch with
@@ -177,29 +177,29 @@ refs/heads/<b> <sha>`.
 - Import a plain directory: init a bare repo, then run `add -A .` with
   `GIT_DIR=<bare>`, `GIT_WORK_TREE=<srcdir>`, and a temp
   `GIT_INDEX_FILE`, followed by `write-tree` / `commit-tree` /
-  `update-ref` — one root commit of the directory contents, source
+  `update-ref` - one root commit of the directory contents, source
   untouched.
 - Clone from a URL: `clone --bare <url> <dest>` with the network env
   below; on failure delete the half-made dir. After any bare
   clone/remote add, set `remote.<name>.fetch` to
-  `+refs/heads/*:refs/remotes/<name>/*` — bare clones don't get
+  `+refs/heads/*:refs/remotes/<name>/*` - bare clones don't get
   tracking refs by default, and fetch/ahead-behind need them.
 - Branches: `branch <new> <from-ref>` to create, `branch -D` to
-  delete — but refuse to delete the default branch. Deleting a repo
+  delete - but refuse to delete the default branch. Deleting a repo
   needs typed-name confirmation; it's `rm -rf` with no undo.
 - Fetch/push: `fetch --prune <remote>` and `push <remote> <branch>`,
   both with the network env and long timeouts.
 
 For merges between depot branches, don't reimplement merge machinery:
 make a throwaway `clone --shared` of the bare repo (objects via
-alternates — cost is checkout only), run the real `merge` there, and
+alternates - cost is checkout only), run the real `merge` there, and
 push the result back; the push doubles as the race guard, since the
 bare repo rejects a non-fast-forward if the branch moved mid-merge.
 Conflict handling and the resolution-branch pattern are in
 git-local-sync.md; long-lived shared-clone checkouts for shell
 execution are in exec-checkouts.md.
 
-## Network ops that can never block — the askpass broker
+## Network ops that can never block - the askpass broker
 
 `git fetch` over ssh with an encrypted key, or HTTPS needing
 credentials, prompts on a TTY a desktop app doesn't have. Route every
@@ -213,7 +213,7 @@ prompt through the app instead:
    generous client timeout (~180 s).
 2. Network git calls get `network_env()`: `GIT_ASKPASS` and
    `SSH_ASKPASS` pointing at the helper, `SSH_ASKPASS_REQUIRE=force`
-   (OpenSSH ≥ 8.4 — use askpass even with a TTY), the socket path in
+   (OpenSSH ≥ 8.4 - use askpass even with a TTY), the socket path in
    your own env var, and `DISPLAY` set to something (`:0`) because
    some ssh builds ignore `SSH_ASKPASS` without it. Add
    `GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=accept-new` so
@@ -230,11 +230,11 @@ prompt through the app instead:
    sets the event. Cancel = secret None = helper exits 1 = git fails
    with a normal error instead of hanging.
 
-Answers marked "remember" go in the in-memory cache only — never on
-disk — keyed by the exact prompt text, so one passphrase entry covers
+Answers marked "remember" go in the in-memory cache only - never on
+disk - keyed by the exact prompt text, so one passphrase entry covers
 a whole fetch/push burst and later calls that session; provide a
 "forget secrets" action that clears it. This same broker is what makes
-tunneled remotes usable — see http-over-ssh.md.
+tunneled remotes usable - see http-over-ssh.md.
 
 ## Rules
 
@@ -244,7 +244,7 @@ tunneled remotes usable — see http-over-ssh.md.
 - Validate every user-supplied path (`..`, leading `-`) and sha before
   it reaches argv; ids are validated before path join.
 - Every `update-ref` that moves an existing branch passes the expected
-  old sha — CAS or nothing. Racing writers must error, not clobber.
+  old sha - CAS or nothing. Racing writers must error, not clobber.
 - Never touch a repo's real index; worktree-less commits always set
   `GIT_INDEX_FILE` into a temp dir.
 - Timeouts on every subprocess call; caps on every payload returned to

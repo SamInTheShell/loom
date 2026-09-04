@@ -1,6 +1,6 @@
-"""MCP (Model Context Protocol) servers — external tool providers for chats.
+"""MCP (Model Context Protocol) servers - external tool providers for chats.
 
-Servers are DEFINED in loom.yaml (`mcp-servers:` — name, command, env; the
+Servers are DEFINED in loom.yaml (`mcp-servers:` - name, command, env; the
 MCP Servers tab's wizard writes entries non-destructively). Each enabled
 server is a child process speaking MCP's stdio transport: newline-
 delimited JSON-RPC 2.0 on stdin/stdout. This module is a deliberately
@@ -8,14 +8,14 @@ minimal client: initialize → notifications/initialized → tools/list, then
 tools/call per invocation. Server-initiated requests are answered with
 "method not found" (we offer no sampling/roots), notifications ignored.
 
-Tool names surface to the model — and to loom.yaml's
-permission-modes.<mode>.tools — as   mcp_<server>_<tool>   (the tab shows
+Tool names surface to the model - and to loom.yaml's
+permission-modes.<mode>.tools - as   mcp_<server>_<tool>   (the tab shows
 these real function names so per-mode overrides are predictable). The
 DEFAULT permission of each tool is chosen in the tab and stored per
 library in state.json; an explicit per-mode entry in loom.yaml wins.
 
 Enabled == running: toggling a server on/off in the tab starts/stops the
-process AND records the set per library — servers running when the app
+process AND records the set per library - servers running when the app
 closed autostart when the library opens again.
 """
 
@@ -87,7 +87,7 @@ class _Client:
                 try:
                     msg = json.loads(line.decode("utf-8", "replace"))
                 except ValueError:
-                    continue   # startup banners etc. — not ours to parse
+                    continue   # startup banners etc. - not ours to parse
                 try:
                     self._dispatch(msg)
                 except Exception:
@@ -96,7 +96,7 @@ class _Client:
             pass
         err = b"".join(self._stderr_tail).decode("utf-8", "replace").strip()
         self._die("the server process exited"
-                  + (f" — {err[-400:]}" if err else ""))
+                  + (f" - {err[-400:]}" if err else ""))
 
     def _read_stderr(self):
         try:
@@ -116,7 +116,7 @@ class _Client:
             return
         if mid is not None and msg.get("method"):
             # a server-initiated REQUEST (sampling, roots, elicitation…):
-            # we offer none of it — answer politely so the server moves on
+            # we offer none of it - answer politely so the server moves on
             if msg["method"] == "ping":
                 self._write({"jsonrpc": "2.0", "id": mid, "result": {}})
             else:
@@ -283,7 +283,7 @@ def refresh_tools(name: str) -> int:
 
 def autostart(cfg_servers: list[dict]) -> None:
     """Start the servers recorded as running when the library last closed.
-    Best effort — a failure surfaces as a bus event, not an exception."""
+    Best effort - a failure surfaces as a bus event, not an exception."""
     want = set(store.mcp_running(_lib_root))
     for rec in cfg_servers or []:
         if rec["name"] not in want:
@@ -310,7 +310,7 @@ def set_tool_perm(full_name: str, level: str) -> None:
 
 def live_tool_specs() -> list[dict]:
     """OpenAI-style function specs for every tool on every RUNNING server
-    (permission filtering is the caller's job — it owns cfg + mode)."""
+    (permission filtering is the caller's job - it owns cfg + mode)."""
     specs = []
     with _lock:
         clients = [c for c in _clients.values() if not c.dead]
@@ -332,14 +332,14 @@ def live_tool_specs() -> list[dict]:
 
 
 def call_full(full_name: str, args: dict) -> str:
-    """Execute mcp_<server>_<tool> — resolves against live clients."""
+    """Execute mcp_<server>_<tool> - resolves against live clients."""
     with _lock:
         clients = [c for c in _clients.values() if not c.dead]
     for c in clients:
         for t in c.tools:
             if full_tool_name(c.name, t["name"]) == full_name:
                 return c.call(t["name"], args)
-    raise McpError(f"no running MCP server offers {full_name} — check the "
+    raise McpError(f"no running MCP server offers {full_name} - check the "
                    "MCP Servers tab")
 
 
@@ -372,7 +372,7 @@ def status(cfg_servers: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# loom.yaml `mcp-servers:` injection (wizard) — same non-destructive rules
+# loom.yaml `mcp-servers:` injection (wizard) - same non-destructive rules
 # as the models block: entries land at the end, everything else untouched
 
 _MCP_KEY_RE = re.compile(r"^mcp-servers:\s*(\[\s*\])?\s*(#.*)?$")
@@ -381,7 +381,7 @@ _MCP_KEY_RE = re.compile(r"^mcp-servers:\s*(\[\s*\])?\s*(#.*)?$")
 def entry_lines(name: str, command: str, env: dict | None = None) -> list[str]:
     name = str(name or "").strip()
     if not re.match(r"^[\w-]+$", name):
-        raise McpError("give the server a name — letters, digits, - and _ "
+        raise McpError("give the server a name - letters, digits, - and _ "
                        "only (it becomes part of tool function names)")
     command = str(command or "").strip()
     if not command:

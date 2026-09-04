@@ -1,4 +1,4 @@
-/* picker.js — the first screen: the Loom logo, create/select library, and
+/* picker.js - the first screen: the Loom logo, create/select library, and
  * the recent-libraries list (clearable; entries right-clickable to clear
  * one or omit it permanently). */
 "use strict";
@@ -29,7 +29,7 @@ function renderPicker() {
           <path d="M2 6h7.1M12 6h2"/><path d="M2 10h2.1M7 10h7"/>
         </g></svg>` }),
       el("b", { text: "Loom" })),
-    el("div", { class: "picker-sub", text: "Pick a library — a folder holding your prompts, knowledge, containers and loom.yaml." }),
+    el("div", { class: "picker-sub", text: "Pick a library - a folder holding your prompts, knowledge, containers and loom.yaml." }),
     el("div", { class: "picker-actions" },
       el("button", { class: "btn btn-acc", text: "Create a library", onclick: pickerCreate }),
       el("button", { class: "btn", text: "Select a library", onclick: pickerSelect })));
@@ -72,7 +72,7 @@ function renderPicker() {
           {
             label: "Omit permanently", danger: true,
             fn: () => confirmModal("Omit from recents",
-              "This folder will never show up in the recents list again — " +
+              "This folder will never show up in the recents list again - " +
               "opening it will always need a manual Select. Omit it?",
               "Omit", () => dropRecent(r.path, true), true),
           },
@@ -85,7 +85,7 @@ function renderPicker() {
     box.append(row);
   }
   p.append(box);
-  // keyboard-first: land on the most recent library — Enter opens it,
+  // keyboard-first: land on the most recent library - Enter opens it,
   // arrows walk the list, Tab reaches Create/Select
   setTimeout(() => p.querySelector(".recent-row")?.focus(), 0);
 }
@@ -141,11 +141,12 @@ async function openLibrary(path) {
 }
 
 /* switch from the picker into the app shell, restoring the saved session
- * — tabs (and order), active tab, the Library tab's open file, tree
- * expansion and panel width — so the library reopens where it was left */
+ * - tabs (and order), active tab, the Library tab's open file, tree
+ * expansion and panel width - so the library reopens where it was left */
 async function enterLibrary(data) {
   st.library = data.library;
   st.config = data.config;
+  st.providers = {};
   st.reasoning = {};
   st.pins = [];
   // reasoning prefs + pins feed the composer button and the model menu
@@ -179,7 +180,7 @@ async function enterLibrary(data) {
   st.lib.dirty = false;
   st.lib.expanded = (sess?.lib?.expanded && typeof sess.lib.expanded === "object")
     ? sess.lib.expanded : {};
-  // first visit to this library: the tree opens QUIET — only
+  // first visit to this library: the tree opens QUIET - only
   // documentation/ expanded (applied once the tree has loaded)
   st.lib.seedCollapse = !!data.firstOpen;
   st.lib.leftWidth = Number(sess?.lib?.leftWidth) || null;
@@ -198,13 +199,13 @@ async function enterLibrary(data) {
       if (!v) return;
       const cs = chatState(chatId);
       cs.windowSize = Math.max(CHAT_WINDOW, Number(v.windowSize) || CHAT_WINDOW);
-      // "at the bottom" restores AS the bottom — pixel positions drift
+      // "at the bottom" restores AS the bottom - pixel positions drift
       // between sessions, bottom-ness doesn't
       if (v.atBottom !== false) cs.restoreScroll = Infinity;
       else if (Number.isFinite(Number(v.scroll))) cs.restoreScroll = Number(v.scroll);
       cs.atBottom = v.atBottom !== false;
     };
-    // terminal tab configs (shells don't survive a restart — the tab
+    // terminal tab configs (shells don't survive a restart - the tab
     // reopens on its setup form, pre-filled)
     st.terms = {};
     const termCfgs = (sess?.terms && typeof sess.terms === "object") ? sess.terms : {};
@@ -223,7 +224,7 @@ async function enterLibrary(data) {
           st.terms[t.chatId] = {
             container: tc.container || "sandbox",
             folders: Array.isArray(tc.folders) ? tc.folders : [],
-            network: !!tc.network, env: tc.env || "",
+            network: netMode(tc.network), env: tc.env || "",
             title: tc.title || null,
             started: false, running: false,
           };

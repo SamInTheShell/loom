@@ -1,22 +1,22 @@
-# Go web applications — the assembly map
+# Go web applications - the assembly map
 
 This folder covers building server-rendered web applications in Go
 from the standard library up: routing and serving, HTML templating,
 and the MVC structure that keeps a multi-app monolith maintainable.
-The three files are layers of one stack — read them together when
+The three files are layers of one stack - read them together when
 building an app, or individually when retrofitting one layer.
 
-- **gorilla-mux.md** — the HTTP layer: gorilla/mux routers, path
+- **gorilla-mux.md** - the HTTP layer: gorilla/mux routers, path
   variables, subrouters, middleware chains, apache-style (Combined
   Log Format) access logging with a status-capturing ResponseWriter,
-  rate limiting, SSE, TLS, timeouts, graceful shutdown — and when
+  rate limiting, SSE, TLS, timeouts, graceful shutdown - and when
   plain `net/http` ServeMux is enough.
-- **html-templates.md** — the view layer: `html/template` files
+- **html-templates.md** - the view layer: `html/template` files
   embedded with `go:embed`, base-layout composition schemes, a
   buffer-first renderer with real status codes, FuncMap conventions,
   typed view models, and the test pattern that renders every
   template.
-- **mvc.md** — the structure: kernel (shared runtime: router,
+- **mvc.md** - the structure: kernel (shared runtime: router,
   sessions, auth, chrome), apps (controllers + co-located templates),
   domain (models over a KV store), the dependency rule the compiler
   enforces, and the end-to-end recipe for adding a new app.

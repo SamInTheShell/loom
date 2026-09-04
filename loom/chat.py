@@ -1,15 +1,19 @@
-"""The chat loop — streaming inference against a managed llama-server,
-with tools, loom.yaml-driven permissions, and container-backed shell.
+"""The chat loop - streaming inference against a configured provider
+(llama.cpp's llama-server or ninfer, over HTTP, optionally through an ssh
+tunnel), with tools, loom.yaml-driven permissions, and container-backed
+shell.
 
 Message flow mirrors llama.cpp's web chat: one streaming POST to
-/v1/chat/completions per turn (SSE over the server's unix socket via
-sshtunnel — no TCP anywhere), deltas pushed to the page as they arrive,
-`timings_per_token` + `stream_options.include_usage` injected so token
-stats are always present.
+/v1/chat/completions per turn (SSE), deltas pushed to the page as they
+arrive. `timings_per_token` + `stream_options.include_usage` +
+`return_progress` are injected so token stats, LIVE tok/s, and prompt-
+processing progress are always present (both llama-server and ninfer
+speak these llama.cpp-style extensions; servers that don't simply omit
+the fields).
 
 Agent loop: stream a turn → if the model called tools, resolve each
 against loom.yaml permissions (allow / ask / deny), run the allowed ones,
-append the results, stream again — until a turn ends with no tool calls.
+append the results, stream again - until a turn ends with no tool calls.
 
 THREADING: send() runs on a daemon worker (never a pywebview bridge
 thread). stop() sets the chat's cancel event AND closes the live SSE
@@ -36,11 +40,12 @@ import traceback
 import urllib.error
 from pathlib import Path
 
-from loom import (chats, containers, envs, libconfig, library, mcp, search,
-                  srv, sshtunnel, store)
+from loom import (chats, containers, envs, libconfig, library, mcp,
+                  providers, search, store)
 
-# seconds without a chunk = stall. Matches srv.LOAD_TIMEOUT_S: a CPU
-# prefill over a huge context can legitimately emit nothing for minutes.
+# seconds without a chunk = stall. Generous: a CPU prefill over a huge
+# context can legitimately emit nothing for minutes (though servers that
+# speak return_progress keep the progress chunks flowing meanwhile).
 STREAM_IDLE_TIMEOUT = 600
 MAX_TOOL_RESULT = 60_000
 
@@ -56,7 +61,7 @@ _streams: dict[str, object] = {}  # chat_id -> live HTTPResponse | _PreStream
 class _PreStream:
     """Registered in _streams for the window BETWEEN sending a request
     and receiving response headers (a busy server can sit there for
-    minutes). stop() calls .close() on whatever is registered — this
+    minutes). stop() calls .close() on whatever is registered - this
     shim aborts the underlying connection so that wait ends NOW."""
 
     def __init__(self, box: dict):
@@ -71,7 +76,7 @@ class _PreStream:
                 pass
 
 
-# everything a dying/aborted HTTP stream can throw mid-iteration —
+# everything a dying/aborted HTTP stream can throw mid-iteration -
 # including AttributeError: closing a response another thread is reading
 # leaves http.client poking a None fp ("'NoneType' ... 'peek'")
 STREAM_ERRORS = (OSError, urllib.error.URLError, http.client.HTTPException,
@@ -91,7 +96,7 @@ def running_chats() -> list[str]:
 
 def wait_if_cancelling(chat_id: str, timeout: float = 4.0) -> bool:
     """True once the chat's worker is gone. A stream the user already
-    CANCELLED is merely unwinding — briefly wait it out so a send racing
+    CANCELLED is merely unwinding - briefly wait it out so a send racing
     the cancel succeeds instead of bouncing with 'already streaming'. A
     live, uncancelled stream returns False immediately.
 
@@ -118,7 +123,7 @@ def wait_if_cancelling(chat_id: str, timeout: float = 4.0) -> bool:
 
 def join_worker(chat_id: str, timeout: float = 6.0) -> bool:
     """Wait for the chat's worker thread to end (True when gone). A
-    delete must not race the dying worker's FINAL save — that would
+    delete must not race the dying worker's FINAL save - that would
     resurrect the file the delete just removed."""
     with _lock:
         rec = _running.get(chat_id)
@@ -126,29 +131,6 @@ def join_worker(chat_id: str, timeout: float = 6.0) -> bool:
         return True
     rec["thread"].join(timeout)
     return not rec["thread"].is_alive()
-
-
-def stop_chats_on_models(root: Path, cfg: dict, names: set[str]) -> list[str]:
-    """Cancel every RUNNING chat whose resolved model is in `names` —
-    called on every server stop/eject path, so a stream about to lose its
-    server ends as a clean cancel instead of a socket error. Resolution
-    mirrors _server_for: the chat's own model, else the config default,
-    else the first configured model."""
-    models = (cfg or {}).get("models") or []
-    default = str(((cfg or {}).get("chat") or {}).get("model") or "")
-    stopped = []
-    for cid in running_chats():
-        try:
-            doc = chats.load_chat(root, cid)
-        except chats.ChatError:
-            continue
-        name = str(doc.get("model") or "") or default
-        if not name and models:
-            name = models[0]["name"]
-        if name in names:
-            stop(cid)
-            stopped.append(cid)
-    return stopped
 
 
 def stop(chat_id: str) -> bool:
@@ -180,7 +162,7 @@ class _Gate:
                                       "tool": tool}
 
     def pending_for(self, chat_id: str) -> list[tuple[str, str]]:
-        """(call_id, tool name) for every call still waiting in a chat —
+        """(call_id, tool name) for every call still waiting in a chat -
         so a permission-mode switch can re-decide them."""
         with self._lock:
             return [(cid, r.get("tool") or "")
@@ -222,7 +204,7 @@ GATE = _Gate()
 # --------------------------------------------------------------------------
 # tools
 
-# read_file refuses whole files past ~25k tokens (~4 chars/token) — the
+# read_file refuses whole files past ~25k tokens (~4 chars/token) - the
 # model must read big files in offset/limit slices instead
 READ_GATE_CHARS = 100_000
 READ_SLICE_MAX_LINES = 2000
@@ -246,12 +228,19 @@ def perm_for(cfg: dict | None, name: str, mode: str = "") -> str:
     return libconfig.permission_for(cfg, name, mode) if cfg else "allow"
 
 
-def tool_specs(cfg: dict | None = None, mode: str = "") -> list[dict]:
-    """The tools offered this turn — built-ins plus every tool of every
+def tool_specs(cfg: dict | None = None, mode: str = "",
+               network=None) -> list[dict]:
+    """The tools offered this turn - built-ins plus every tool of every
     RUNNING MCP server. A tool at level `disabled` in the active
     permission mode is not offered at all. Every chat has the
     write tools and shell: /artifacts is always writable, and view-mode
-    mounts are enforced read-only by the container itself."""
+    mounts are enforced read-only by the container itself.
+
+    `network` (when known: none / loopback / on, legacy bools accepted)
+    is spelled out in the shell tool's own description - the model reads
+    tool specs far more reliably than a system-prompt aside, and
+    troubleshooting phantom connectivity is exactly the time waste that
+    line prevents."""
     def level(name):
         return perm_for(cfg, name, mode)
 
@@ -268,13 +257,13 @@ def tool_specs(cfg: dict | None = None, mode: str = "") -> list[dict]:
 
     add("knowledge_search",
         "Search the library's markdown knowledge base. Returns matching "
-        "files and lines with paths like knowledge/foo.md.",
+        "files and lines with paths like /knowledge/foo.md.",
         {"query": {"type": "string"}}, ["query"])
     add("grep",
         "Search file CONTENTS (case-insensitive substring, ranked) across "
         "the attached folders and the knowledge base. Returns "
         "path:line: text hits. Scope with `path`: '/' (everything), "
-        "'knowledge', or '/mnt/<folder>[/sub]'.",
+        "'/knowledge', or '/mnt/<folder>[/sub]'.",
         {"query": {"type": "string"},
          "path": {"type": "string", "description": "scope, default '/'"}},
         ["query"])
@@ -286,10 +275,10 @@ def tool_specs(cfg: dict | None = None, mode: str = "") -> list[dict]:
          "path": {"type": "string", "description": "scope, default '/'"}},
         ["query"])
     add("read_file",
-        "Read a text file. Paths: knowledge/<...> for the knowledge base, "
+        "Read a text file. Paths: /knowledge/<...> for the knowledge base, "
         "/mnt/<folder>/<...> for attached folders, /artifacts/<...> for "
         "this chat's artifact folder. Files over ~25k tokens "
-        "refuse a whole-file read — pass offset (1-based line) and limit "
+        "refuse a whole-file read - pass offset (1-based line) and limit "
         "(line count) to read a slice; grep first to find the right spot.",
         {"path": {"type": "string"},
          "offset": {"type": "integer", "description": "1-based start line"},
@@ -315,20 +304,71 @@ def tool_specs(cfg: dict | None = None, mode: str = "") -> list[dict]:
         "attachments.",
         {"path": {"type": "string"}, "content": {"type": "string"}},
         ["path", "content"])
+    # nmode, NOT mode - `mode` is the permission mode the level() closure
+    # reads; shadowing it silently re-enabled disabled tools once.
+    # SIGNAL ONLY WHEN RESTRICTED: "online" is what every model assumes,
+    # so network-on says nothing - the signal exists to correct the
+    # assumption, not to confirm it.
+    nmode = containers.net_mode(network) if network is not None else None
+    if nmode == "on":
+        net_line = ""
+    elif nmode == "loopback":
+        net_line = ("This chat's container has LOOPBACK-ONLY networking: "
+                    "the HOST machine's 127.0.0.1 services are reachable "
+                    "at 10.0.2.2 (use that address, not localhost, for "
+                    "host services), and servers you start inside the "
+                    "container work on its own localhost. The wider "
+                    "internet is NOT reachable - downloads and package "
+                    "installs WILL fail by configuration, not by bug. ")
+    elif nmode == "none":
+        net_line = ("This chat's container has NO NETWORK ACCESS "
+                    "(off by default): DNS, curl/wget, pip/npm/apt "
+                    "installs and git fetches WILL fail with connection "
+                    "errors. That is configuration, not a bug - do not "
+                    "troubleshoot connectivity; ask the user to enable "
+                    "the network chip if a command needs it. Servers you "
+                    "start inside the container ARE reachable from the "
+                    "container's own localhost. ")
+    else:
+        net_line = "No network unless the user enabled it for this chat. "
     add("shell",
-        "Run a bash command inside the sandbox container (no network "
-        "unless enabled, unprivileged user). Attached folders are under "
-        "/mnt (view mode mounts read-only), the knowledge base is at "
-        "/knowledge (read-only), and /artifacts is read-write — anything "
-        "left there is delivered to the user.",
+        "Run a bash command inside the sandbox container (unprivileged "
+        "user). " + net_line
+        + "Attached folders are under /mnt (view mode mounts read-only), "
+        "the knowledge base is at /knowledge (read-only), and /artifacts "
+        "is read-write - anything left there is delivered to the user. "
+        "ALWAYS set `timeout` to fit the command - a hung command runs "
+        "until the timeout kills it.",
         {"command": {"type": "string"},
          "timeout": {"type": "integer",
-                     "description": "seconds, default 300"}},
-        ["command"])
+                     "description": "REQUIRED - seconds before the "
+                     "command is killed. Size it to the job: ~10-30 for "
+                     "quick commands, more only for builds/tests that "
+                     "genuinely need it (max 3600)."}},
+        ["command", "timeout"])
     for spec in mcp.live_tool_specs():
         if level(spec["function"]["name"]) != "disabled":
             specs.append(spec)
     return specs
+
+
+# the classic spellings of "the network isn't there" across curl, pip,
+# npm, git, apt, and raw getaddrinfo/connect failures
+_NET_ERR_RE = None
+
+
+def _looks_network_error(output: str) -> bool:
+    import re
+    global _NET_ERR_RE
+    if _NET_ERR_RE is None:
+        _NET_ERR_RE = re.compile(
+            r"could ?n.t resolve|name or service not known"
+            r"|temporary failure in name resolution|network is unreachable"
+            r"|connection (refused|timed out|reset)|no route to host"
+            r"|failed to (fetch|connect)|getaddrinfo|EAI_AGAIN"
+            r"|ENOTFOUND|ETIMEDOUT|ECONNREFUSED|ENETUNREACH",
+            re.IGNORECASE)
+    return bool(_NET_ERR_RE.search(str(output or "")))
 
 
 def _mount_map(chat: dict) -> dict[str, Path]:
@@ -384,7 +424,8 @@ def _resolve_path(root: Path, chat: dict, path: str) -> tuple[str, Path, str]:
             raise chats.ChatError(f"path escapes the attached folder: {path}")
         return ("mount", host, _folder_mode(chat, base))
     raise chats.ChatError(
-        f"unknown path {path!r} — use knowledge/<...> or /mnt/<folder>/<...>")
+        f"unknown path {path!r} - use /knowledge/<...>, /mnt/<folder>/<...>, "
+        "or /artifacts/<...>")
 
 
 def _search_scopes(root: Path, chat: dict, path: str) -> list[tuple[str, Path]]:
@@ -392,7 +433,7 @@ def _search_scopes(root: Path, chat: dict, path: str) -> list[tuple[str, Path]]:
     '/' = knowledge + every mount, else one resolved directory."""
     p = str(path or "/").strip() or "/"
     if p == "/":
-        scopes = [("knowledge/", root / "knowledge"),
+        scopes = [("/knowledge/", root / "knowledge"),
                   ("/artifacts/", chats.artifacts_dir(root, str(chat["id"])))]
         for n, hp in _mount_map(chat).items():
             scopes.append((f"/mnt/{n}/", hp))
@@ -448,11 +489,11 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
             raise chats.ChatError("old_string is empty")
         n = text.count(old)
         if n == 0:
-            raise chats.ChatError("old_string not found in the file — it "
+            raise chats.ChatError("old_string not found in the file - it "
                                   "must match the current contents exactly")
         if n > 1 and not args.get("replace_all"):
             raise chats.ChatError(
-                f"old_string matches {n} places — extend it until it is "
+                f"old_string matches {n} places - extend it until it is "
                 "unique, or set replace_all: true")
         out = text.replace(old, new) if args.get("replace_all") \
             else text.replace(old, new, 1)
@@ -465,19 +506,22 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
         if not hits:
             return "no matches"
         lines = []
+        # container-view paths, consistent with every other tool: the
+        # knowledge base is /knowledge, artifacts are /artifacts, mounts
+        # are /mnt/<name>
         for h in hits:
             if h["kind"] == "file":
-                lines.append(f"file: {h['rel']}")
+                lines.append(f"file: /{h['rel']}")
             else:
-                lines.append(f"{h['rel']}:{h['line']}: {h['text']}")
+                lines.append(f"/{h['rel']}:{h['line']}: {h['text']}")
         return "\n".join(lines)
 
     if name == "list_dir":
         kind, host, _mode = _resolve_path(root, chat, str(args.get("path") or "/"))
         if kind == "root":
             mounts = _mount_map(chat)
-            out = ["knowledge/  (library knowledge base, read-only)",
-                   "/artifacts/  (read-write — files here are delivered "
+            out = ["/knowledge/  (library knowledge base, read-only)",
+                   "/artifacts/  (read-write - files here are delivered "
                    "to the user)"]
             for n, p in mounts.items():
                 mode = _folder_mode(chat, p)
@@ -509,7 +553,7 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
                 lines_total = text.count("\n") + 1
                 raise chats.ChatError(
                     f"the file is ~{len(text) // 4} tokens ({lines_total} "
-                    "lines) — too large for a whole-file read. Pass offset "
+                    "lines) - too large for a whole-file read. Pass offset "
                     "(1-based line) and limit (line count) to read a "
                     "slice, and grep to find the right region first")
             return text
@@ -523,7 +567,7 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
         sel = lines[start - 1:start - 1 + count]
         body = "\n".join(sel)
         if len(body) > READ_GATE_CHARS:
-            body = body[:READ_GATE_CHARS] + "\n[slice truncated — use a smaller limit]"
+            body = body[:READ_GATE_CHARS] + "\n[slice truncated - use a smaller limit]"
         return (f"[lines {start}-{start + len(sel) - 1} of {len(lines)}]\n"
                 + body)
 
@@ -547,21 +591,54 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
                 extra_env = extra_env or None
             except envs.EnvError as e:
                 raise chats.ChatError(str(e))
+        try:
+            timeout_s = int(args.get("timeout")
+                            or containers.EXEC_TIMEOUT_DEFAULT)
+        except (TypeError, ValueError):
+            timeout_s = containers.EXEC_TIMEOUT_DEFAULT
+        timeout_s = max(1, min(timeout_s, containers.EXEC_TIMEOUT_MAX))
+        net = containers.net_mode(chat.get("network"))
         res = containers.run_shell(
             engine, image, str(chat["id"]), str(args.get("command") or ""),
             folders=chat.get("folders") or [],
-            timeout=int(args.get("timeout") or containers.EXEC_TIMEOUT_DEFAULT),
+            timeout=timeout_s,
             cancel=cancel, on_output=on_output,
-            network=bool(chat.get("network")),
+            network=net,
             knowledge=root / "knowledge",
             artifacts=chats.artifacts_dir(root, str(chat["id"]), create=True),
             extra_env=extra_env)
+        # the shell has THREE honest outcomes, and the card must show the
+        # right one: ok (exit 0) / failed (nonzero exit, timeout) /
+        # cancelled (the user stopped it). Returning only text used to
+        # collapse all three into "ok".
         tail = ""
+        status = "ok" if res.rc == 0 else "failed"
         if res.timed_out:
-            tail = "\n[timed out]"
+            # naming the budget lets the model pick a better one next try
+            tail = f"\n[timed out after {timeout_s}s - pass a larger " \
+                   "`timeout` if the command genuinely needs longer]"
+            status = "failed"
         elif res.cancelled:
             tail = "\n[cancelled]"
-        return f"exit {res.rc}{tail}\n{res.output}"
+            status = "cancelled"
+        out = f"exit {res.rc}{tail}\n{res.output}"
+        # a failure that LOOKS like a connectivity problem in a
+        # restricted container gets named for what it is, right in the
+        # result - the moment a model would otherwise start a long,
+        # doomed connectivity hunt
+        if status == "failed" and net != "on" \
+                and _looks_network_error(res.output):
+            out += ("\n[note: this chat's container has LOOPBACK-ONLY "
+                    "networking - host 127.0.0.1 services are at 10.0.2.2; "
+                    "the wider internet is unreachable by configuration, "
+                    "not by bug. Ask the user to set the network chip to "
+                    "full access if this command needs the internet.]"
+                    if net == "loopback" else
+                    "\n[note: this chat's container has NO NETWORK ACCESS "
+                    "(the network chip is off) - network operations fail "
+                    "by configuration, not by bug. Ask the user to change "
+                    "the network chip if this command needs it.]")
+        return out, status
 
     raise chats.ChatError(f"unknown tool: {name}")
 
@@ -573,8 +650,8 @@ ARTIFACT_SCAN_MAX = 2000   # files walked per artifact folder for size/mtime
 
 def _artifact_records(root: Path, chat_id: str) -> list[dict]:
     """Top-level entries of the chat's artifact folder (the user-facing
-    attachments). `uploads/` — the user's own attachments staged for the
-    container — is not echoed back."""
+    attachments). `uploads/` - the user's own attachments staged for the
+    container - is not echoed back."""
     base = chats.artifacts_dir(root, chat_id)
     out: list[dict] = []
     if not base.is_dir():
@@ -612,7 +689,12 @@ def _artifact_records(root: Path, chat_id: str) -> list[dict]:
 
 def _sync_artifacts(root: Path, chat: dict, ev=None) -> list[str]:
     """Refresh chat['artifacts'] from disk; returns the names that are new
-    or changed since the last sync (and announces them via ev)."""
+    or changed since the last sync (and announces them via ev).
+
+    Fresh artifacts also land as an 'artifact' MESSAGE in the chat - the
+    timeline shows when each delivery happened, and the message keeps its
+    own open/save affordances even after the pill is dismissed. A fresh
+    delivery un-dismisses its pill (a regenerated file is news again)."""
     recs = _artifact_records(root, str(chat["id"]))
     old = {a.get("name"): a for a in chat.get("artifacts") or []}
     fresh = [r["name"] for r in recs
@@ -620,6 +702,20 @@ def _sync_artifacts(root: Path, chat: dict, ev=None) -> list[str]:
              or old[r["name"]].get("mtime") != r["mtime"]
              or old[r["name"]].get("bytes") != r["bytes"]]
     chat["artifacts"] = recs
+    if fresh:
+        dismissed = [n for n in chat.get("artifactsDismissed") or []
+                     if n not in fresh]
+        if dismissed:
+            chat["artifactsDismissed"] = dismissed
+        else:
+            chat.pop("artifactsDismissed", None)
+        by_name = {r["name"]: r for r in recs}
+        chat["messages"].append({
+            "role": "artifact",
+            "items": [{"name": n, "dir": bool(by_name[n].get("dir")),
+                       "bytes": int(by_name[n].get("bytes") or 0)}
+                      for n in fresh if n in by_name],
+            "ts": int(time.time() * 1000)})
     if fresh and ev:
         ev("artifacts", items=recs, fresh=fresh)
     return fresh
@@ -638,7 +734,7 @@ def _read_prompt(root: Path, rel: str, fallback: str) -> str:
 def _active_slice(chat: dict) -> tuple[dict | None, list[dict]]:
     """(latest compaction marker | None, messages after it). Everything
     before the marker stays in the FILE (history view) but leaves the
-    wire — the summary stands in for it."""
+    wire - the summary stands in for it."""
     msgs = chat.get("messages") or []
     for i in range(len(msgs) - 1, -1, -1):
         if msgs[i].get("role") == "compact":
@@ -666,10 +762,10 @@ def _knowledge_map(root: Path) -> list[str]:
                           if s.is_dir() and not s.name.startswith("."))
             files = sum(1 for f in d.rglob("*.md"))
             detail = (", ".join(subs[:8])) if subs else f"{files} docs"
-            out.append(f"- knowledge/{d.name}/ — {detail}")
+            out.append(f"- /knowledge/{d.name}/ - {detail}")
         loose = sorted(f.name for f in base.glob("*.md"))
         if loose and not out:
-            out.append("- " + ", ".join("knowledge/" + n for n in loose[:10]))
+            out.append("- " + ", ".join("/knowledge/" + n for n in loose[:10]))
     except OSError:
         pass
     return out
@@ -682,13 +778,13 @@ def _wire_messages(root: Path, cfg: dict, chat: dict) -> list[dict]:
                         "You are a helpful assistant.")
     mounts = _mount_map(chat)
     # PREFIX STABILITY: llama-server's prompt cache reuses KV only up to
-    # the first changed token — a live clock here forced a FULL reprocess
+    # the first changed token - a live clock here forced a FULL reprocess
     # of the whole context every turn. The session stamp never changes;
     # "now" comes from the newest user message's bracket stamp instead.
     ctx = ["", "## Environment",
            f"Session started {_utc_stamp(chat.get('createdTs'))}. All "
            "timestamps are UTC; every user message begins with its send "
-           "time in [brackets] — the newest one is the current time."]
+           "time in [brackets] - the newest one is the current time."]
     # the knowledge base signal is AUTO-DETAILED: what it is, how access
     # works, and a live map of its contents
     kmap = _knowledge_map(root)
@@ -698,28 +794,57 @@ def _wire_messages(root: Path, cfg: dict, chat: dict) -> list[dict]:
                "reference material meant to be consulted, not guessed at. "
                "Before answering anything it may cover, call "
                "knowledge_search with a few keywords; hits come back as "
-               "knowledge/<path>[:line] — read the matching file with "
+               "/knowledge/<path>[:line] - read the matching file with "
                "read_file. Folder READMEs map their contents; read them "
                "first when they match.")
     if kmap:
         ctx.append("It currently contains:")
         ctx += kmap
     else:
-        ctx.append("It is currently empty — say so rather than citing it.")
+        ctx.append("It is currently empty - say so rather than citing it.")
     ctx.append("")
     if mounts:
         ctx.append("Attached folders (also visible in shell commands):")
         for n, p in mounts.items():
             mode = _folder_mode(chat, p)
             ctx.append(f"- /mnt/{n} ({'read-write' if mode == 'write' else 'read-only'})")
-    net = "WITH network access" if chat.get("network") \
-        else "without network access"
     cont = str(chat.get("container") or "") \
         or str((cfg.get("containers") or {}).get("default") or "sandbox")
-    ctx.append(f"Shell commands run in the '{cont}' container {net}, as an "
-               "unprivileged user. The knowledge base is mounted read-only "
-               "at /knowledge; view-mode folders are mounted read-only — "
-               "the shell is safe for traversing and inspecting them.")
+    net_mode = containers.net_mode(chat.get("network"))
+    if net_mode == "on":
+        # no network signal at all: online is the assumed default -
+        # only a RESTRICTED network is worth words
+        net_text = (f"Shell commands run in the '{cont}' container as an "
+                    "unprivileged user.")
+    elif net_mode == "loopback":
+        net_text = (f"Shell commands run in the '{cont}' container as an "
+                    "unprivileged user with LOOPBACK-ONLY networking: the "
+                    "HOST machine's 127.0.0.1 services are reachable at "
+                    "10.0.2.2 (use that address for host services, not "
+                    "localhost), servers started inside the container work "
+                    "on the container's own localhost, and the wider "
+                    "internet is NOT reachable - downloads and package "
+                    "installs WILL fail by configuration, not by bug. If "
+                    "a command genuinely needs the internet, say so and "
+                    "ask the user to set the network chip to full access.")
+    else:
+        # spelled out hard: a model that doesn't KNOW the network is off
+        # burns whole turns troubleshooting phantom connectivity
+        net_text = (f"Shell commands run in the '{cont}' container as an "
+                    "unprivileged user, with NO NETWORK ACCESS (the chat's "
+                    "network chip, off by default). DNS lookups, "
+                    "curl/wget, package installs (pip/npm/apt) and git "
+                    "fetches WILL fail with connection errors - that is "
+                    "configuration, not a bug. Never troubleshoot "
+                    "connectivity; if a command genuinely needs the "
+                    "network, say so and ask the user to change the "
+                    "network chip (loopback-only reaches host services; "
+                    "full access reaches the internet). Servers started "
+                    "inside the container ARE reachable from the "
+                    "container's own localhost.")
+    ctx.append(net_text + " The knowledge base is mounted read-only at "
+               "/knowledge; view-mode folders are mounted read-only - the "
+               "shell is safe for traversing and inspecting them.")
     if chat.get("env"):
         try:
             resolved, missing = envs.resolve(root, str(chat["env"]))
@@ -732,7 +857,7 @@ def _wire_messages(root: Path, cfg: dict, chat: dict) -> list[dict]:
                 line += (" Set (values hidden here): "
                          + ", ".join(sorted(resolved)) + ".")
             if missing:
-                line += (" MISSING on this machine — secret stubs with no "
+                line += (" MISSING on this machine - secret stubs with no "
                          "local value, so these are UNSET: "
                          + ", ".join(missing) + ".")
             ctx.append(line)
@@ -740,14 +865,14 @@ def _wire_messages(root: Path, cfg: dict, chat: dict) -> list[dict]:
     ctx.append("## Artifacts")
     ctx.append("/artifacts is this chat's read-write delivery folder "
                "(shell and file tools). Anything you place there is handed "
-               "to the user as a chat attachment — folders become zip "
+               "to the user as a chat attachment - folders become zip "
                "downloads. The user's uploaded files for this chat are "
                "under /artifacts/uploads/.")
     out = [{"role": "system", "content": sysp + "\n".join(ctx)}]
     compact, live = _active_slice(chat)
     if compact is not None:
         out.append({"role": "user", "content":
-                    "[Summary of the earlier conversation — the context was "
+                    "[Summary of the earlier conversation - the context was "
                     "compacted]\n" + str(compact.get("content") or "")})
     # thought truncation (default on): only the LAST assistant turn carries
     # its thinking back into the context; older thoughts are dropped
@@ -791,7 +916,7 @@ _IMG_MAGIC = {b"\x89PNG\r\n\x1a\n": "image/png", b"\xff\xd8\xff": "image/jpeg"}
 
 
 def _to_png(data: bytes) -> bytes | None:
-    """Transcode webp/gif/bmp to PNG via Qt — llama-server's image decoder
+    """Transcode webp/gif/bmp to PNG via Qt - llama-server's image decoder
     (stb) takes png/jpeg reliably; other formats 400 or fail to decode."""
     try:
         from qtpy.QtCore import QBuffer, QByteArray
@@ -854,53 +979,76 @@ def _sse(resp):
             continue
 
 
-def _server_for(cfg: dict, chat: dict) -> dict:
-    name = chat.get("model") or (cfg.get("chat") or {}).get("model") or ""
-    models = cfg.get("models") or []
-    if not models:
-        raise chats.ChatError("loom.yaml defines no models yet — add one, "
-                              "then start it in the Servers tab")
-    rec = next((m for m in models if m["name"] == name), None) \
-        or (models[0] if not name else None)
-    if rec is None:
-        raise chats.ChatError(f"no model named {name!r} in loom.yaml")
-    if srv.state_of(rec["id"]) != "running":
+def resolve_endpoint(cfg: dict, chat: dict, probe: bool = False) -> dict:
+    """The provider record + model id this chat talks to:
+    {provider: <config record>, model: <model id>, name: <display>}.
+
+    The chat's own choice wins; the config's chat.provider/chat.model is
+    the default; the first configured provider (and its first cached
+    model) is the last resort.
+
+    probe=True (the SEND path only) may hit the network to fill an empty
+    model-list cache. Read paths (context chips, diagnostics) must never
+    block on a dead host - they resolve from the cache or raise."""
+    provs = cfg.get("providers") or []
+    if not provs:
         raise chats.ChatError(
-            f"{rec['name']} is not running — start it in the Servers tab")
-    sock = srv.sock_of(rec["id"])
-    if not sock:
-        raise chats.ChatError(f"{rec['name']} has no socket yet — try again")
-    return {**rec, "sock": sock}
+            "loom.yaml defines no providers yet - add a `providers:` "
+            "entry pointing at a llama-server or ninfer API")
+    pname = str(chat.get("provider") or "") \
+        or str((cfg.get("chat") or {}).get("provider") or "")
+    prov = libconfig.provider_by_name(cfg, pname)
+    if prov is None:
+        raise chats.ChatError(f"no provider named {pname!r} in loom.yaml")
+    cached = providers.models_of(prov["name"])
+    model = str(chat.get("model") or "")
+    if not model and not chat.get("provider"):
+        # only inherit the config default model when the provider is the
+        # default too - a hand-picked provider gets ITS first model
+        model = str((cfg.get("chat") or {}).get("model") or "")
+    if not model:
+        if not cached and probe:
+            cached = providers.probe(prov).get("models") or []
+        if not cached:
+            raise chats.ChatError(
+                f"{prov['name']} lists no models - is the server up? "
+                f"({providers.status_of(prov['name']).get('detail') or 'no probe yet'})")
+        model = str(cached[0]["id"])
+    elif cached and model not in [m["id"] for m in cached]:
+        # a KNOWN model list without this id: a stale/renamed model. A
+        # single-model llama-server would silently generate with whatever
+        # it has loaded - and worse, auto-compaction would silently
+        # disarm (no context size for an unknown id). Say so instead.
+        raise chats.ChatError(
+            f"{prov['name']} does not list a model named {model!r} "
+            f"(it serves: {', '.join(m['id'] for m in cached)}) - "
+            "pick a model in the composer (Ctrl+.)")
+    return {"provider": prov, "model": model,
+            "name": f"{prov['name']} · {model}"}
 
 
 # --------------------------------------------------------------------------
 # context accounting + compaction
 
 def _est(text) -> int:
-    """chars/4 — the classic rough token estimate."""
+    """chars/4 - the classic rough token estimate."""
     return (len(str(text or "")) + 3) // 4
 
 
-def _model_rec_for(cfg: dict, chat: dict) -> dict | None:
-    name = chat.get("model") or (cfg.get("chat") or {}).get("model") or ""
-    models = cfg.get("models") or []
-    return next((m for m in models if m["name"] == name), None) \
-        or (models[0] if models and not name else None)
-
-
 def _nctx_for(cfg: dict, chat: dict) -> int:
-    rec = _model_rec_for(cfg, chat)
-    if rec is None:
+    """The context window of the chat's model, from the provider's own
+    metadata (cached by the last probe). 0 = unknown."""
+    try:
+        ep = resolve_endpoint(cfg, chat)
+    except chats.ChatError:
         return 0
-    snap = {r.get("id"): r for r in srv.snapshot()}
-    return int((snap.get(rec["id"]) or {}).get("nCtx")
-               or rec.get("ctx") or 0)
+    return providers.model_ctx(ep["provider"]["name"], ep["model"])
 
 
 def _last_used_tokens(chat: dict) -> int:
     """The real context size after the last completed turn: that turn's
     prompt_tokens + completion_tokens, from llama-server's usage object.
-    Only the LIVE slice counts — usage from before a compaction marker
+    Only the LIVE slice counts - usage from before a compaction marker
     describes a context that no longer exists, and letting it linger kept
     usedTokens pinned at the pre-compaction value (which made the chip lie
     and auto-compaction re-fire for nothing)."""
@@ -926,7 +1074,7 @@ def _turn_growth(chat: dict) -> dict:
     totals: list[int | None] = []
     for m in chat.get("messages") or []:
         if m.get("role") == "compact":
-            totals.append(None)   # boundary — don't diff across it
+            totals.append(None)   # boundary - don't diff across it
             continue
         u = m.get("usage")
         if m.get("role") == "assistant" and isinstance(u, dict):
@@ -943,7 +1091,7 @@ def _turn_growth(chat: dict) -> dict:
 
 def _headroom(chat: dict, nctx: int) -> int:
     """Tokens the NEXT turn should be assumed to need: the recent worst
-    case, padded average, or a 5% floor — whichever is largest."""
+    case, padded average, or a 5% floor - whichever is largest."""
     g = _turn_growth(chat)
     return max(nctx // 20, g["max"], (g["avg"] * 3) // 2)
 
@@ -975,7 +1123,8 @@ def context_breakdown(root: Path, cfg: dict, chat: dict) -> dict:
         elif role == "tool":
             parts["toolResults"] += _est(m.get("content")) + 4
     parts["toolSpecs"] = _est(json.dumps(
-        tool_specs(cfg, str(chat.get("permMode") or ""))))
+        tool_specs(cfg, str(chat.get("permMode") or ""),
+                   network=containers.net_mode(chat.get("network")))))
     # hard guarantee for the UI: every part is an int, never null
     parts = {k: int(v or 0) for k, v in parts.items()}
     est_total = sum(parts.values())
@@ -984,6 +1133,7 @@ def context_breakdown(root: Path, cfg: dict, chat: dict) -> dict:
     used = max(est_total, last_used)
     comp = ch.get("compaction") or {"auto": True, "threshold": 0.8}
     growth = _turn_growth(chat)
+    speeds = _measured_speeds(chat)
     return {"parts": parts, "images": images, "estTokens": est_total,
             "lastUsedTokens": last_used, "usedTokens": used, "nCtx": nctx,
             "pct": round(100 * used / nctx, 1) if nctx else None,
@@ -992,7 +1142,26 @@ def context_breakdown(root: Path, cfg: dict, chat: dict) -> dict:
             "turnAvg": growth["avg"], "turnMax": growth["max"],
             "turnSamples": growth["n"],
             "headroom": _headroom(chat, nctx) if nctx else 0,
+            # measured on THIS chat's server: what the UI needs to say
+            # "your next prompt is ~N tok and will take ~T s to process"
+            "promptSpeed": speeds["prompt"], "genSpeed": speeds["gen"],
+            "lastCachedTokens": speeds["cached"],
             "liveMessages": len(live), "compacted": compact is not None}
+
+
+def _measured_speeds(chat: dict) -> dict:
+    """{prompt, gen, cached} from the newest real timings in the chat:
+    prompt tok/s (prefill), generation tok/s, and how many prompt tokens
+    the cache absorbed last turn. 0 = never measured."""
+    out = {"prompt": 0.0, "gen": 0.0, "cached": 0}
+    for m in reversed(chat.get("messages") or []):
+        t = m.get("timings")
+        if m.get("role") == "assistant" and isinstance(t, dict):
+            out["prompt"] = float(t.get("prompt_per_second") or 0)
+            out["gen"] = float(t.get("predicted_per_second") or 0)
+            out["cached"] = int(t.get("cache_n") or 0)
+            break
+    return out
 
 
 _THINK_RE = None
@@ -1006,28 +1175,27 @@ def _strip_think(text: str) -> str:
     return _THINK_RE.sub("", str(text or "")).strip()
 
 
-def _gen_once(chat_id: str, server: dict, messages: list[dict],
+def _gen_once(chat_id: str, ep: dict, messages: list[dict],
               cancel: threading.Event, on_progress=None,
               err_box: dict | None = None) -> str:
     """One plain streamed generation (no tools), accumulated. Registered
     in _streams so stop() can cut it. on_progress(chars_so_far) fires per
-    chunk — the caller turns it into a visible liveness signal.
+    chunk - the caller turns it into a visible liveness signal.
 
     err_box (when given) receives err_box['error'] = <reason> if the
-    stream broke or the server sent an SSE error chunk — swallowing those
+    stream broke or the server sent an SSE error chunk - swallowing those
     silently is how compaction used to report 'came back empty' for what
     was really a server error."""
-    body = {"model": server["name"], "messages": messages, "stream": True}
+    body = {"model": ep["model"], "messages": messages, "stream": True}
     abort_box: dict = {}
     with _lock:
         _streams[chat_id] = _PreStream(abort_box)
     try:
-        resp = sshtunnel.request(
-            "POST", "http://llama/v1/chat/completions",
-            {"Content-Type": "application/json"},
+        resp = providers.request(
+            ep["provider"], "POST", "/v1/chat/completions",
             json.dumps(body).encode("utf-8"),
-            STREAM_IDLE_TIMEOUT, server["host"], unix=server["sock"],
-            abort_box=abort_box)
+            {"Content-Type": "application/json"},
+            timeout=STREAM_IDLE_TIMEOUT, abort_box=abort_box)
     except BaseException:
         with _lock:
             _streams.pop(chat_id, None)
@@ -1056,7 +1224,7 @@ def _gen_once(chat_id: str, server: dict, messages: list[dict],
                             except Exception:
                                 pass
         except STREAM_ERRORS as e:
-            # aborted/broken stream — return whatever accumulated, but
+            # aborted/broken stream - return whatever accumulated, but
             # tell the caller (a cancel-induced break is not an error)
             if err_box is not None and not cancel.is_set():
                 err_box["error"] = f"stream broke: {type(e).__name__}: {e}"
@@ -1072,7 +1240,7 @@ def _gen_once(chat_id: str, server: dict, messages: list[dict],
 
 
 # the compaction REQUEST must itself fit the window, with room left to
-# generate the summary — at least this many tokens (or nctx/8) stay free
+# generate the summary - at least this many tokens (or nctx/8) stay free
 COMPACT_RESERVE_TOKENS = 2048
 COMPACT_TOOL_TRIM = 2_000       # chars kept per tool result in the request
 COMPACT_KEEP_LAST = 4           # newest live messages never dropped
@@ -1095,7 +1263,7 @@ def _compact_request(root: Path, cfg: dict, chat_doc: dict,
                      nctx: int) -> tuple[list[dict], int]:
     """(messages for the summarization call, count dropped). At a FULL
     window the naive request (whole wire + prompt) exceeds nctx and the
-    server errors or stalls — the exact 'hit compact at 100% and nothing
+    server errors or stalls - the exact 'hit compact at 100% and nothing
     happened' failure. So the request is BUDGETED: big tool results are
     trimmed, then the oldest messages are dropped until it fits with
     generation room to spare."""
@@ -1107,13 +1275,16 @@ def _compact_request(root: Path, cfg: dict, chat_doc: dict,
     msgs.append({"role": "user", "content": prompt})
     if not nctx:
         return msgs, 0
-    budget = nctx - max(COMPACT_RESERVE_TOKENS, nctx // 8)
+    # the floor matters: on a small window (-c 2048) the naive
+    # nctx - RESERVE goes to zero or below, and an impossible budget
+    # would shred the whole history into a garbage summary
+    budget = max(nctx - max(COMPACT_RESERVE_TOKENS, nctx // 8), nctx // 2)
 
     def total():
         return sum(_msg_est(m) for m in msgs)
 
     # pass 1: giant tool results tell the summary nothing a trimmed one
-    # doesn't — keep head + tail
+    # doesn't - keep head + tail
     if total() > budget:
         for m in msgs:
             c = m.get("content")
@@ -1124,7 +1295,7 @@ def _compact_request(root: Path, cfg: dict, chat_doc: dict,
                                 + c[-keep:])
 
     # pass 2: drop the oldest messages (after the system prompt) until the
-    # request fits — the newest COMPACT_KEEP_LAST plus the prompt survive
+    # request fits - the newest COMPACT_KEEP_LAST plus the prompt survive
     dropped = 0
     while total() > budget and len(msgs) > COMPACT_KEEP_LAST + 2:
         msgs.pop(1)
@@ -1136,7 +1307,7 @@ def _compact_request(root: Path, cfg: dict, chat_doc: dict,
             dropped += 1
 
     # pass 3 (single huge messages): halve the longest content until it
-    # fits — converges fast, and a truncated transcript still summarizes
+    # fits - converges fast, and a truncated transcript still summarizes
     for _ in range(24):
         if total() <= budget:
             break
@@ -1153,7 +1324,7 @@ def _compact_request(root: Path, cfg: dict, chat_doc: dict,
     return msgs, dropped
 
 
-def compact(root: Path, cfg: dict, chat_doc: dict, server: dict,
+def compact(root: Path, cfg: dict, chat_doc: dict, ep: dict,
             cancel: threading.Event, ev) -> bool:
     """Summarize the live context into a compaction marker. The original
     messages stay in the file (history keeps rendering); the wire carries
@@ -1165,7 +1336,7 @@ def compact(root: Path, cfg: dict, chat_doc: dict, server: dict,
     tokens_before = context_breakdown(root, cfg, chat_doc)["usedTokens"]
     msgs, dropped = _compact_request(root, cfg, chat_doc, nctx)
     ev("compact_start", messages=len(live))
-    # visible liveness: the page shows this count rising — if it stops,
+    # visible liveness: the page shows this count rising - if it stops,
     # the user KNOWS compaction stalled instead of wondering
     last_tick = {"t": 0.0}
 
@@ -1177,11 +1348,11 @@ def compact(root: Path, cfg: dict, chat_doc: dict, server: dict,
     err_box: dict = {}
     t0 = time.monotonic()
     try:
-        summary = _gen_once(str(chat_doc["id"]), server, msgs, cancel,
+        summary = _gen_once(str(chat_doc["id"]), ep, msgs, cancel,
                             on_progress=prog, err_box=err_box)
     except (OSError, urllib.error.URLError, urllib.error.HTTPError) as e:
         if cancel.is_set():
-            # the user's stop tore the request down — that's a cancel
+            # the user's stop tore the request down - that's a cancel
             ev("compact_cancelled")
             return False
         detail = ""
@@ -1196,12 +1367,12 @@ def compact(root: Path, cfg: dict, chat_doc: dict, server: dict,
         ev("compact_cancelled")
         return False
     if err_box.get("error"):
-        # a summary cut off mid-stream silently loses history — refuse it
+        # a summary cut off mid-stream silently loses history - refuse it
         ev("compact_error", msg="compaction failed: " + str(err_box["error"]))
         return False
     if not summary:
         ev("compact_error", msg="compaction failed: the model returned an "
-                                "empty summary — try again, or pick a "
+                                "empty summary - try again, or pick a "
                                 "different model for this chat")
         return False
     chat_doc["messages"].append({"role": "compact", "content": summary,
@@ -1214,14 +1385,14 @@ def compact(root: Path, cfg: dict, chat_doc: dict, server: dict,
     return True
 
 
-def _maybe_autocompact(root: Path, cfg: dict, chat_doc: dict, server: dict,
+def _maybe_autocompact(root: Path, cfg: dict, chat_doc: dict, ep: dict,
                        cancel: threading.Event, ev) -> bool | None:
     """None = not needed; True/False = compaction ran and succeeded/failed.
 
     Two triggers, either fires:
     - the classic threshold (default 80% of the window);
     - PREDICTIVE: recent turns' real token growth (avg/worst over the last
-      TURN_WINDOW turns) says the next turn could crash into the window —
+      TURN_WINDOW turns) says the next turn could crash into the window -
       so a run of unusually fat turns compacts EARLY instead of shocking
       the chat into a wedged full-context state."""
     comp = (cfg.get("chat") or {}).get("compaction") or {}
@@ -1233,7 +1404,7 @@ def _maybe_autocompact(root: Path, cfg: dict, chat_doc: dict, server: dict,
     used = context_breakdown(root, cfg, chat_doc)["usedTokens"]
     if used >= float(comp.get("threshold", 0.8)) * nctx \
             or used + _headroom(chat_doc, nctx) >= nctx:
-        return compact(root, cfg, chat_doc, server, cancel, ev)
+        return compact(root, cfg, chat_doc, ep, cancel, ev)
     return None
 
 
@@ -1258,9 +1429,10 @@ def _compact_worker(root: Path, chat_id: str, cancel: threading.Event,
     try:
         cfg = libconfig.load(root)
         chat_doc = chats.load_chat(root, chat_id)
-        server = _server_for(cfg, chat_doc)
-        compact(root, cfg, chat_doc, server, cancel, ev)
-    except (chats.ChatError, libconfig.ConfigError, srv.SrvError) as e:
+        ep = resolve_endpoint(cfg, chat_doc, probe=True)
+        compact(root, cfg, chat_doc, ep, cancel, ev)
+    except (chats.ChatError, libconfig.ConfigError,
+            providers.ProviderError) as e:
         ev("compact_error", msg=str(e))
     except Exception as e:
         traceback.print_exc()
@@ -1273,6 +1445,24 @@ def _compact_worker(root: Path, chat_id: str, cancel: threading.Event,
 
 # --------------------------------------------------------------------------
 # the loop
+
+# a turn that "finishes" without an actual answer (thinking-only halt,
+# empty stream) is passed back to the model this many times before the
+# loop gives up
+EMPTY_RESPONSE_RETRIES = 3
+
+
+def _response_complete(chat: dict) -> bool:
+    """Did the conversation actually END on a model answer? A turn whose
+    last word is a bare thought, an empty message, or no message at all
+    did not answer anything."""
+    msgs = chat.get("messages") or []
+    if not msgs:
+        return False
+    m = msgs[-1]
+    return m.get("role") == "assistant" \
+        and bool(str(m.get("content") or "").strip())
+
 
 def send(root: Path, chat_id: str, push) -> None:
     """Start (or refuse) a worker for the chat's latest state. The user
@@ -1301,31 +1491,47 @@ def _worker(root: Path, chat_id: str, cancel: threading.Event, push) -> None:
     try:
         cfg = libconfig.load(root)
         chat = chats.load_chat(root, chat_id)
-        server = _server_for(cfg, chat)
-        ev("start", model=server["name"])
+        ep = resolve_endpoint(cfg, chat, probe=True)
+        ev("start", model=ep["name"])
         # auto-compaction: before the first turn, AND between tool-loop
-        # turns — a long agentic run grows the context mid-send, and only
+        # turns - a long agentic run grows the context mid-send, and only
         # checking once per send let it blow straight past the threshold.
         # One failure stops retrying for this send (no error-event spam).
-        compact_ok = _maybe_autocompact(root, cfg, chat, server, cancel, ev)
+        compact_ok = _maybe_autocompact(root, cfg, chat, ep, cancel, ev)
+        retries = 0
+        gave_up = False
         while True:
             if cancel.is_set():
                 break
-            done = _turn(root, cfg, chat, server, cancel, ev)
+            done = _turn(root, cfg, chat, ep, cancel, ev)
             _save_from_loop(root, chat)
-            if done or cancel.is_set():
+            if cancel.is_set():
                 break
+            if done:
+                # a "done" turn that produced no actual ANSWER (a huge
+                # thought that halted before the reply, or an empty
+                # stream) is not an ending - pass the turn back to the
+                # model, up to EMPTY_RESPONSE_RETRIES times. Past that,
+                # give up honestly (the frontend words it accordingly).
+                if _response_complete(chat):
+                    break
+                if retries >= EMPTY_RESPONSE_RETRIES:
+                    gave_up = True
+                    break
+                retries += 1
+                ev("retry", attempt=retries, max=EMPTY_RESPONSE_RETRIES)
+                continue
             if compact_ok is not False:
-                compact_ok = _maybe_autocompact(root, cfg, chat, server,
+                compact_ok = _maybe_autocompact(root, cfg, chat, ep,
                                                 cancel, ev)
-        ev("done", cancelled=cancel.is_set())
-        # titling happens AFTER done, on its own thread — it must not block
+        ev("done", cancelled=cancel.is_set(), gaveUp=gave_up)
+        # titling happens AFTER done, on its own thread - it must not block
         # the chat becoming usable again
         threading.Thread(target=_autotitle,
-                         args=(root, cfg, str(chat["id"]), server, push),
+                         args=(root, cfg, str(chat["id"]), ep, push),
                          daemon=True, name=f"title-{chat_id}").start()
     except (chats.ChatError, libconfig.ConfigError, containers.ContainerError,
-            srv.SrvError) as e:
+            providers.ProviderError) as e:
         ev("error", msg=str(e))
     except Exception as e:
         traceback.print_exc()
@@ -1355,46 +1561,50 @@ def _refresh_user_fields(root: Path, chat: dict) -> None:
     except chats.ChatError:
         return
     for k in ("model", "permMode", "network", "folders", "container",
-              "env", "title", "archived"):
+              "env", "title", "archived", "provider", "artifactsDismissed"):
         if k in disk:
             chat[k] = disk[k]
         else:
             chat.pop(k, None)
 
 
-def _turn(root: Path, cfg: dict, chat: dict, server: dict,
+def _turn(root: Path, cfg: dict, chat: dict, ep: dict,
           cancel: threading.Event, ev) -> bool:
     """One streamed model turn. Returns True when the conversation is done
     (no tool calls)."""
     _refresh_user_fields(root, chat)
     body = {
-        "model": server["name"],
+        "model": ep["model"],
         "messages": _wire_messages(root, cfg, chat),
         "stream": True,
-        "tools": tool_specs(cfg, str(chat.get("permMode") or "")),
+        "tools": tool_specs(cfg, str(chat.get("permMode") or ""),
+                            network=containers.net_mode(chat.get("network"))),
+        # llama.cpp-style extensions (ninfer speaks them too):
+        # per-chunk timings → LIVE tok/s; prompt_progress chunks → a real
+        # prompt-processing progress bar instead of a silent stall
         "timings_per_token": True,
+        "return_progress": True,
         "stream_options": {"include_usage": True},
-        # reuse the KV cache for the unchanged prompt prefix — explicit,
+        # reuse the KV cache for the unchanged prompt prefix - explicit,
         # so older llama-server builds behave like new ones
         "cache_prompt": True,
     }
-    _apply_reasoning(body, store.reasoning_get(str(root),
-                                               str(server.get("id") or "")))
+    _apply_reasoning(body, store.reasoning_get(
+        str(root), providers.model_key(ep["provider"]["name"], ep["model"])))
     t0 = time.monotonic()
     ttft = None
     # a cancel must be able to abort the request even while the server is
-    # still chewing the prompt (no headers yet) — register the abortable
+    # still chewing the prompt (no headers yet) - register the abortable
     # connection BEFORE sending
     abort_box: dict = {}
     with _lock:
         _streams[chat["id"]] = _PreStream(abort_box)
     try:
-        resp = sshtunnel.request(
-            "POST", "http://llama/v1/chat/completions",
-            {"Content-Type": "application/json"},
+        resp = providers.request(
+            ep["provider"], "POST", "/v1/chat/completions",
             json.dumps(body).encode("utf-8"),
-            STREAM_IDLE_TIMEOUT, server["host"], unix=server["sock"],
-            abort_box=abort_box)
+            {"Content-Type": "application/json"},
+            timeout=STREAM_IDLE_TIMEOUT, abort_box=abort_box)
     except urllib.error.HTTPError as e:
         with _lock:
             _streams.pop(chat["id"], None)
@@ -1407,9 +1617,9 @@ def _turn(root: Path, cfg: dict, chat: dict, server: dict,
         with _lock:
             _streams.pop(chat["id"], None)
         if cancel.is_set():
-            return True   # the user's abort tore the request down — quiet
+            return True   # the user's abort tore the request down - quiet
         reason = getattr(e, "reason", None) or e
-        raise chats.ChatError(f"cannot reach {server['name']}: {reason}")
+        raise chats.ChatError(f"cannot reach {ep['name']}: {reason}")
 
     with _lock:
         _streams[chat["id"]] = resp
@@ -1418,12 +1628,22 @@ def _turn(root: Path, cfg: dict, chat: dict, server: dict,
     calls: dict[int, dict] = {}
     timings = usage = None
     stream_err = None
+    last_live = 0.0   # throttle for live_stats pushes
     try:
         for chunk in _sse(resp):
             if cancel.is_set():
                 break
             if chunk.get("timings"):
                 timings = chunk["timings"]
+                # live speed readout - at most ~3/s so the bus stays light
+                now = time.monotonic()
+                if now - last_live >= 0.3:
+                    last_live = now
+                    ev("live_stats", timings=timings)
+            if chunk.get("prompt_progress"):
+                # the server is chewing the prompt: total/cache/processed/
+                # time_ms - the page renders a real progress bar + ETA
+                ev("progress", progress=chunk["prompt_progress"])
             if chunk.get("usage"):
                 usage = chunk["usage"]
             for ch in chunk.get("choices") or []:
@@ -1453,7 +1673,7 @@ def _turn(root: Path, cfg: dict, chat: dict, server: dict,
                     if fn.get("arguments"):
                         slot["args"] += fn["arguments"]
     except STREAM_ERRORS as e:
-        # keep whatever streamed before the break — the partial answer is
+        # keep whatever streamed before the break - the partial answer is
         # appended (flagged stopped) so Continue can pick it back up. A
         # cancel-induced break (stop() closes the response under our
         # feet) is silent by design.
@@ -1476,13 +1696,17 @@ def _turn(root: Path, cfg: dict, chat: dict, server: dict,
     msg = {"role": "assistant", "content": text,
            "ts": int(time.time() * 1000)}
     if cancel.is_set() or stream_err:
-        msg["stopped"] = True    # abrupt end — the UI offers Continue
+        msg["stopped"] = True    # abrupt end - the UI offers Continue
     if think:
         msg["thinking"] = think
     if timings:
         msg["timings"] = timings
     if usage:
         msg["usage"] = usage
+    if ttft is not None:
+        # persisted so diagnostics can show real time-to-first-token per
+        # turn, not just for the turn that happens to be on screen
+        msg["ttftMs"] = int(ttft * 1000)
     ordered = [calls[i] for i in sorted(calls)]
     if ordered:
         msg["tool_calls"] = [
@@ -1510,7 +1734,7 @@ def _turn(root: Path, cfg: dict, chat: dict, server: dict,
 def _run_tool(root: Path, cfg: dict, chat: dict, call: dict,
               cancel: threading.Event, ev) -> None:
     # the user may have flipped the permission mode (or network, env,
-    # container…) while the previous call streamed or waited — decide
+    # container…) while the previous call streamed or waited - decide
     # THIS call under the settings as they are now
     _refresh_user_fields(root, chat)
     name, call_id = call["name"], call["id"]
@@ -1523,10 +1747,19 @@ def _run_tool(root: Path, cfg: dict, chat: dict, call: dict,
     perm = perm_for(cfg, name, str(chat.get("permMode") or ""))
     ev("tool_call", callId=call_id, tool=name, args=args, perm=perm)
 
+    # three outcomes: ok / failed / cancelled. `ok` stays the boolean the
+    # wire and history always carried; `cancelled` rides alongside so the
+    # UI can tell "the user stopped this" from "this went wrong".
     result_ok = True
-    if perm == "deny":
+    cancelled = False
+    ran = False   # _exec_tool actually returned (side effects may exist)
+    if perm in ("deny", "disabled"):
+        # 'disabled' tools are never OFFERED, but a model can still call
+        # one by name (stale context, or the level flipped mid-stream) -
+        # the most restrictive level must never fall through to allow
         result_ok = False
-        result = "denied by loom.yaml permissions"
+        result = ("denied by loom.yaml permissions" if perm == "deny"
+                  else "this tool is disabled in the active permission mode")
     else:
         if perm == "ask":
             GATE.prepare(chat["id"], call_id, name)
@@ -1541,6 +1774,16 @@ def _run_tool(root: Path, cfg: dict, chat: dict, call: dict,
                 result = _exec_tool(
                     root, cfg, chat, name, args, cancel,
                     on_output=lambda s: ev("tool_output", callId=call_id, text=s))
+                ran = True
+                # a tool may return (text, status) - the shell does, so a
+                # nonzero exit / timeout / cancel shows as what it IS
+                if isinstance(result, tuple):
+                    result, status = result
+                    if status == "cancelled":
+                        result_ok = False
+                        cancelled = True
+                    elif status != "ok":
+                        result_ok = False
             except (chats.ChatError, containers.ContainerError,
                     library.LibraryError) as e:
                 result_ok = False
@@ -1550,12 +1793,18 @@ def _run_tool(root: Path, cfg: dict, chat: dict, call: dict,
                 result_ok = False
                 result = f"error: {type(e).__name__}: {e}"
     result = str(result)[:MAX_TOOL_RESULT]
-    ev("tool_result", callId=call_id, ok=result_ok, result=result[:4000])
-    chat["messages"].append({"role": "tool", "tool_call_id": call_id,
-                             "name": name, "content": result,
-                             "ok": result_ok, "ts": int(time.time() * 1000)})
-    # anything the tool left in /artifacts is announced to the user
-    if result_ok and name in ("shell", "write_file", "edit_file"):
+    ev("tool_result", callId=call_id, ok=result_ok, cancelled=cancelled,
+       result=result[:4000])
+    msg = {"role": "tool", "tool_call_id": call_id,
+           "name": name, "content": result,
+           "ok": result_ok, "ts": int(time.time() * 1000)}
+    if cancelled:
+        msg["cancelled"] = True
+    chat["messages"].append(msg)
+    # anything the tool left in /artifacts is announced to the user - a
+    # command that FAILED or was cancelled may still have written files
+    # before it ended, so this keys on "it ran", not on "it succeeded"
+    if ran and name in ("shell", "write_file", "edit_file"):
         try:
             _sync_artifacts(root, chat, ev)
         except OSError:
@@ -1575,7 +1824,7 @@ def _apply_reasoning(body: dict, pref: dict | None) -> None:
     if method == "effort":
         # the OpenAI-style request field. llama-server forwards it into
         # the chat template (Qwen 3.8 grades on low/medium/xhigh; gpt-oss
-        # on low/medium/high) and "none" disables reasoning outright —
+        # on low/medium/high) and "none" disables reasoning outright -
         # our "off" maps to that
         body["reasoning_effort"] = "none" if level == "off" else level
     elif method == "template":
@@ -1590,7 +1839,7 @@ def _apply_reasoning(body: dict, pref: dict | None) -> None:
                 break
 
 
-def _autotitle(root: Path, cfg: dict, chat_id: str, server: dict,
+def _autotitle(root: Path, cfg: dict, chat_id: str, ep: dict,
                push) -> None:
     """Model-generated chat title, using the library's title prompt:
     specific for concrete chats, creative for vague ones, and steered away
@@ -1625,7 +1874,7 @@ def _autotitle(root: Path, cfg: dict, chat_id: str, server: dict,
                + str(first.get("content") or "")[:1500]
                + "\nAssistant: " + str(last_asst)[:1500]
                + "\n</conversation>")
-        out = _gen_once(chat_id, server, [{"role": "user", "content": ask}],
+        out = _gen_once(chat_id, ep, [{"role": "user", "content": ask}],
                         threading.Event())
         title = out.splitlines()[0].strip().strip('"\'' + ".:;") if out else ""
         title = title[:60].strip()

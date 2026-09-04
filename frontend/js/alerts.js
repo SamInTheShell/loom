@@ -1,4 +1,4 @@
-/* alerts.js — the Alerts tab (singleton). Every toast is recorded as an
+/* alerts.js - the Alerts tab (singleton). Every toast is recorded as an
  * alert; the list PERSISTS per library across sessions (backed by
  * ~/.loom/state.json) until the user clears it. The bell in the top bar
  * opens this tab; its badge counts alerts not yet looked at. */
@@ -39,7 +39,7 @@ async function refreshAlertsTab() {
   const list = el("div", { class: "notif-list alr-list" });
   if (!items.length) {
     list.append(el("div", { class: "picker-empty",
-      text: "No alerts. Toasts and background events land here and stay — across sessions — until you clear them." }));
+      text: "No alerts. Toasts and background events land here and stay - across sessions - until you clear them." }));
   }
   for (const n of [...items].reverse()) {
     const btn = el("button", { class: "btn btn-sm", text: "Copy" });

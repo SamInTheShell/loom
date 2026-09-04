@@ -1,4 +1,4 @@
-# etcd raft — a single replication group
+# etcd raft - a single replication group
 
 `go.etcd.io/raft/v3` is a raft *library*, not a server: it computes what
 a correct raft node would do and hands you the results; you own storage,
@@ -9,7 +9,7 @@ everything else in this folder builds on it.
 go get go.etcd.io/raft/v3
 ```
 
-(Older code imports `go.etcd.io/etcd/raft/v3` — same library, pre-move.)
+(Older code imports `go.etcd.io/etcd/raft/v3` - same library, pre-move.)
 
 ## The pieces you own
 
@@ -20,7 +20,7 @@ go get go.etcd.io/raft/v3
   FirstIndex / Snapshot`.
 - **Transport**: deliver `raftpb.Message` values to peers, call
   `node.Step(ctx, msg)` on arrival. Any reliable-enough byte channel
-  works (wire-protocols.md); messages are safe to drop — raft retries.
+  works (wire-protocols.md); messages are safe to drop - raft retries.
 - **Tick source**: call `node.Tick()` on a fixed interval (100ms is
   typical). Elections and heartbeats are counted in ticks
   (`ElectionTick: 10`, `HeartbeatTick: 1` → ~1s election timeout).
@@ -43,7 +43,7 @@ node := raft.StartNode(c, []raft.Peer{{ID: 1}, {ID: 2}, {ID: 3}})
 // after restart with persisted state: node = raft.RestartNode(c)
 ```
 
-## The Ready loop — the contract
+## The Ready loop - the contract
 
 This loop IS the node. The order of operations is the correctness
 contract; deviating loses data.
@@ -66,7 +66,7 @@ for {
             storage.ApplySnapshot(rd.Snapshot)
             engine.RestoreFromSnapshot(rd.Snapshot)  // rebuild state machine
         }
-        // 3. Send messages to peers — only after persisting above.
+        // 3. Send messages to peers - only after persisting above.
         for _, m := range rd.Messages {
             transport.Send(NodeID(m.To), groupID, m)
         }
@@ -97,7 +97,7 @@ for {
 Hard rules baked into that order:
 
 - **Persist before send** (steps 1→3): a vote or append-ack that isn't
-  durable can be retracted by a crash — that is how raft loses data.
+  durable can be retracted by a crash - that is how raft loses data.
 - **Apply is idempotent and records `e.Index`**: after a crash you will
   re-apply entries you already applied. The engine stores the applied
   index atomically with the batch (pebble.md) and skips `e.Index <=
@@ -126,7 +126,7 @@ func (g *group) Put(ctx context.Context, k, v []byte) error {
 
 `Propose` returning nil means "accepted for replication", NOT
 "committed". Completion is learned in the apply step. A timed-out
-propose may still commit — commands must be idempotent or carry client
+propose may still commit - commands must be idempotent or carry client
 request IDs for dedup (wire-protocols.md).
 
 Only the leader makes progress on proposals; followers return a
@@ -136,10 +136,10 @@ NotLeader error to the client with `raft.Status().Lead` as the hint.
 
 Three options, weakest to strongest:
 
-1. **Stale read** — read local engine anywhere. Cheap; may lag.
-2. **Leader lease read** — read on the leader; correct if clocks are
+1. **Stale read** - read local engine anywhere. Cheap; may lag.
+2. **Leader lease read** - read on the leader; correct if clocks are
    sane and CheckQuorum is on. Good default.
-3. **ReadIndex** — `node.ReadIndex(ctx, token)`; wait until
+3. **ReadIndex** - `node.ReadIndex(ctx, token)`; wait until
    appliedIndex ≥ the returned index, then read. Linearizable without
    log writes. Use for anything advertised as strongly consistent.
 
@@ -172,23 +172,23 @@ node.ProposeConfChange(ctx, cc)
 //   ConfChangeRemoveNode 1     (retire old member)
 ```
 
-Add as **learner first**, promote when caught up — adding a cold voter
+Add as **learner first**, promote when caught up - adding a cold voter
 shrinks effective quorum until it syncs. Never remove the node you are
 currently talking to as leader without transferring leadership first
 (`node.TransferLeadership`).
 
 ## Config knobs that matter
 
-- `CheckQuorum: true` and `PreVote: true` — both on for real
+- `CheckQuorum: true` and `PreVote: true` - both on for real
   deployments: they prevent stale leaders and rejoin-storm elections.
-- `MaxInflightMsgs`/`MaxSizePerMsg` — replication pipelining; defaults
+- `MaxInflightMsgs`/`MaxSizePerMsg` - replication pipelining; defaults
   fine to start.
 - Tick interval trades failover speed vs false elections; 100ms tick
-  with ElectionTick 10 ≈ 1–2s failover.
+  with ElectionTick 10 ≈ 1-2s failover.
 
 ## Testing (see ../testing.md)
 
-Drive `Tick()` manually — an election is exactly ElectionTick+1 ticks
+Drive `Tick()` manually - an election is exactly ElectionTick+1 ticks
 away, deterministic. Fake the transport with channels; partition = stop
 delivering between sets. The harness invariant after every scenario:
 every node's applied log prefix is identical, and every acked write is

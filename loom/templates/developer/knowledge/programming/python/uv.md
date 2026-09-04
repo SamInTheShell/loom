@@ -1,4 +1,4 @@
-# uv — Python package and project manager
+# uv - Python package and project manager
 
 uv manages Python versions, virtualenvs, dependencies, and script running
 for a project, driven by `pyproject.toml` and a `uv.lock` lockfile.
@@ -41,25 +41,25 @@ uv python pin 3.12          # pin it for this project (.python-version)
 uv init                     # start a new project (creates pyproject.toml)
 ```
 
-Prefer `uv run <cmd>` over activating the virtualenv manually — it
+Prefer `uv run <cmd>` over activating the virtualenv manually - it
 guarantees the env is synced with the lockfile before running, so you can
 never run against stale dependencies.
 
 ## Reading a uv project
 
-- `pyproject.toml` — declared dependencies (constraints, not exact pins)
+- `pyproject.toml` - declared dependencies (constraints, not exact pins)
   and project metadata. Entry points live under `[project.scripts]`.
-- `uv.lock` — the exact resolved versions; machine-generated, never edit,
+- `uv.lock` - the exact resolved versions; machine-generated, never edit,
   always commit.
-- `.python-version` — the pinned interpreter version for the project.
-- `.venv/` — the project environment; disposable, `uv sync` rebuilds it.
+- `.python-version` - the pinned interpreter version for the project.
+- `.venv/` - the project environment; disposable, `uv sync` rebuilds it.
 
 ## Gotchas
 
 - After pulling changes that touch `pyproject.toml` or `uv.lock`, run
   `uv sync` (or just use `uv run`, which syncs automatically).
 - `uv pip install <pkg>` installs WITHOUT updating `pyproject.toml` or the
-  lockfile — the dependency silently disappears for everyone else. In a uv
+  lockfile - the dependency silently disappears for everyone else. In a uv
   project, always use `uv add` instead.
 - Constraints in `pyproject.toml` say what versions are acceptable;
   `uv.lock` says what is actually installed. Committing one without the

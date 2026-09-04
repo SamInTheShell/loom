@@ -1,7 +1,7 @@
 # Local Chromium DevTools in pywebview (Qt backend)
 
-How to wire up classic, local-only Chromium DevTools — the same panel you
-get from `Ctrl+Shift+I` in a normal browser — for a pywebview app, and how
+How to wire up classic, local-only Chromium DevTools - the same panel you
+get from `Ctrl+Shift+I` in a normal browser - for a pywebview app, and how
 to trigger it from inside the page with a hotkey.
 
 This is **not** what `webview.start(gui='qt', debug=True)` does. That
@@ -23,7 +23,7 @@ DevTools window. No remote debugging port involved.
 pywebview's qt backend keeps its `BrowserView` wrappers in
 `webview.platforms.qt.BrowserView.instances`, keyed by `window.uid`. From
 that wrapper, `bv.webview.page()` returns the underlying `QWebEnginePage`
-— the page you want to inspect.
+- the page you want to inspect.
 
 The only annoying bit is timing: `webview.start()` is blocking, the
 `BrowserView` doesn't exist until the window has been created on the Qt
@@ -34,7 +34,7 @@ hang it off `window.events.loaded`.
 ## Minimal hello-world
 
 ```python
-# hello.py — local DevTools, no appspot redirect, Ctrl+Shift+I from the page.
+# hello.py - local DevTools, no appspot redirect, Ctrl+Shift+I from the page.
 import webview
 from qtpy.QtCore import QTimer
 from qtpy.QtWidgets import QApplication
@@ -102,7 +102,7 @@ def main():
     api = Api()
     window = webview.create_window("Hello", html=HTML, js_api=api)
     api.bind(window)
-    # NOTE: no debug=True — that's the remote-debugging / appspot path.
+    # NOTE: no debug=True - that's the remote-debugging / appspot path.
     webview.start(gui="qt")
 
 
@@ -132,7 +132,7 @@ Chromium DevTools persists "the last panel I had open" in its own
 `localStorage` under `panel-selectedTab`. There is no public Qt API to
 pick a panel, but you can preset that key on the DevTools page right
 after it loads, then force a reload so it applies to the current session
-too — see the `pin_panel` hook in app-skeleton.md's skeleton.
+too - see the `pin_panel` hook in app-skeleton.md's skeleton.
 
 Notes:
 
@@ -140,11 +140,11 @@ Notes:
   swaps in Console; after that the preference sticks with no flicker.
 - `panel-selectedTab` is an internal DevTools key, stable across recent
   Chromium versions but not contractually guaranteed. If a future
-  QtWebEngine renames it, this fails silently — DevTools just opens to
+  QtWebEngine renames it, this fails silently - DevTools just opens to
   its own default.
 - Other valid values: `'elements'`, `'sources'`, `'network'`,
   `'application'`, `'performance'`.
-- No-internal-keys alternative: focus the DevTools window and press Esc —
+- No-internal-keys alternative: focus the DevTools window and press Esc -
   the bottom drawer (a console) opens under whatever panel is showing.
 
 ## Common things that go wrong
@@ -156,7 +156,7 @@ Notes:
   off `window.events.loaded`.
 - **JS button fails with "is not a function".** The `JsApi` class must
   explicitly define every method called from JS (see js-api-bridge.md).
-- **JS calls return `null` instead of results.** Bridge calls are async —
+- **JS calls return `null` instead of results.** Bridge calls are async -
   `await` them.
 - **DevTools window vanishes immediately.** You didn't keep a reference
   to the `QWebEngineView`; Qt garbage-collects it. Stash it somewhere
@@ -168,7 +168,7 @@ Notes:
   called `stopPropagation()`. Register your listener with the
   capture-phase third argument (`true`).
 - **A page saying "Inspectable WebContents" with an appspot link.** You
-  passed `debug=True` to `webview.start()`. Remove it — the
+  passed `debug=True` to `webview.start()`. Remove it - the
   `setDevToolsPage` route doesn't need it.
 - **Importing `webview.platforms.qt` fails.** That module only loads once
   the qt backend is selected. Pin `webview.start(gui="qt")`, or import

@@ -1,9 +1,9 @@
-# HTTP routing with gorilla/mux — routers, middleware, real servers
+# HTTP routing with gorilla/mux - routers, middleware, real servers
 
 How to build the HTTP layer of a Go web application: a gorilla/mux
 router with method matching and path variables, subrouters carrying
 scoped middleware, apache-style access logging, and the `http.Server`
-wiring around it — timeouts, TLS, graceful shutdown. The router is the
+wiring around it - timeouts, TLS, graceful shutdown. The router is the
 skeleton the templates (html-templates.md) and handlers (mvc.md) hang
 off; get its order and its middleware layering right and everything
 else stays boring. The last section says when the stdlib `ServeMux`
@@ -15,7 +15,7 @@ go get github.com/gorilla/mux
 
 ## Router setup
 
-`mux.NewRouter()` matches routes in REGISTRATION ORDER — first match
+`mux.NewRouter()` matches routes in REGISTRATION ORDER - first match
 wins. That single fact dictates the layout: exact and specific routes
 first, prefix routes after, the catch-all dead last.
 
@@ -37,7 +37,7 @@ r.HandleFunc("/admin/shards/{gid:[0-9]+}/split", shardSplit).Methods(http.Method
 r.HandleFunc("/admin/{target:rebalance|split|repair}/{action:pause|resume}",
     adminPause).Methods(http.MethodPost)
 
-// `{key:.*}` lets the variable CONTAIN SLASHES — the way to route
+// `{key:.*}` lets the variable CONTAIN SLASHES - the way to route
 // hierarchical keys ("/api/v1/kv/a/b/c" → key = "a/b/c"):
 r.HandleFunc("/kv/{key:.*}", kvGet).Methods(http.MethodGet)
 r.HandleFunc("/kv/{key:.*}", kvSet).Methods(http.MethodPut)
@@ -46,7 +46,7 @@ r.HandleFunc("/kv/{key:.*}", kvDelete).Methods(http.MethodDelete)
 key := mux.Vars(r)["key"]          // inside the handler
 ```
 
-Unmatched requests go to `r.NotFoundHandler` — set it to something
+Unmatched requests go to `r.NotFoundHandler` - set it to something
 structured (JSON for `Accept: json` or `/api/` paths, HTML for
 browsers) instead of the bare stdlib 404. `MethodNotAllowedHandler`
 is its 405 sibling.
@@ -68,12 +68,12 @@ in.HandleFunc("/propose", propose).Methods(http.MethodPost)
 
 `r.Use(m)` on the root router wraps every matched route;
 `sub.Use(m)` only that subtree. Middleware added with `Use` runs
-around ROUTE MATCHES — the NotFoundHandler is not wrapped, which is
+around ROUTE MATCHES - the NotFoundHandler is not wrapped, which is
 one reason access logging (below) is often mounted around the whole
 router instead.
 
 Grow past one file by giving each package a mount function instead of
-`init()` side effects — deterministic order, no import cycles (the
+`init()` side effects - deterministic order, no import cycles (the
 route packages import the app core, the main package passes mounts
 in):
 
@@ -152,12 +152,12 @@ func (r *logRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 Initialize `status: http.StatusOK`. This is load-bearing: a handler
 that calls `Write` without `WriteHeader` triggers the implicit 200 on
-the UNDERLYING writer — your wrapper's `WriteHeader` is never called
+the UNDERLYING writer - your wrapper's `WriteHeader` is never called
 and an uninitialized field would log 0.
 
 ## Apache-style access logging
 
-The Common Log Format is `%h %l %u %t "%r" %>s %b` — remote host,
+The Common Log Format is `%h %l %u %t "%r" %>s %b` - remote host,
 identd (always `-`), authenticated user, timestamp, request line,
 final status, body bytes. The Combined format appends
 `"%{Referer}i" "%{User-agent}i"`. Every log shipper ever written
@@ -188,12 +188,12 @@ func dash(s string) string { if s == "" { return "-" }; return s }
 ```
 
 Details that matter: `%q` on the request line, referer, and UA is
-deliberate — request paths and headers are ATTACKER-CONTROLLED, and
+deliberate - request paths and headers are ATTACKER-CONTROLLED, and
 `%q` escapes quotes and control bytes so no request can inject fake
 log lines. Log after `next.ServeHTTP` returns so `%>s` is the final
 status (record `time.Now()` before the call if you also want a
 duration field). Serialize `dst` writes (a `log.Logger` or a mutexed
-writer) — concurrent `Fprintf` to one file interleaves. `r.RemoteAddr`
+writer) - concurrent `Fprintf` to one file interleaves. `r.RemoteAddr`
 is the TCP peer; substitute the last `X-Forwarded-For` hop ONLY when
 a trusted proxy sits in front. Mount the middleware OUTERMOST so
 rejections from auth and rate limiting are logged too. Prefer wrapping
@@ -208,7 +208,7 @@ crypto on floods; authn establishes identity; authz checks it against
 the resource.
 
 Prefix-wide gates fit subrouter middleware (`in.Use(pskAuth)`).
-Per-route auth reads better as typed handler wrappers — no context
+Per-route auth reads better as typed handler wrappers - no context
 smuggling, the signature proves the handler cannot run unauthed:
 
 ```go
@@ -232,7 +232,7 @@ Rate limit login and signup by BOTH client IP and target username,
 BEFORE verifying credentials (that is the expensive, probeable step).
 A per-key token bucket in a mutexed map is plenty; cap the map size
 and sweep full buckets so key-rotating attackers can't grow memory. A
-nil limiter must allow — rate limiting may only ever fail open. Answer
+nil limiter must allow - rate limiting may only ever fail open. Answer
 429 with `Retry-After`; bearer-API 401s carry
 `WWW-Authenticate: Bearer realm="..."` per RFC 6750, and give one
 message for every failure mode (unknown user, bad secret, expired) so
@@ -264,12 +264,12 @@ func StartSSE(w http.ResponseWriter) (*http.ResponseController, error) {
 Flush after every event; exit the write loop on `r.Context().Done()`
 (fires on client disconnect). The same shape serves NDJSON watch
 streams: set the Content-Type, `WriteHeader(200)`, then encode + Flush
-per event. Do any preflight validation BEFORE the first write — once
+per event. Do any preflight validation BEFORE the first write - once
 the 200 is out, errors can only be an in-band trailer line, so a
 resume-from-compacted-revision must answer its 410 up front. Count
 concurrent streams per user (a mutexed `map[string]int` with a cap of
 ~12) or one browser pins unbounded goroutines. This is also why
-middleware wrappers MUST forward `Flush` and expose `Unwrap` — an
+middleware wrappers MUST forward `Flush` and expose `Unwrap` - an
 access logger that swallows either silently kills every stream behind
 it.
 
@@ -279,7 +279,7 @@ it.
 srv := &http.Server{
     Addr:    listen,
     Handler: r,
-    // Bounds the header-read phase — the classic slowloris vector.
+    // Bounds the header-read phase - the classic slowloris vector.
     ReadHeaderTimeout: 10 * time.Second,
     // Reaps idle keep-alive conns so parked sockets free goroutines.
     IdleTimeout: 60 * time.Second,
@@ -300,11 +300,11 @@ if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 }
 ```
 
-`Shutdown` makes `ListenAndServe` return `http.ErrServerClosed` — that
+`Shutdown` makes `ListenAndServe` return `http.ErrServerClosed` - that
 is the CLEAN exit, never an error. SIGTERM first is what Kubernetes
 sends. In a larger process, shut down in dependency order: cancel the
 work context, join background goroutines (bounded wait), THEN
-`srv.Shutdown`, then close stores — closing a store under a goroutine
+`srv.Shutdown`, then close stores - closing a store under a goroutine
 still using it is a panic on exit.
 
 Whole-request `ReadTimeout`/`WriteTimeout` sever anything longer than
@@ -314,7 +314,7 @@ per handler with `http.MaxBytesReader(w, r.Body, cap)` (its overflow
 surfaces as `*http.MaxBytesError` via `errors.As` → map to 413), or
 set them generously (an hour) and have SSE clear its own deadlines via
 `http.ResponseController` as above. `ReadHeaderTimeout` stays set
-regardless — it costs streams nothing.
+regardless - it costs streams nothing.
 
 TLS on the same server:
 
@@ -339,7 +339,7 @@ case <-time.After(300 * time.Millisecond):
 }
 ```
 
-With `RequestClientCert` the TLS layer enforces nothing — verify the
+With `RequestClientCert` the TLS layer enforces nothing - verify the
 presented chain per-route in middleware: `r.TLS.PeerCertificates[0]`
 is the leaf, `Verify` it against your CA pool with
 `x509.ExtKeyUsageClientAuth`, and 401 on failure. That converts mTLS
@@ -352,18 +352,18 @@ Since Go 1.22 `http.ServeMux` patterns carry methods and wildcards:
 `"GET /login"`, `"POST /login"`, `"GET /users/{name}"`
 (`r.PathValue("name")`), `"GET /static/"` (trailing slash = subtree).
 For an app whose routes are exact paths plus a few subtrees, that is
-the whole requirement — zero dependencies, and precedence is by
+the whole requirement - zero dependencies, and precedence is by
 SPECIFICITY, not registration order. Keep registration explicit
 anyway: collect `{Pattern, Handler}` mounts per feature package, track
 `pattern → owner` in a map, and error at startup on duplicates naming
-both owners — stdlib conflicts panic with less helpful messages, and
+both owners - stdlib conflicts panic with less helpful messages, and
 `init()`-based registration makes mount order nondeterministic.
 
 gorilla/mux earns its import when you need: regex-constrained
 variables (`{gid:[0-9]+}`, alternations), slash-containing variables
-(`{key:.*}` — stdlib `{key...}` covers only trailing rest-of-path),
+(`{key:.*}` - stdlib `{key...}` covers only trailing rest-of-path),
 subrouters with SCOPED middleware, or `mux.CurrentRoute(r)` +
-`route.GetPathTemplate()` — the low-cardinality route name ("/users/
+`route.GetPathTemplate()` - the low-cardinality route name ("/users/
 {name}", not "/users/alice") that metrics and trace spans need to
 avoid label explosions. Everything in this file except those four
 features works identically on either router; the middleware,
@@ -373,18 +373,18 @@ recorder, SSE, and server sections are pure `net/http`.
 
 - Registration order is match order: specific before prefix,
   `PathPrefix("/")` catch-alls dead last, after every other mount.
-- Never log or meter the raw `r.URL.Path` as a label — use the route
+- Never log or meter the raw `r.URL.Path` as a label - use the route
   template (`GetPathTemplate`) or cardinality explodes.
 - Every ResponseWriter wrapper forwards `Flush` and implements
   `Unwrap`, or streaming and `http.ResponseController` break silently
-  behind it. Initialize captured status to 200 — implicit
+  behind it. Initialize captured status to 200 - implicit
   WriteHeader bypasses wrappers.
 - Access log outermost; write one line per request AFTER the handler
   returns; `%q` untrusted fields (path, referer, UA) against log
   injection; serialize writes to the destination.
 - Rate limit before credential verification; limiter absence fails
   open; identical error messages for all auth failure modes.
-- No whole-request Read/WriteTimeout on servers that stream — bound
+- No whole-request Read/WriteTimeout on servers that stream - bound
   headers (`ReadHeaderTimeout`), idle conns (`IdleTimeout`), and body
   SIZE (`MaxBytesReader`) instead; SSE clears its own deadlines.
 - `http.ErrServerClosed` after `Shutdown` is success, not an error;

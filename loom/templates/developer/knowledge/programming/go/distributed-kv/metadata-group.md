@@ -1,6 +1,6 @@
 # The metadata group
 
-One dedicated raft group — group 0 by convention — that holds the
+One dedicated raft group - group 0 by convention - that holds the
 cluster's control-plane truth. Every other component ASKS it or CACHES
 it; nothing else decides placement or membership. This single decision
 is what keeps a sharded system coherent: there is exactly one place
@@ -15,14 +15,14 @@ placed on 3 or 5 designated nodes); only its state machine differs.
 node/<id>            NodeInfo{addr, capacity, state: active|draining|dead}
 shard/<id>           ShardDesc{range [start,end), groupID, replicas [](node,role),
                      state: normal|splitting|moving, epoch}
-shardmap/epoch       uint64 — bumped on EVERY shard-table change
+shardmap/epoch       uint64 - bumped on EVERY shard-table change
 op/<id>              long-running ops (split/move) with their step state
 user/<name>          accounts + grants (see user-systems.md)
 config/<key>         cluster-wide settings (replication factor, EC scheme…)
 ```
 
 Everything is small, low-write-rate control data. Bulk data NEVER goes
-through the metadata group — that is what data shards are for.
+through the metadata group - that is what data shards are for.
 
 ## Responsibilities
 
@@ -38,7 +38,7 @@ through the metadata group — that is what data shards are for.
    each step transition is a metadata proposal (`op/<id>` records the
    current step). Because the state machine is replicated, the
    coordinator can die and any new metadata leader resumes the op from
-   its recorded step — this is what makes sharding.md's protocols
+   its recorded step - this is what makes sharding.md's protocols
    crash-proof.
 4. **Placement policy.** Given capacities and current spread, choose
    nodes for new replicas/chunks. Keep the policy a pure function
@@ -48,7 +48,7 @@ through the metadata group — that is what data shards are for.
 
 - **Bootstrap:** a client connects to any known address, asks the
   metadata group for the shard map (+epoch), caches it.
-- **Steady state:** route every request by cached map — binary search
+- **Steady state:** route every request by cached map - binary search
   the sorted ranges for the key's shard, send to its leader replica.
   Zero metadata traffic on the hot path.
 - **Correction:** every data-node response carries the node's view of
@@ -63,7 +63,7 @@ through the metadata group — that is what data shards are for.
 
 ## State machine shape
 
-Same pattern as any raft state machine — commands in, deterministic
+Same pattern as any raft state machine - commands in, deterministic
 state out:
 
 ```go
@@ -76,7 +76,7 @@ type MetaCmd struct {
 
 Rules:
 
-- **Deterministic only.** No wall-clock reads inside apply — liveness
+- **Deterministic only.** No wall-clock reads inside apply - liveness
   timeouts are computed by the LEADER before proposing ("mark node 3
   dead"), never inside the state machine. Same for random placement:
   choose in the proposer, record the choice in the command.
@@ -85,19 +85,19 @@ Rules:
   validation (e.g. "op step must be N-1 to move to N") makes the loser
   a no-op instead of a corruption.
 - **Epoch bumps are part of the same command** that changes the shard
-  table — never a separate write.
+  table - never a separate write.
 
 ## Growing/shrinking the metadata group itself
 
 It is a raft group: learner-first conf changes (etcd-raft.md). Keep it
-at 3 or 5 voters on stable nodes; it does not need to scale with data —
+at 3 or 5 voters on stable nodes; it does not need to scale with data -
 its write rate is administrative.
 
 ## Failure modes to design for
 
 - Metadata group down → data plane keeps serving from cached maps;
   what stops is REconfiguration (splits, repair, new clients). This
-  degradation order is correct — verify it in the harness.
+  degradation order is correct - verify it in the harness.
 - A node isolated from metadata but not from clients must keep serving
   its shards (epoch checks protect correctness) but refuse operations
   that need fresh placement.

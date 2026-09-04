@@ -1,4 +1,4 @@
-# Exec checkouts — a filesystem for the shell, a commit for every step
+# Exec checkouts - a filesystem for the shell, a commit for every step
 
 Shell commands need a real filesystem; the depot stores bare repos
 (git-depot.md). The checkout layer bridges the two without giving up
@@ -6,7 +6,7 @@ the invariant that every change the agent makes becomes a commit:
 each chat gets a private checkout, the tree is synced to the branch
 tip before every command, and whatever the command changed is
 auto-committed and pushed back to the bare repo afterwards. The user
-never sees a "dirty working copy" — history in the depot IS the
+never sees a "dirty working copy" - history in the depot IS the
 state. The container that executes the commands is
 shell-containers.md; this file is what it mounts and what happens
 around every exec.
@@ -15,8 +15,8 @@ around every exec.
 
 ```
 ~/.yourapp/checkouts/<chat-id>/
-    tree/   working tree — the ONLY directory mounted (/workspace)
-    git/    the real git dir — NEVER mounted
+    tree/   working tree - the ONLY directory mounted (/workspace)
+    git/    the real git dir - NEVER mounted
     home/   container $HOME (caches survive between commands)
 ```
 
@@ -28,7 +28,7 @@ dotfiles persist across container recreation without polluting the
 tree. Sanitize the chat id (alnum plus `-_`, capped length) before
 using it as a path component.
 
-## Creation — shared clone, alternates
+## Creation - shared clone, alternates
 
 ```
 git clone --shared --separate-git-dir <root>/git \
@@ -46,13 +46,13 @@ small forever. Two follow-ups are mandatory:
    deletes it again, because a container command may have planted its
    own `.git` in /workspace.
 2. `git config gc.auto 0` in the checkout. A shared clone that
-   repacks or prunes on its own can destroy borrowed objects —
+   repacks or prunes on its own can destroy borrowed objects -
    garbage collection is the depot's job, never the checkout's.
 
 If `git/HEAD` is missing, treat the checkout as half-created debris:
 `rmtree` the root and clone fresh. If it exists but HEAD's branch
 differs from the requested one (the chat switched branches), fetch
-and `checkout -B <branch> origin/<branch>` in place — the home dir
+and `checkout -B <branch> origin/<branch>` in place - the home dir
 and warm build state survive the switch.
 
 Every host git call against the checkout passes explicit
@@ -66,20 +66,20 @@ unreachable from the container.
 Other chats, the editor, or the user may have moved the branch since
 this chat's last command. Before each exec, make tree == branch tip.
 The hot path is two rev-parses: branch tip in the bare repo, HEAD in
-the checkout — equal means nothing moved, return immediately. When
+the checkout - equal means nothing moved, return immediately. When
 they differ:
 
 1. Crash recovery first. If `git status --porcelain` is non-empty,
    a previous run died between exec and checkpoint. Commit the
    leftovers as a "recovered uncommitted changes" checkpoint and
    push, then re-read the tip (the push moved it). If that push
-   fails — it raced a concurrent branch move — swallow the error;
+   fails - it raced a concurrent branch move - swallow the error;
    the divergence path below still preserves the commit.
-2. Ahead? (`merge-base --is-ancestor <tip> HEAD`) — a previous
+2. Ahead? (`merge-base --is-ancestor <tip> HEAD`) - a previous
    checkpoint committed but failed to push. Just push again; done if
    it lands.
 3. Behind or diverged. If HEAD is NOT an ancestor of the tip, local
-   commits would be orphaned by a reset — force-push them to a
+   commits would be orphaned by a reset - force-push them to a
    rescue ref in the bare repo first:
 
    ```
@@ -91,24 +91,24 @@ they differ:
    rescue ref, visible in the depot, mergeable by hand.
 
 Tell the user when either recovery fired ("recovered uncommitted
-changes → <sha>", "diverged commits preserved on refs/…/rescue/…") —
+changes → <sha>", "diverged commits preserved on refs/…/rescue/…") -
 silent history surgery destroys trust.
 
 ## Checkpoint after every command
 
-After the exec returns (success, failure, cancelled — all of them),
+After the exec returns (success, failure, cancelled - all of them),
 `git status --porcelain` decides:
 
 - Empty → no commit, report "no file changes".
 - Anything listed → `add -A`, commit with a message derived from the
   command (first line, truncated; append "(cancelled)" when it was),
   `push origin <branch>:<branch>`. The push is local-disk to the
-  bare repo — effectively instant. Report the short sha and file
+  bare repo - effectively instant. Report the short sha and file
   count in the tool result so the model knows a checkpoint exists.
 
 Serialize sync → exec → checkpoint under a per-chat lock; two
 concurrent commands interleaving their checkpoints corrupt the
-story. If the checkpoint itself fails, do not discard anything —
+story. If the checkpoint itself fails, do not discard anything -
 surface a loud WARNING that the changes remain in the checkout and
 will be recovered on the next command (the recovery path above is
 exactly what makes that promise true).
@@ -116,17 +116,17 @@ exactly what makes that promise true).
 ## Warm build state via .gitignore
 
 `status --porcelain` respects `.gitignore`, so `node_modules/`,
-`.venv/`, `target/`, `__pycache__/` are never committed — and
+`.venv/`, `target/`, `__pycache__/` are never committed - and
 `clean -fdq` (no `-x`) never deletes them either. Ignored build
 state therefore stays warm in the tree across commands, syncs, and
 container recreations, while the depot stores only real source
 changes. This one property is why the second `npm test` is fast.
-The flip side: an ignored file is unprotected — only committed
+The flip side: an ignored file is unprotected - only committed
 content survives a checkout wipe.
 
 Cap what the exec feeds back to the model: keep total output to
 ~200 kB, and when composing the tool detail send head (~3 kB) +
-tail (~4.5 kB) with an "N bytes omitted" marker — for builds and
+tail (~4.5 kB) with an "N bytes omitted" marker - for builds and
 tests the verdict lives in the tail.
 
 ## Secrets and env material
@@ -138,13 +138,13 @@ run dir in `~/.yourapp/`; dir 0700, files 0600, rewritten on every
 call so edits propagate, and a content digest folded into the
 container config hash so a changed definition recreates the
 container. Those files mount read-only into a SEPARATE env-kind
-container, never the shell one — full contract in secret-envs.md.
+container, never the shell one - full contract in secret-envs.md.
 
-## Directory attachments — the no-commit variant
+## Directory attachments - the no-commit variant
 
 When the chat is attached to a plain host folder instead of a depot
 repo, mount the folder itself read-write at /workspace (no checkout,
-no sync, no checkpoints — changes land directly in the folder), give
+no sync, no checkpoints - changes land directly in the folder), give
 it a separate home dir, and bind-mount protected subdirectories
 (`.git`, `.venv`, …) READ-ONLY on top so container commands cannot
 corrupt host-specific state. Say so in the tool result: users must
@@ -157,18 +157,18 @@ files. Never raise from cleanup.
 ## Rules
 
 - The git dir is never mounted, and host git always passes explicit
-  `--git-dir`/`--work-tree` — both halves are required; either alone
+  `--git-dir`/`--work-tree` - both halves are required; either alone
   leaves a hole.
-- Delete the tree's `.git` pointer at creation AND on every sync — a
+- Delete the tree's `.git` pointer at creation AND on every sync - a
   container command may plant one at any time.
 - `gc.auto 0` in every shared clone; the checkout must never repack
   or prune borrowed objects.
 - Never reset over unpushed commits: recovery-checkpoint the dirty
-  tree, retry ahead-pushes, rescue-ref divergence — in that order —
+  tree, retry ahead-pushes, rescue-ref divergence - in that order -
   before any `reset --hard`.
 - `clean -fdq` without `-x`, so ignored build state survives; only
   committed content is durable.
 - One lock per chat around sync → exec → checkpoint; checkpoint
   failures warn loudly and rely on next-run recovery, never discard.
 - Checkpoint decisions come from `git status --porcelain`, nothing
-  else — no mtime scans, no manual file lists.
+  else - no mtime scans, no manual file lists.

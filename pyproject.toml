@@ -1,7 +1,7 @@
 [project]
 name = "loom"
 version = "0.1.0"
-description = "Loom — a library-centric local LLM workbench: llama-server manager (local and over SSH) plus chat with container-sandboxed tools. Fully offline pywebview app."
+description = "Loom - a library-centric local LLM workbench: llama-server manager (local and over SSH) plus chat with container-sandboxed tools. Fully offline pywebview app."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

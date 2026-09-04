@@ -1,41 +1,30 @@
-# loom.yaml — this library's configuration. (loom.yml works too.)
+# loom.yaml - this library's configuration. (loom.yml works too.)
 
-# llama-server instances Loom manages for you. Loom composes
-#   llama-server --host <unix socket> -m <model> [--mmproj <mmproj>] \
-#                --alias <name> -c <context> <your flags> --jinja
-# and passes `flags` verbatim (newlines are just whitespace; # comments ok).
-# The Servers tab's "New model…" wizard finds GGUFs and writes these
-# entries for you (the chat's model menu offers it too when empty).
-models: []
-# Complete example — every field, with its default where one exists:
-# - name: Qwen 3.8 27B 128k   # required — chats select by this; also --alias
-#   ssh: ""                   # default "" = this machine; else user@host /
-#                             # a ~/.ssh/config alias to run there
-#   context: 128000           # required — the -c window (VRAM: see docs)
-#   model: ~/.lmstudio/models/lmstudio-community/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf
-#   mmproj: ~/.lmstudio/models/lmstudio-community/Qwen3.8-27B-GGUF/mmproj-Qwen3.8-27B-BF16.gguf
-#                             # optional — vision projector; enables images
-#   binary: llama-server      # default — name/path of the server binary on
-#                             # that machine (point at a specific build)
-#   flags: |                  # optional — passed to llama-server verbatim
-#     -ngl 99
-#     -fa on
-#
-# A second real-world shape — Gemma 4 (vision, no MTP layers):
-# - name: gemma 4 12B it QAT
-#   context: 262144
-#   model: ~/.lmstudio/models/lmstudio-community/gemma-4-12B-it-QAT-GGUF/gemma-4-12B-it-QAT-Q4_0.gguf
-#   mmproj: ~/.lmstudio/models/lmstudio-community/gemma-4-12B-it-QAT-GGUF/mmproj-gemma-4-12B-it-QAT-BF16.gguf
-#   flags: |
-#     -ngl 99
-#     -fa on
-#     -ctk q4_0 -ctv q4_0
-#     -np 1
-#     # no --spec-* flags: gemma ships no MTP layers — with them the
-#     # server refuses to start (see documentation/inference-tips.md)
+# Inference providers - the HTTP APIs Loom talks to. Loom does NOT
+# launch inference: run llama.cpp's `llama-server` or `ninfer-serve`
+# yourself (locally or on another machine) and point an entry at it.
+# Models are pulled live from each provider's API (GET /v1/models).
+# The Providers tab's "Add provider…" button writes these entries too.
+providers: []
+# Complete example - every field:
+# - name: workstation           # required - how chats refer to it
+#   type: llama-cpp             # llama-cpp | ninfer
+#   url: http://127.0.0.1:8080  # required - the API's base URL
+#   ssh: ""                     # default "" = connect directly; else an
+#                               # ssh destination (user@host or a
+#                               # ~/.ssh/config alias) - the url is then
+#                               # resolved FROM that host and traffic
+#                               # rides an ssh stdio tunnel. SSH KEYS
+#                               # ONLY: password prompts are refused.
+# - name: gpu-box
+#   type: ninfer
+#   url: http://127.0.0.1:8080
+#   ssh: gpu-box
 
 chat:
-  # default model (by name) for new chats; empty = first defined model
+  # default provider (by name) for new chats; empty = the first one
+  provider: ""
+  # default model id for new chats; empty = the provider's first model
   model: ""
   # default permission mode for new chats (pick per chat in the composer)
   permission_mode: always-ask
@@ -49,8 +38,8 @@ chat:
     auto: true          # compact automatically when the context fills up
     threshold: 0.8      # fraction of the context window that triggers it
 
-# Permission MODES — a chat runs under one mode; switch it in the chat's
-# input box. These tables are the ACTUAL levels chats run under — edit
+# Permission MODES - a chat runs under one mode; switch it in the chat's
+# input box. These tables are the ACTUAL levels chats run under - edit
 # them freely, or add brand-new modes. A tool left out of a table falls
 # back to that built-in mode's default.
 # Levels: allow / ask / deny / disabled (disabled = tool not offered).

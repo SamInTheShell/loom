@@ -4,7 +4,7 @@ Two result kinds from one query, ranked together:
   * file paths, scored by fuzzy SUBSEQUENCE match (a la Ctrl+P)
   * content lines, case-insensitive substring match, with line numbers
 
-Everything is computed live on request — a library is small (markdown,
+Everything is computed live on request - a library is small (markdown,
 yaml, container files); an index would be more machinery than the data
 deserves.
 """
@@ -33,7 +33,7 @@ def _fuzzy_score(query: str, target: str) -> float:
             return 0.0
         if found == ti:
             streak += 1
-            score += 2 + streak          # adjacent run — best signal
+            score += 2 + streak          # adjacent run - best signal
         else:
             streak = 0
             score += 1
@@ -58,7 +58,7 @@ def _iter_files(root: Path, subdir: str = ""):
             if p.name.startswith("."):
                 continue
             if p.is_dir():
-                # internals holds chat transcripts — never search fodder
+                # internals holds chat transcripts - never search fodder
                 if p.name not in library.SKIP_DIRS \
                         and p.name != library.INTERNALS:
                     stack.append(p)

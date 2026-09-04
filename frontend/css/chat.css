@@ -1,4 +1,4 @@
-/* Chat tabs — message area modeled after llama.cpp's web chat: a centered
+/* Chat tabs - message area modeled after llama.cpp's web chat: a centered
    column thread, user messages in bubbles, assistant text floating on the
    thread as rendered markdown, streaming caret, tool cards, stats row. */
 
@@ -10,7 +10,7 @@
   display: flex; flex-direction: column;
 }
 .jump-bottom {
-  /* bottom RIGHT, hugging the 880px message column's edge — not the
+  /* bottom RIGHT, hugging the 880px message column's edge - not the
      window border; on narrow windows it falls back to a fixed inset */
   position: absolute; bottom: 14px; z-index: 5;
   right: max(20px, calc((100% - 880px) / 2 + 4px));
@@ -38,11 +38,11 @@
 }
 /* tool cards: the full centered column width */
 .chat-thread > .tool-card { max-width: 880px; }
-/* stats belong to the model's turn — left-aligned with its messages */
+/* stats belong to the model's turn - left-aligned with its messages */
 .chat-thread > .msg-stats { padding-left: 2px; padding-right: 64px; }
 .chat-resume { display: flex; justify-content: center; padding-block: 2px; }
 
-/* NOTE: deliberately no entrance animation on messages/cards — the thread
+/* NOTE: deliberately no entrance animation on messages/cards - the thread
    re-renders during streaming, and replaying an opacity animation on every
    redraw dims the whole area while the model generates */
 .msg-head {
@@ -77,7 +77,7 @@
   font-family: var(--font-mono); max-width: 420px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* assistant text floats on the thread — no bubble */
+/* assistant text floats on the thread - no bubble */
 .msg.assistant .msg-body { padding: 0 2px; }
 
 .cursor {
@@ -141,7 +141,7 @@
 .tool-head.toggleable:hover .tool-name { color: var(--acc); }
 .tool-chevron { color: var(--fg-2); font-size: 10px; width: 10px; flex: none; }
 .tool-name { font-weight: 700; font-family: var(--font-mono); }
-/* an expanded RESOLVED card has no internal scrollbars — content flows at
+/* an expanded RESOLVED card has no internal scrollbars - content flows at
    full height and only the chat area scrolls. (Active cards keep their
    caps so streaming output doesn't bounce the layout.) */
 .tool-card.resolved.open .tool-out,
@@ -150,6 +150,7 @@
 .tool-state { color: var(--fg-2); font-size: var(--fs-xs); }
 .tool-state.err { color: var(--err); }
 .tool-state.ok { color: var(--ok); }
+.tool-state.cancel { color: var(--warn); }
 .tool-args {
   margin-top: 5px; font-family: var(--font-mono); font-size: var(--fs-xs);
   color: var(--fg-1); white-space: pre-wrap; overflow-wrap: anywhere;
@@ -162,6 +163,35 @@
   white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 260px; overflow-y: auto; color: var(--fg-1);
 }
+/* artifact delivery entries in the thread */
+.art-msg {
+  max-width: 880px; margin: 2px auto; padding: 7px 12px;
+  background: var(--bg-1); border: 1px solid var(--bd-0);
+  border-radius: var(--r-md); font-size: var(--fs-sm);
+}
+.art-msg-head {
+  display: flex; gap: 8px; align-items: baseline; color: var(--fg-2);
+  font-size: var(--fs-xs);
+}
+.art-msg-row { display: flex; gap: 10px; align-items: center; padding: 3px 0 0; }
+.art-msg-name {
+  background: none; border: none; padding: 0; font: inherit;
+  font-family: var(--font-mono); color: var(--acc); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.art-msg-name:hover { text-decoration: underline; }
+
+/* shell cards: the bash-highlighted command block ... */
+.tool-cmd { margin-top: 5px; }
+.tool-cmd.toggleable { cursor: pointer; }
+/* ... and the always-visible tail of the result on collapsed cards */
+.tool-tail {
+  margin-top: 4px; padding: 3px 10px 1px;
+  border-top: 1px dashed var(--bd-0);
+  font-family: var(--font-mono); font-size: var(--fs-xs);
+  color: var(--fg-2); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.tool-tail.toggleable { cursor: pointer; }
 .tool-perm { margin-top: 8px; display: flex; gap: 8px; align-items: center; }
 .tool-perm .q { color: var(--warn); font-size: var(--fs-sm); flex: 1; }
 .tool-path {
@@ -172,7 +202,7 @@
 .tool-note { margin-top: 5px; font-size: var(--fs-xs); color: var(--fg-2); }
 
 /* syntax-highlighted code / diff previews inside tool cards (read_file,
-   edit_file, write_file) — tok-* colors come from mdedit.css */
+   edit_file, write_file) - tok-* colors come from mdedit.css */
 .code-prev {
   margin-top: 6px; background: var(--ed-bg); border: 1px solid var(--bd-0);
   border-radius: var(--r-md); padding: 6px 0;
@@ -180,7 +210,7 @@
   max-height: 320px; overflow: auto; user-select: text; cursor: text;
 }
 .code-prev .cl { display: flex; white-space: pre-wrap; min-height: 1.55em; }
-.code-prev .lc { overflow-wrap: anywhere; }   /* long lines wrap — no h-scrollbar */
+.code-prev .lc { overflow-wrap: anywhere; }   /* long lines wrap - no h-scrollbar */
 .code-prev .ln {
   flex: none; width: 46px; text-align: right; padding-right: 10px;
   color: var(--fg-2); opacity: .6; user-select: none;
@@ -282,9 +312,18 @@
 .ctx-chip.warn { color: var(--warn); border-color: var(--warn); }
 .net-chip { margin-left: 0; }
 .net-chip.on { color: var(--warn); border-color: var(--warn); }
+/* loopback-only: opened a crack, not the door - accent, not warning */
+.net-chip.loop { color: var(--acc); border-color: var(--acc); }
 
-/* hover breakdown card (fixed, hover-friendly — no overlay) */
+/* hover breakdown card (fixed, hover-friendly - no overlay). The rows
+ * scroll when a long chat outgrows the card; the actions row is a fixed
+ * footer that can never be pushed off. */
 .ctx-card { padding: 10px 12px; min-width: 250px; gap: 3px; }
+.ctx-card .ctx-rows {
+  overflow-y: auto; min-height: 0;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.ctx-card .ctx-actions { flex: none; }
 .ctx-row {
   display: flex; justify-content: space-between; gap: 18px;
   font-size: var(--fs-xs); color: var(--fg-1);
@@ -349,7 +388,7 @@
 .btn-send.stop:hover { background: #ef4444; opacity: 1; }
 .btn-send svg { width: 15px; height: 15px; }
 
-/* artifact pills — what the model left in /artifacts for the user */
+/* artifact pills - what the model left in /artifacts for the user */
 .pill.artifact { border-color: var(--acc-dim); }
 .pill.artifact .mode { text-transform: none; }
 
@@ -358,7 +397,7 @@
 .popup-item .brain:hover { color: var(--fg-0); }
 .popup-item .brain.on { color: var(--acc); }
 
-/* "@ <branch>" on folder pills — tracks out-of-app checkouts */
+/* "@ <branch>" on folder pills - tracks out-of-app checkouts */
 .pill-branch { color: var(--fg-2); font-size: var(--fs-xs); white-space: nowrap; }
 .pill-branch:empty { display: none; }
 
@@ -381,7 +420,7 @@
   font-size: var(--fs-xs); line-height: 1.5;
 }
 
-/* compact model rows — hundreds of models must stay scannable. Every
+/* compact model rows - hundreds of models must stay scannable. Every
  * control stays VISIBLE (keyboard users can't hover); compactness comes
  * from tighter padding and slimmer buttons, never from hiding. */
 .model-popup .popup-item { padding: 3px 8px; gap: 6px; }
@@ -410,7 +449,7 @@
  * so the real content stands out ---------- */
 .chat-thread > .msg.think-entry {
   /* margin-TOP only: the base rule's margin-inline auto centers every
-   * thread entry — a shorthand here shoved thoughts to the left border */
+   * thread entry - a shorthand here shoved thoughts to the left border */
   padding-right: 64px; margin-top: 4px;
 }
 .think-entry .think { margin-top: 4px; }
@@ -428,10 +467,10 @@
 .chat-thread > .msg-stats.after-tools { padding-right: 2px; }
 
 /* ---------- hierarchy: prose over plumbing ----------
- * Resolved tool cards are MACHINERY — collapsed they drop their card
+ * Resolved tool cards are MACHINERY - collapsed they drop their card
  * chrome entirely and dim, so the model's messages own the contrast.
  * Hover (or expanding) brings a card back; active cards (waiting for
- * permission, running) keep full presence — they need attention. */
+ * permission, running) keep full presence - they need attention. */
 .chat-thread > .tool-card.resolved.closed {
   background: transparent; border-color: transparent;
   padding-top: 1px; padding-bottom: 1px; opacity: .6;
@@ -450,7 +489,7 @@
 .ctx-chip .ctx-ring { flex: none; margin-left: 5px; vertical-align: -2px; }
 .perm-pill.ctx-chip { display: inline-flex; align-items: center; }
 
-/* the churn note — a quiet sign-off when the turn returns to the user */
+/* the churn note - a quiet sign-off when the turn returns to the user */
 .chat-thread > .churn-note {
   text-align: center; color: var(--fg-2); font-size: var(--fs-xs);
   font-style: italic; padding: 2px 0; user-select: none;

@@ -1,7 +1,7 @@
-/* tabs.js — the tab container that fills the app below the top bar.
+/* tabs.js - the tab container that fills the app below the top bar.
  *
  * Tab ids: the singleton tabs are 'library' | 'servers' | 'archive' (one
- * instance each — opening again just activates); chat tabs are
+ * instance each - opening again just activates); chat tabs are
  * 'chat:<chatId>'. Every tab has an icon for its type and a close button;
  * closing is gated per type (dirty editor → save/discard, streaming chat
  * → confirm cancellation, then archive).
@@ -10,10 +10,10 @@
 
 const TAB_META = {
   library: { icon: "library", title: () => "Library" },
-  servers: { icon: "servers", title: () => "Servers" },
+  // tab id "servers" kept for saved-session compatibility; it IS the
+  // Providers tab now
+  servers: { icon: "servers", title: () => "Providers" },
   archive: { icon: "archive", title: () => "Chat Archive" },
-  models: { icon: "download", title: () => "Models" },
-  downloader: { icon: "download", title: () => "Downloader" },
   apisrv: { icon: "globe", title: () => "API Server" },
   mcpsrv: { icon: "mcp", title: () => "MCP Servers" },
   alerts: { icon: "bell", title: () => "Alerts" },
@@ -64,7 +64,7 @@ function _applyNav(loc) {
       openChat(sub);                       // reopens (un-archives) if needed
     } else if (type === "term" || type === "diag") {
       if (tabById(loc.tab)) activateTab(loc.tab);
-      else return false;                   // dead tab — skip over it
+      else return false;                   // dead tab - skip over it
     } else if (TAB_META[type]) {
       openTab(type);
       if (type === "library" && loc.file && loc.file !== st.lib.open) {
@@ -84,7 +84,7 @@ function navGo(delta) {
   while (i >= 0 && i < st.nav.stack.length) {
     st.nav.idx = i;
     if (_applyNav(st.nav.stack[i])) return;
-    i += delta;                            // location no longer exists — keep going
+    i += delta;                            // location no longer exists - keep going
   }
   renderNavButtons();
 }
@@ -126,8 +126,6 @@ function mountTab(tab, panel) {
   if (tab.type === "library") mountLibraryTab(panel);
   else if (tab.type === "servers") mountServersTab(panel);
   else if (tab.type === "archive") mountArchiveTab(panel);
-  else if (tab.type === "models") mountModelsTab(panel);
-  else if (tab.type === "downloader") mountDownloaderTab(panel);
   else if (tab.type === "apisrv") mountApiSrvTab(panel);
   else if (tab.type === "mcpsrv") mountMcpTab(panel);
   else if (tab.type === "alerts") mountAlertsTab(panel);
@@ -149,7 +147,6 @@ function activateTab(id) {
   const tab = tabById(id);
   if (tab?.type === "servers") refreshServersTab();
   if (tab?.type === "archive") refreshArchiveTab();
-  if (tab?.type === "downloader") refreshDownloaderTab();
   if (tab?.type === "apisrv") refreshApiSrvTab();
   if (tab?.type === "mcpsrv") refreshMcpTab();
   if (tab?.type === "alerts") {
@@ -158,9 +155,9 @@ function activateTab(id) {
     refreshAlertsTab();
   }
   if (tab?.type === "chat") {
-    // display:none dropped the thread's scroll — put it back. A user who
+    // display:none dropped the thread's scroll - put it back. A user who
     // was AT THE BOTTOM gets the NEW bottom (the stream may have grown
-    // while the tab was hidden — auto-follow must re-arm); one who had
+    // while the tab was hidden - auto-follow must re-arm); one who had
     // scrolled up to compare gets their exact spot.
     const cs = st.chats[tab.chatId];
     if (cs && cs.restoreScroll == null && cs.scrollPos != null) {
@@ -175,8 +172,10 @@ function activateTab(id) {
     setTimeout(() => { sc.scrollTop = st.lib.scrollPos || 0; }, 0);
   }
   if (tab?.type === "diag") {
-    // display:none canvases have zero size — re-measure on activation
+    // display:none canvases have zero size - re-measure on activation,
+    // and re-pull the data (the chat may have moved while it was hidden)
     setTimeout(() => st._diagViews?.[tab.chatId]?.resize?.(), 0);
+    refreshDiagView(tab.chatId);
   }
   if (tab?.type === "term") {
     st._lastTermId = tab.chatId;   // newTerminal() inherits from here
@@ -229,6 +228,11 @@ function removeTab(id) {
     st.lib.open = null;
     st.lib.dirty = false;
   }
+  if (tab.type === "diag") {
+    // tear down the view's window-level listeners with its tab
+    st._diagViews?.[tab.chatId]?._abort?.abort();
+    delete st._diagViews?.[tab.chatId];
+  }
   st.tabs.splice(i, 1);
   panelFor(id)?.remove();
   if (st.activeTab === id) {
@@ -261,7 +265,7 @@ function cycleTab(delta) {
   activateTab(next.id);
 }
 
-/* Ctrl+Shift+PgUp/PgDn — shift the active tab left/right in the order */
+/* Ctrl+Shift+PgUp/PgDn - shift the active tab left/right in the order */
 function moveActiveTab(delta) {
   const i = st.tabs.findIndex((t) => t.id === st.activeTab);
   if (i < 0) return;

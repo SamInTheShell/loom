@@ -1,4 +1,4 @@
-/* chat.js — chat tabs. The message area is modeled after llama.cpp's web
+/* chat.js - chat tabs. The message area is modeled after llama.cpp's web
  * chat: a centered column thread, user bubbles, assistant text floating as
  * rendered markdown with a streaming caret, tool cards inline, and a
  * per-turn stats row (tok/s, ttft, tokens).
@@ -24,19 +24,23 @@ function chatState(chatId) {
   });
 }
 
-async function newChat() {
-  // Ctrl+N / the + button while a chat tab is active: the new chat is a
-  // CLEAN context window with the same working setup — model, permission
-  // mode, and folder attachments carry over; messages don't.
+async function newChat(cloneActive) {
+  // Ctrl+N / the + button: a plain new chat with the library defaults.
+  // Ctrl+Shift+N from a chat tab: a CLEAN context window with the same
+  // working setup - model, permission mode, network, and folder
+  // attachments carry over; messages don't. From any other tab the
+  // clone shortcut does nothing (there is nothing to clone).
   let template = null;
-  const active = tabById(st.activeTab);
-  if (active?.type === "chat") {
+  if (cloneActive) {
+    const active = tabById(st.activeTab);
+    if (active?.type !== "chat") return;
     const src = st.chats[active.chatId]?.chat;
     if (src) {
       template = {
+        provider: src.provider || "",
         model: src.model || "",
         permMode: src.permMode || "",
-        network: !!src.network,
+        network: netMode(src.network),
         folders: (src.folders || []).map((f) => ({ path: f.path, mode: f.mode })),
       };
     }
@@ -89,7 +93,7 @@ function mountChatTab(panel, chatId) {
   const thread = el("div", { class: "chat-thread", "data-role": "thread" });
 
   // jump-to-bottom: appears (bottom left) whenever the user has scrolled
-  // up — which is also exactly when auto-scroll is paused; clicking it
+  // up - which is also exactly when auto-scroll is paused; clicking it
   // lands on the last message and re-arms auto-scroll
   const jump = el("button", {
     class: "jump-bottom", title: "Jump to the latest message",
@@ -102,7 +106,7 @@ function mountChatTab(panel, chatId) {
   const updateJump = () => jump.classList.toggle("show", !atBottom(thread));
   thread.addEventListener("scroll", updateJump, { passive: true });
   thread.addEventListener("scroll", () => {
-    // a hidden panel reads scrollTop 0 — never let that clobber the real
+    // a hidden panel reads scrollTop 0 - never let that clobber the real
     // position (it's restored when the tab activates again)
     if (!thread.clientHeight) return;
     const cs = chatState(chatId);
@@ -139,7 +143,7 @@ function mountChatTab(panel, chatId) {
       sendChatMessage(chatId);
       return;
     }
-    // PgUp/PgDn from the input scroll the THREAD — the eyes are up there
+    // PgUp/PgDn from the input scroll the THREAD - the eyes are up there
     if ((e.key === "PageUp" || e.key === "PageDown")
         && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault();
@@ -158,7 +162,7 @@ function mountChatTab(panel, chatId) {
 
   const modelBtn = el("button", {
     class: "compose-model", "data-role": "model",
-    title: "Model for this chat — picking a stopped model starts it  (Ctrl+.)",
+    title: "Provider and model for this chat  (Ctrl+.)",
   });
   setHotkey(modelBtn, "Ctrl+.");
   modelBtn.addEventListener("click", () => modelMenu(modelBtn, chatId));
@@ -186,18 +190,20 @@ function mountChatTab(panel, chatId) {
 
   const ctxBtn = el("button", {
     class: "perm-pill ctx-chip", "data-role": "ctx",
-    title: "Context usage — hover for the breakdown",
+    title: "Context usage - hover for the breakdown",
   });
   wireCtxHover(ctxBtn, chatId);
 
   const netBtn = el("button", {
     class: "perm-pill net-chip", "data-role": "net",
-    title: "Container network access for shell commands — OFF by default",
+    title: "Container network for shell commands - cycles no network → "
+      + "loopback only → network on",
   });
-  setHotkey(netBtn, "Ctrl+Shift+N");
   netBtn.addEventListener("click", async () => {
     const cs = chatState(chatId);
-    const res = await Api.call("chat_set_network", chatId, !cs.chat.network);
+    const order = ["none", "loopback", "on"];
+    const next = order[(order.indexOf(netMode(cs.chat.network)) + 1) % 3];
+    const res = await Api.call("chat_set_network", chatId, next);
     if (!res.ok) { toast(res.error, "err"); return; }
     cs.chat.network = res.data.network;
     renderNetChip(chatId);
@@ -238,12 +244,12 @@ function mountChatTab(panel, chatId) {
   });
 
   // drag & drop images from the file system onto the input panel.
-  // Browser drops carry file BYTES, not paths — each image is staged to
+  // Browser drops carry file BYTES, not paths - each image is staged to
   // ~/.loom/attachments through the bridge and attached by path.
   const IMG_EXT = /\.(png|jpe?g|webp|gif|bmp)$/i;
   box.addEventListener("dragover", (e) => {
     e.preventDefault();
-    // the library-icon drag advertises effectAllowed "copy" — the drop is
+    // the library-icon drag advertises effectAllowed "copy" - the drop is
     // refused unless the target's dropEffect agrees
     if (st.dragLibrary) e.dataTransfer.dropEffect = "copy";
     box.classList.add("drag-over");
@@ -253,7 +259,7 @@ function mountChatTab(panel, chatId) {
     e.preventDefault();
     box.classList.remove("drag-over");
     // the topbar library icon dragged in: attach the whole library folder
-    // read-only — the pill's view/write toggle opens it up for the model
+    // read-only - the pill's view/write toggle opens it up for the model
     // to work on its own prompts/knowledge/tools
     const isLibraryDrag = st.dragLibrary
       || (st.library && e.dataTransfer?.getData("text/plain") === st.library);
@@ -263,7 +269,7 @@ function mountChatTab(panel, chatId) {
       return;
     }
     const cs = chatState(chatId);
-    // OS drags carry file:// URIs — the only drop form with REAL PATHS.
+    // OS drags carry file:// URIs - the only drop form with REAL PATHS.
     // A directory attaches as a folder mount; an image file attaches by
     // path (no byte round-trip needed).
     const uris = (e.dataTransfer?.getData("text/uri-list") || "")
@@ -284,12 +290,12 @@ function mountChatTab(panel, chatId) {
         renderAttachBar(chatId);
       } else if (res.data.kind === "file") {
         handled = true;
-        toast(baseName(path) + " — single files don't attach; drop its "
+        toast(baseName(path) + " - single files don't attach; drop its "
           + "FOLDER to let the model read it, or drop images.", "warn");
       }
     }
     // the qt backend RECORDS the native paths of this drop (see
-    // drop_paths in app.py) — that is the only reliable source of real
+    // drop_paths in app.py) - that is the only reliable source of real
     // filesystem paths, and real paths are what folder attachment needs
     if ((e.dataTransfer?.files || []).length && !handled) {
       const r = await Api.call("drop_paths");
@@ -303,7 +309,7 @@ function mountChatTab(panel, chatId) {
           cs.pendingImages = (cs.pendingImages || []).concat([p]);
           renderAttachBar(chatId);
         } else if (res.data.kind === "file") {
-          toast(baseName(p) + " — single files don't attach; drop its "
+          toast(baseName(p) + " - single files don't attach; drop its "
             + "FOLDER to let the model read it, or drop images.", "warn");
         }
       }
@@ -313,7 +319,7 @@ function mountChatTab(panel, chatId) {
       // pathless drop (e.g. an image dragged out of a web page): the
       // byte-based staging fallback
       if (!(f.type?.startsWith("image/") || IMG_EXT.test(f.name))) {
-        toast(f.name + " — drop a folder to attach it, or images "
+        toast(f.name + " - drop a folder to attach it, or images "
           + "(png/jpeg/webp/gif/bmp).", "warn");
         continue;
       }
@@ -371,7 +377,7 @@ async function updateGitBadges(chatId) {
   }
 }
 
-/* attach a host folder to a chat (view mode unless told otherwise) —
+/* attach a host folder to a chat (view mode unless told otherwise) -
  * the folder button, and drops of the library icon, both land here */
 async function attachFolderPath(chatId, path, mode) {
   const cs = chatState(chatId);
@@ -439,22 +445,41 @@ function renderAttachBar(chatId) {
     wireImgPreview(pill, p);   // hover shows the actual image
     bar.append(pill);
   }
-  // artifacts: what the model left in /artifacts for the user
+  // artifacts: what the model left in /artifacts for the user. Clicking
+  // a pill opens the preview/editor window; × clears the pill (the file
+  // and its timeline entry stay). Dismissed pills return when the model
+  // regenerates the artifact.
+  const dismissed = new Set(cs.chat?.artifactsDismissed || []);
   for (const a of cs.chat?.artifacts || []) {
+    if (dismissed.has(a.name)) continue;
     const isImg = !a.dir && /\.(png|jpe?g|webp|gif|bmp)$/i.test(a.name);
     const pill = el("span", {
       class: "pill artifact",
-      title: (a.dir ? "folder — saves as a zip" : "file") + " · " + fmtBytes(a.bytes),
+      title: (a.dir ? "folder - saves as a zip" : "file") + " · "
+        + fmtBytes(a.bytes) + " · click to open",
+      onclick: () => { Api.call("artifact_open", chatId, a.name); },
     },
       el("span", { html: icon(a.dir ? "box" : isImg ? "image" : "file", 12) }),
       el("span", { class: "pname", text: a.name }),
       el("button", {
         class: "mode", text: a.dir ? "zip" : "save",
         title: a.dir ? "Save this folder as a zip…" : "Save this file…",
-        onclick: async () => {
+        onclick: async (e) => {
+          e.stopPropagation();
           const res = await Api.call("artifact_save", chatId, a.name);
           if (!res.ok) { toast(res.error, "err"); return; }
           if (res.data.saved) toast("Saved " + res.data.saved, "ok");
+        },
+      }),
+      el("button", {
+        text: "×", title: "Clear this pill - the file stays, and the "
+          + "chat's timeline entry keeps its open/save buttons",
+        onclick: async (e) => {
+          e.stopPropagation();
+          const res = await Api.call("artifact_dismiss", chatId, a.name);
+          if (!res.ok) { toast(res.error, "err"); return; }
+          cs.chat.artifactsDismissed = res.data.dismissed;
+          renderAttachBar(chatId);
         },
       }));
     if (isImg && a.path) wireImgPreview(pill, a.path);
@@ -463,46 +488,79 @@ function renderAttachBar(chatId) {
   updateGitBadges(chatId);   // fill "@ <branch>" on the folder pills
 }
 
-/* live server state for a model NAME (selector markers) */
-function modelStateByName(name) {
-  const m = (st.config?.models || []).find((x) => x.name === name);
-  return m ? (st.servers[m.id]?.state || "stopped") : null;
+/* ---------- provider + model resolution (mirrors the backend) ---------- */
+function modelKey(provider, model) { return provider + "::" + model; }
+
+/* provider registry state → the dot classes the css already knows */
+function providerDot(name) {
+  const s = st.providers?.[name]?.state;
+  return s === "ok" ? "running" : s === "error" ? "error" : "stopped";
 }
 
-function chatModelName(cs) {
-  return cs?.chat?.model || modelNames()[0] || "";
+function providerModels(name) {
+  return st.providers?.[name]?.models || [];
+}
+
+/* the endpoint this chat resolves to: {provider, model} - chat's own
+ * choice, else the config default, else the first provider (and its
+ * first probed model) */
+function activeEndpoint(cs) {
+  const provs = (st.config && !st.config.error && st.config.providers) || [];
+  const pname = cs?.chat?.provider || st.config?.chat?.provider || "";
+  const prov = provs.find((p) => p.name === pname)
+    || (pname ? null : provs[0]);
+  if (!prov) return { provider: pname, model: cs?.chat?.model || "" };
+  let model = cs?.chat?.model || "";
+  if (!model && !cs?.chat?.provider) model = st.config?.chat?.model || "";
+  if (!model) model = providerModels(prov.name)[0]?.id || "";
+  return { provider: prov.name, model };
 }
 
 function renderModelButton(chatId) {
   const panel = chatPanel(chatId);
   const btn = panel?.querySelector('[data-role="model"]');
   if (!btn) return;
-  const name = chatModelName(st.chats[chatId]);
-  const state = name ? modelStateByName(name) : null;
+  const ep = activeEndpoint(st.chats[chatId]);
+  const label = ep.provider
+    ? (ep.model ? ep.provider + " · " + ep.model : ep.provider + " · (no model)")
+    : "no providers";
   // at-a-glance thinking level: the configured reasoning level's single
   // word (off/on/low/medium/xhigh/…); nothing shown on server default
-  const mid = (st.config?.models || []).find((m) => m.name === name)?.id;
-  const lvl = mid ? st.reasoning?.[mid]?.level : null;
+  const key = modelKey(ep.provider, ep.model);
+  const lvl = st.reasoning?.[key]?.level;
   btn.replaceChildren(...[
-    el("span", { class: "dot " + (state || "") }),
-    el("span", { class: "mname", text: name || "no models" }),
+    el("span", { class: "dot " + providerDot(ep.provider) }),
+    el("span", { class: "mname", text: label }),
     lvl ? el("span", { class: "mlvl", text: lvl,
-                       title: "Reasoning: " + reasoningLabel(st.reasoning[mid]) }) : null,
+                       title: "Reasoning: " + reasoningLabel(st.reasoning[key]) }) : null,
     el("span", { class: "caret", text: "▾" }),
   ].filter(Boolean));
+}
+
+/* three network modes, cycled by the chip: none → loopback → on.
+ * Legacy chats carry booleans - normalize everywhere. */
+function netMode(v) {
+  if (v === true || v === "on") return "on";
+  if (v === "loopback") return "loopback";
+  return "none";
 }
 
 function renderNetChip(chatId) {
   const panel = chatPanel(chatId);
   const btn = panel?.querySelector('[data-role="net"]');
   if (!btn) return;
-  const on = !!chatState(chatId).chat?.network;
-  btn.classList.toggle("on", on);
-  btn.replaceChildren(el("span", { text: on ? "network on" : "no network" }));
-  btn.title = (on
-    ? "Shell containers CAN reach the network in this chat — click to turn off"
-    : "Shell containers run with --network=none — click to allow network")
-    + "  (Ctrl+Shift+N)";
+  const mode = netMode(chatState(chatId).chat?.network);
+  btn.classList.toggle("on", mode === "on");
+  btn.classList.toggle("loop", mode === "loopback");
+  btn.replaceChildren(el("span", {
+    text: mode === "on" ? "network on"
+      : mode === "loopback" ? "loopback only" : "no network" }));
+  btn.title = mode === "on"
+    ? "Shell containers CAN reach the network - click for no network"
+    : mode === "loopback"
+      ? "Shell containers reach ONLY the host's 127.0.0.1 services "
+        + "(at 10.0.2.2 inside; podman/slirp4netns) - click for full network"
+      : "Shell containers run with --network=none - click for loopback only";
 }
 
 function activePermMode(cs) {
@@ -534,7 +592,7 @@ function renderContainerPill(chatId) {
     el("span", { html: icon("servers", 12) }),
     el("span", { text: chatContainerName(cs) }),
     el("span", { class: "caret", text: "▾" }));
-  btn.title = "Container for shell commands — "
+  btn.title = "Container for shell commands - "
     + (isDefault ? "the loom.yaml default" : "chosen for this chat");
 }
 
@@ -581,7 +639,7 @@ function renderEnvPill(chatId) {
     el("span", { class: "caret", text: "▾" }));
   btn.title = name
     ? "Environment '" + name + "' is loaded into shell containers"
-    : "No environment — pick one to load its variables (API keys…) into "
+    : "No environment - pick one to load its variables (API keys…) into "
       + "shell containers";
 }
 
@@ -621,7 +679,7 @@ function envMenu(anchor, chatId) {
   });
 }
 
-/* refresh every open chat tab's model button (and a live popup) — called
+/* refresh every open chat tab's model button (and a live popup) - called
  * on config edits and on every server state event */
 function refreshChatModelSelectors() {
   for (const tab of st.tabs) {
@@ -632,14 +690,17 @@ function refreshChatModelSelectors() {
   if (window._modelPopupRefresh) window._modelPopupRefresh();
 }
 
-/* ---------- the model popup: filter, refresh, pick (auto-start), eject ----------
- * Every row also carries a brain button → that model's reasoning submenu:
- * first HOW to configure it (default / reasoning_effort request field /
- * enable_thinking template kwarg / think prompt switch), then the level
- * (low…max — or just on/off where that's all the method accepts). */
+/* ---------- the model menu: provider → model → reasoning ----------
+ * Three layers of submenus, fully keyboard-driven: ↑/↓ walk (starting
+ * from the ACTIVE row), → descends, ← ascends, Enter picks, Esc closes.
+ * Models come LIVE from each provider's API (cached from the last probe;
+ * opening a provider re-pulls its list). Every model row also carries a
+ * brain button → that model's reasoning submenu: first HOW to configure
+ * it (default / reasoning_effort request field / enable_thinking template
+ * kwarg / think prompt switch), then the level. */
 const REASONING_METHODS = [
   { id: "effort", name: "reasoning_effort",
-    sub: "graded — Qwen 3.8: off/low/medium/xhigh · gpt-oss: low/medium/high",
+    sub: "graded - llama.cpp: any string · ninfer: off/low/medium/xhigh",
     levels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"] },
   { id: "template", name: "enable_thinking",
     sub: "boolean template kwarg (Qwen3-style) · on/off",
@@ -655,7 +716,12 @@ function reasoningLabel(pref) {
 
 function modelMenu(anchor, chatId) {
   let filter = "";
-  let view = { mode: "list" };   // | {mode:"method"|"level", model, method}
+  const provs = (st.config && !st.config.error && st.config.providers) || [];
+  const ep = activeEndpoint(chatState(chatId));
+  // one provider: no point in a one-row first layer - open on its models
+  let view = provs.length === 1
+    ? { mode: "models", prov: provs[0].name }
+    : { mode: "prov" };
   let reasonMap = st.reasoning || {};
   const { menu, close } = popupMenu(anchor, (m) => {
     const filterIn = el("input", {
@@ -666,8 +732,11 @@ function modelMenu(anchor, chatId) {
       if (e.key === "Escape") { e.stopPropagation(); close(); }
     });
     const refreshBtn = el("button", {
-      class: "iconbtn", title: "Re-probe server states", html: icon("refresh", 14),
-      onclick: () => { Api.call("servers_refresh"); },
+      class: "iconbtn", title: "Re-probe providers", html: icon("refresh", 14),
+      onclick: () => {
+        if (view.mode === "models") loadModels(view.prov, true);
+        else Api.call("providers_refresh");
+      },
     });
     m.classList.add("model-popup");   // long model names need the room
     const head = el("div", { class: "popup-head" }, filterIn, refreshBtn);
@@ -675,7 +744,7 @@ function modelMenu(anchor, chatId) {
     m.append(head, list);
     m._list = list;
     m._head = head;
-    setTimeout(() => filterIn.focus(), 0);
+    m._filterIn = filterIn;
   });
   Api.call("reasoning_all").then((r) => {
     if (r.ok) {
@@ -690,69 +759,118 @@ function modelMenu(anchor, chatId) {
     return terms.every((t) => hay.includes(t));
   }
 
-  function render() {
-    menu._head.classList.toggle("hidden", view.mode !== "list");
-    if (view.mode === "list") renderList();
-    else renderReason();
+  /* re-seed the keyboard cursor on the active row after each re-render -
+   * arrows must always start from the highlighted value */
+  function reseed() {
+    menu.querySelectorAll(".popup-item.kbd-sel")
+      .forEach((n) => n.classList.remove("kbd-sel"));
+    menu._kbdSetSel?.(menu.querySelector(".popup-item.sel"));
   }
 
-  function renderList() {
-    const cs = chatState(chatId);
-    const current = chatModelName(cs);
+  function render() {
+    const filterable = view.mode === "models" || view.mode === "prov";
+    menu._head.classList.toggle("hidden", !filterable);
+    menu._back = null;
+    if (view.mode === "prov") renderProviders();
+    else if (view.mode === "models") renderModels();
+    else renderReason();
+    reseed();
+    if (filterable) setTimeout(() => menu._filterIn.focus(), 0);
+  }
+
+  function backRow(list, label, fn) {
+    menu._back = fn;   // ← ascends from anywhere in this layer
+    const row = el("div", { class: "popup-item", onclick: fn },
+      el("span", { class: "pi-name", text: "← " + label }));
+    list.append(row);
+    return row;
+  }
+
+  function renderProviders() {
     const list = menu._list;
     list.replaceChildren();
-    // no models at all: this is the moment to offer the wizard
-    if (!st.config?.models?.length) {
+    if (!provs.length) {
       list.append(
-        el("div", { class: "popup-empty", text: "No models in loom.yaml yet." }),
+        el("div", { class: "popup-empty", text: "No providers in loom.yaml yet." }),
         el("div", { class: "popup-cta" },
           el("button", {
-            class: "btn btn-sm btn-acc", text: "New model…",
-            title: "Find a GGUF and write the loom.yaml entry",
-            onclick: () => { close(); modelWizard(); },
+            class: "btn btn-sm btn-acc", text: "Add provider…",
+            title: "Point Loom at a llama-server or ninfer API",
+            onclick: () => { close(); openTab("servers"); setTimeout(() => addProviderDialog(), 50); },
           })));
       return;
     }
-    const pinnedSet = new Set(st.pins || []);
-    const all = (st.config.models || []).filter((mo) => matches(mo.name));
-    if (!all.length) {
-      list.append(el("div", { class: "popup-empty", text: "No models match the filter." }));
+    for (const p of provs.filter((x) => matches(x.name))) {
+      const stt = st.providers?.[p.name] || {};
+      const row = el("div", {
+        class: "popup-item" + (p.name === ep.provider ? " sel" : ""),
+        "data-submenu": "",
+        onclick: () => { view = { mode: "models", prov: p.name }; filter = ""; menu._filterIn.value = ""; render(); loadModels(p.name); },
+      },
+        el("span", { class: "dot " + providerDot(p.name) }),
+        el("span", { class: "pi-col" },
+          el("span", { class: "pi-name", text: p.name }),
+          el("span", { class: "pi-reason",
+            text: p.type + (p.ssh ? " · ssh " + p.ssh : "")
+              + (stt.state === "ok" ? " · " + (stt.models?.length || 0) + " model(s)"
+                 : stt.state === "error" ? " · unreachable" : "") })),
+        el("span", { class: "caret", text: "▸" }));
+      list.append(row);
+    }
+  }
+
+  const loading = {};   // provName -> in-flight guard (stops retry loops)
+  async function loadModels(provName, force) {
+    if (!force && providerModels(provName).length) return;
+    if (loading[provName]) return;
+    loading[provName] = true;
+    const r = await Api.call("provider_models", provName);
+    delete loading[provName];
+    st.providers = st.providers || {};
+    // an ERROR is a state too - leaving the registry empty made the
+    // empty-list render re-request forever
+    st.providers[provName] = r.ok
+      ? { ...(st.providers[provName] || {}),
+          state: r.data.state, detail: r.data.detail, models: r.data.models }
+      : { ...(st.providers[provName] || {}),
+          state: "error", detail: r.error, models: [] };
+    if (view.mode === "models" && view.prov === provName) render();
+  }
+
+  function renderModels() {
+    const provName = view.prov;
+    const list = menu._list;
+    list.replaceChildren();
+    if (provs.length > 1) {
+      backRow(list, "Providers", () => { filter = ""; menu._filterIn.value = ""; view = { mode: "prov" }; render(); });
+    }
+    const stt = st.providers?.[provName];
+    const models = providerModels(provName).filter((mo) => matches(mo.id));
+    if (!models.length) {
+      list.append(el("div", { class: "popup-empty",
+        text: !stt ? "Asking " + provName + " for its models…"
+          : stt.state === "error" ? (stt.detail || "provider unreachable")
+          : filter ? "No models match the filter."
+          : "The provider lists no models." }));
+      if (!stt) loadModels(provName);
       return;
     }
-    // pinned models float to the top, both groups in loom.yaml order
-    const models = [...all.filter((mo) => pinnedSet.has(mo.id)),
-                    ...all.filter((mo) => !pinnedSet.has(mo.id))];
-    for (const mo of models) {
-      const state = st.servers[mo.id]?.state || "stopped";
-      const busy = ["starting", "loading", "stopping"].includes(state);
-      const up = ["running", "starting", "loading"].includes(state);
-      // no Start button: PICKING a stopped model starts it. A running
-      // model gets an eject — unload it without picking anything else.
-      let act = null;
-      if (up || busy) {
-        act = el("button", {
-          class: "btn btn-sm" + (up ? " btn-danger" : ""),
-          text: busy ? state + "…" : "⏏ Eject",
-          disabled: busy ? "" : null,
-          title: "Eject — stop this server and free its memory",
-        });
-        act.addEventListener("click", (e) => {
-          e.stopPropagation();
-          Api.call("server_stop", mo.id);
-        });
-      }
-      const pref = reasonMap[mo.id];
+    const pinnedSet = new Set(st.pins || []);
+    const ordered = [...models.filter((mo) => pinnedSet.has(modelKey(provName, mo.id))),
+                     ...models.filter((mo) => !pinnedSet.has(modelKey(provName, mo.id)))];
+    for (const mo of ordered) {
+      const key = modelKey(provName, mo.id);
+      const pref = reasonMap[key];
+      const isCurrent = provName === ep.provider && mo.id === ep.model;
       const brain = el("button", {
         class: "iconbtn brain" + (pref ? " on" : ""),
-        title: "Reasoning — " + reasoningLabel(pref) + " · click to configure",
+        title: "Reasoning - " + reasoningLabel(pref)
+          + " · click (or →) to configure",
         html: icon("brain", 14),
       });
-      brain.addEventListener("click", (e) => {
-        e.stopPropagation();
-        view = { mode: "method", model: mo };
-        render();
-      });
-      const isPin = pinnedSet.has(mo.id);
+      const openReason = () => { view = { mode: "method", prov: provName, model: mo.id }; render(); };
+      brain.addEventListener("click", (e) => { e.stopPropagation(); openReason(); });
+      const isPin = pinnedSet.has(key);
       const pinBtn = el("button", {
         class: "iconbtn pin" + (isPin ? " on" : ""),
         title: isPin ? "Unpin" : "Pin to the top",
@@ -760,74 +878,73 @@ function modelMenu(anchor, chatId) {
       });
       pinBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
-        const r = await Api.call("pin_set", mo.id, !isPin);
+        const r = await Api.call("pin_set", key, !isPin);
         if (!r.ok) { toast(r.error, "err"); return; }
         st.pins = r.data.pins || [];
-        renderList();
-        if (st.activeTab === "servers") renderServersTab();
+        render();
       });
       const row = el("div", {
-        class: "popup-item" + (mo.name === current ? " sel" : ""),
+        class: "popup-item" + (isCurrent ? " sel" : ""),
         onclick: () => {
           const cs2 = chatState(chatId);
-          cs2.chat.model = mo.name;
-          Api.call("chat_set_model", chatId, mo.name)
+          cs2.chat.provider = provName;
+          cs2.chat.model = mo.id;
+          Api.call("chat_set_model", chatId, provName, mo.id)
             .then(() => refreshChatSilently(chatId));   // nCtx changed
-          // picking a model that isn't running means the user wants it
-          // running — start it (the host's limit ejects others first)
-          if (!up && !busy) {
-            Api.call("server_start", mo.id);
-            toast("Starting " + mo.name + "…", "ok");
-          }
           renderModelButton(chatId);
           close();
         },
       },
-        el("span", { class: "dot " + state }),
+        el("span", { class: "dot " + providerDot(provName) }),
         el("span", { class: "pi-col" },
-          el("span", { class: "pi-name", text: mo.name, title: mo.model }),
+          el("span", { class: "pi-name", text: mo.id }),
           pref ? el("span", { class: "pi-reason",
             text: "reasoning · " + reasoningLabel(pref) }) : null),
-        el("span", { class: "pi-sub", text: mo.host ? "ssh" : "" }),
-        pinBtn, brain, act);
+        el("span", { class: "pi-sub",
+          text: mo.ctx ? fmtTok(mo.ctx) + " ctx" : "" }),
+        pinBtn, brain);
+      row._submenu = openReason;   // → on a model row opens its reasoning
       list.append(row);
     }
   }
 
   /* the reasoning submenu, two layers deep */
   function renderReason() {
-    const mo = view.model;
-    const pref = reasonMap[mo.id] || null;
+    const provName = view.prov;
+    const modelId = view.model;
+    const key = modelKey(provName, modelId);
+    const pref = reasonMap[key] || null;
     const list = menu._list;
     list.replaceChildren();
     const item = (attrs, ...kids) => {
-      const row = el("div", { class: "popup-item" + (attrs.sel ? " sel" : "") }, ...kids);
+      const row = el("div", {
+        class: "popup-item" + (attrs.sel ? " sel" : ""),
+        ...(attrs.submenu ? { "data-submenu": "" } : {}),
+      }, ...kids);
       row.addEventListener("click", attrs.onclick);
       list.append(row);
       return row;
     };
-    const back = (label, fn) => item({ onclick: fn },
-      el("span", { class: "pi-name", text: "← " + label }));
     const setPref = async (p) => {
-      const res = await Api.call("reasoning_set", mo.id, p);
+      const res = await Api.call("reasoning_set", key, p);
       if (!res.ok) { toast(res.error, "err"); return; }
       reasonMap = st.reasoning = res.data.reasoning || {};
-      view = { mode: "list" };
+      view = { mode: "models", prov: provName };
       render();
       refreshChatModelSelectors();   // every composer button shows the level
     };
 
     if (view.mode === "method") {
       list.append(el("div", { class: "popup-empty",
-        text: "Reasoning — " + mo.name }));
-      back("All models", () => { view = { mode: "list" }; render(); });
+        text: "Reasoning - " + modelId }));
+      backRow(list, "Models", () => { view = { mode: "models", prov: provName }; render(); });
       item({ sel: !pref, onclick: () => setPref(null) },
         el("span", { class: "pi-name", text: "Default" }),
-        el("span", { class: "pi-sub", text: "send nothing — server decides" }));
+        el("span", { class: "pi-sub", text: "send nothing - server decides" }));
       for (const meth of REASONING_METHODS) {
         item({
-          sel: pref?.method === meth.id,
-          onclick: () => { view = { mode: "level", model: mo, method: meth }; render(); },
+          sel: pref?.method === meth.id, submenu: true,
+          onclick: () => { view = { mode: "level", prov: provName, model: modelId, method: meth }; render(); },
         },
           el("span", { class: "pi-name", text: meth.name }),
           el("span", { class: "pi-sub",
@@ -839,8 +956,8 @@ function modelMenu(anchor, chatId) {
     // level layer
     const meth = view.method;
     list.append(el("div", { class: "popup-empty",
-      text: meth.name + " — " + mo.name }));
-    back("Back", () => { view = { mode: "method", model: mo }; render(); });
+      text: meth.name + " - " + modelId }));
+    backRow(list, "Back", () => { view = { mode: "method", prov: provName, model: modelId }; render(); });
     for (const lv of meth.levels) {
       item({
         sel: pref?.method === meth.id && pref?.level === lv,
@@ -851,8 +968,11 @@ function modelMenu(anchor, chatId) {
   }
 
   render();
-  // live ● updates while open — but never stomp the reasoning submenu
-  window._modelPopupRefresh = () => { if (view.mode === "list") render(); };
+  if (view.mode === "models") loadModels(view.prov);
+  // live ● updates while open - but never stomp the reasoning submenu
+  window._modelPopupRefresh = () => {
+    if (view.mode === "prov" || view.mode === "models") render();
+  };
   menu._onclose = () => { window._modelPopupRefresh = null; };
 }
 
@@ -886,11 +1006,7 @@ function permMenu(anchor, chatId) {
 }
 
 /* ---------- context usage chip + hover breakdown ---------- */
-function fmtTok(n) {
-  n = Number(n);
-  if (!Number.isFinite(n) || n < 0) n = 0;
-  return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(Math.round(n));
-}
+/* fmtTok lives in util.js - the popped-out diag window needs it too */
 
 /* a tiny donut: how full the context is, at a glance */
 function ctxRingHtml(pct) {
@@ -917,7 +1033,7 @@ function renderCtxChip(chatId) {
   const pct = Number.isFinite(Number(bd.pct)) ? Number(bd.pct) : null;
   const used = Number(bd.usedTokens ?? bd.estTokens) || 0;
   const nctx = Number(bd.nCtx) || 0;
-  // both readings at once — tokens / window (percent) — plus the ring;
+  // both readings at once - tokens / window (percent) - plus the ring;
   // no toggle, nothing to remember between sessions
   const label = nctx
     ? fmtTok(used) + " / " + fmtTok(nctx)
@@ -929,7 +1045,35 @@ function renderCtxChip(chatId) {
   if (pct != null) btn.insertAdjacentHTML("beforeend", ctxRingHtml(pct));
 }
 
-/* the one open ctx card (hover-only) — closed on tab switches */
+/* what the NEXT send will cost in prompt processing, from the measured
+ * prefill speed of this chat's own server. Two figures: the cached case
+ * (only what grew since last turn gets processed - the normal case) and
+ * the cold case (a full reprocess: cache evicted, model swapped). Both
+ * honest estimates, both marked ~. */
+function nextPromptRows(bd) {
+  const speed = Number(bd.promptSpeed) || 0;
+  const used = Number(bd.usedTokens ?? bd.estTokens) || 0;
+  if (!speed || !used) return [];
+  const fresh = Math.max(0, (Number(bd.estTokens) || 0)
+    - (Number(bd.lastUsedTokens) || 0));
+  const fmtS = (tok) => {
+    const s = tok / speed;
+    return s < 1 ? "<1s" : s < 90 ? "~" + Math.ceil(s) + "s"
+      : "~" + Math.round(s / 60) + "m";
+  };
+  const row = (k, v) => el("div", { class: "ctx-row" },
+    el("span", { text: k }), el("b", { text: v }));
+  return [
+    el("div", { class: "ctx-sep2" }),
+    row("Measured prefill speed", Math.round(speed) + " tok/s"),
+    row("Next prompt (cache warm)",
+      "~" + fmtTok(fresh) + " new tok · " + fmtS(fresh)),
+    row("Next prompt (cache cold)",
+      "~" + fmtTok(used) + " tok · " + fmtS(used)),
+  ];
+}
+
+/* the one open ctx card (hover-only) - closed on tab switches */
 let _ctxCardClose = null;
 function closeCtxCard() {
   if (_ctxCardClose) { const f = _ctxCardClose; _ctxCardClose = null; f(); }
@@ -958,18 +1102,22 @@ function wireCtxHover(btn, chatId) {
     _ctxCardClose = destroy;
     card = el("div", { class: "popup ctx-card" });
     const row = (k, v) => {
-      let s = String(v ?? "—");
-      if (s === "null" || s === "undefined" || s === "NaN") s = "—";
+      let s = String(v ?? "·");
+      if (s === "null" || s === "undefined" || s === "NaN") s = "·";
       return el("div", { class: "ctx-row" },
         el("span", { text: k }), el("b", { text: s }));
     };
     const p = bd.parts || {};
     const pct = Number.isFinite(Number(bd.pct)) ? Number(bd.pct) : null;
     const nctx = Number(bd.nCtx) || 0;
-    // NATIVE append() stringifies null into a literal "null" TEXT NODE —
+    // NATIVE append() stringifies null into a literal "null" TEXT NODE -
     // the source of the phantom nulls. Conditional children must be
     // filtered before they ever reach append().
-    card.append(...[
+    // The ROWS live in their own scrollable region: long chats grow the
+    // breakdown past the popup's max-height, and without this the
+    // overflow shoved the action buttons off the card entirely.
+    const rowsBox = el("div", { class: "ctx-rows" });
+    rowsBox.append(...[
       row("System prompt", fmtTok(p.system)),
       bd.compacted ? row("Compacted summary", fmtTok(p.compacted)) : null,
       row("Your messages", fmtTok(p.user)),
@@ -981,10 +1129,10 @@ function wireCtxHover(btn, chatId) {
       el("div", { class: "ctx-sep2" }),
       row("Estimated total", fmtTok(bd.estTokens)),
       row("Last turn (actual)",
-        bd.lastUsedTokens ? fmtTok(bd.lastUsedTokens) : "— (no turns yet)"),
+        bd.lastUsedTokens ? fmtTok(bd.lastUsedTokens) : "- (no turns yet)"),
       row("Context window", nctx
         ? fmtTok(nctx) + (pct != null ? ` (${pct.toFixed(1)}% used)` : "")
-        : "unknown — model not in loom.yaml"),
+        : "unknown - model not in loom.yaml"),
       el("div", { class: "ctx-sep2" }),
       row("Auto-compaction", bd.auto
         ? "on at " + Math.round((Number(bd.threshold) || 0.8) * 100) + "%"
@@ -994,7 +1142,9 @@ function wireCtxHover(btn, chatId) {
         "~" + fmtTok(bd.turnAvg) + "/turn · peak " + fmtTok(bd.turnMax)) : null,
       bd.auto && bd.headroom ? row("Reserved headroom",
         fmtTok(bd.headroom)) : null,
+      ...nextPromptRows(bd),
     ].filter(Boolean));
+    card.append(rowsBox);
     card.append(el("div", { class: "ctx-actions" },
         el("button", {
           class: "btn btn-sm", text: "Diagnostics",
@@ -1012,6 +1162,10 @@ function wireCtxHover(btn, chatId) {
         })));
     document.body.append(card);
     const a = btn.getBoundingClientRect();
+    // the card sits ABOVE the chip: let it use that space (overriding
+    // the generic popup cap), never more - the rows scroll if a very
+    // long chat still can't fit, and the buttons always stay on board
+    card.style.maxHeight = Math.max(140, Math.min(640, a.top - 16)) + "px";
     const r = card.getBoundingClientRect();
     card.style.left = Math.max(8, Math.min(a.right - r.width,
       window.innerWidth - r.width - 8)) + "px";
@@ -1056,7 +1210,7 @@ function renderSendButton(chatId) {
   b.title = busy
     ? (cs.running ? "Stop generating  (Esc)" : "Cancel compaction  (Esc)")
     : "Send  (Enter)";
-  // only the stop state earns a chip — Enter-to-send is placeholder lore
+  // only the stop state earns a chip - Enter-to-send is placeholder lore
   if (busy) setHotkey(b, "Esc");
   else b.removeAttribute("data-hotkey");
   renderComposerHints(chatId);
@@ -1069,9 +1223,9 @@ function renderComposerHints(chatId) {
   const cs = chatState(chatId);
   const waiting = Object.values(cs.tools || {}).some((t) => t.state === "waiting");
   panel._input.placeholder = waiting
-    ? "A tool call is waiting — Ctrl+Enter allows it, Ctrl+Esc denies it."
+    ? "A tool call is waiting - Ctrl+Enter allows it, Ctrl+Esc denies it."
     : cs.running
-      ? "Generating — Esc stops it. Enter queues your next message."
+      ? "Generating - Esc stops it. Enter queues your next message."
       : "Ask anything…  (Enter to send · Shift+Enter for a newline · Ctrl+I focuses here)";
 }
 
@@ -1089,32 +1243,66 @@ const CHURN_CANCEL_PHRASES = [
   "Yanked the plug after", "Cut short after", "Reined in after",
   "Interrupted mid-thought after", "Called off after",
 ];
+/* the loop retried an answerless turn 3 times and got nowhere - honesty
+ * with a shrug */
+const CHURN_FAIL_PHRASES = [
+  "Gave up after", "Threw in the towel after", "Ran out of steam after",
+  "Thought itself into a corner for", "Waved the white flag after",
+  "Lost the thread after",
+];
 
-function mkChurn(cs, cancelled) {
+function mkChurn(cs, kind) {
   if (!cs.respT0) return null;
   const ms = performance.now() - cs.respT0;
   cs.respT0 = null;
-  if (ms < 1000) return null;   // instant turns don't need a eulogy
-  const pool = cancelled ? CHURN_CANCEL_PHRASES : CHURN_PHRASES;
+  // a failed run deserves its eulogy even when it died fast
+  if (ms < 1000 && kind !== "fail") return null;
+  const pool = kind === "cancel" ? CHURN_CANCEL_PHRASES
+    : kind === "fail" ? CHURN_FAIL_PHRASES : CHURN_PHRASES;
   const phrase = pool[Math.floor(Math.random() * pool.length)];
-  return { text: phrase + " " + fmtDur(Math.round(ms)) + "." };
+  return { text: phrase + " " + fmtDur(Math.round(ms)) + "."
+    + (kind === "fail"
+      ? " The model kept ending without an answer - try Retry, or a "
+        + "different model." : "") };
 }
 
 /* ---------- live-stream liveness ----------
  * A token count rides after the streaming cursor and ticks up with every
  * delta (thinking included). Its heartbeat IS the health indicator: a
- * frozen number means the stream stalled — no more wondering. */
+ * frozen number means the stream stalled - no more wondering. */
 function liveTok(cs) {
   return Math.round(((cs.live?.text || "").length
     + (cs.live?.think || "").length) / 4);
 }
 
 /* before the first token the server is PREFILLING (reading the whole
- * prompt) — show ticking elapsed time so slow-to-first-token models
- * read as busy, not broken */
+ * prompt). Servers speaking `return_progress` stream real progress -
+ * tokens processed, cache reuse, and enough to compute an ETA; others
+ * get a ticking clock so slow-to-first-token reads busy, not broken.
+ * While generating, per-chunk timings put a LIVE tok/s next to the
+ * count. */
 function liveCountText(cs) {
   const n = liveTok(cs);
-  if (n > 0) return "~" + fmtTok(n) + " tok";
+  if (n > 0) {
+    const tps = cs.liveTimings?.predicted_per_second;
+    return "~" + fmtTok(n) + " tok"
+      + (tps ? " · " + (tps >= 100 ? Math.round(tps) : tps.toFixed(1)) + " tok/s" : "");
+  }
+  const p = cs.progress;
+  if (p && p.total > 0 && p.processed != null) {
+    const cache = Math.min(p.cache || 0, p.total);
+    const done = Math.max(0, p.processed - cache);
+    const todo = Math.max(1, p.total - cache);
+    const pct = Math.min(100, Math.round(100 * done / todo));
+    let eta = "";
+    if ((p.time_ms || 0) > 400 && done > 0 && done < todo) {
+      const left = (todo - done) / (done / (p.time_ms / 1000));
+      eta = " · ~" + (left >= 90 ? Math.round(left / 60) + "m" : Math.ceil(left) + "s")
+        + " left";
+    }
+    return "reading prompt " + pct + "% - " + fmtTok(done) + "/" + fmtTok(todo)
+      + " tok" + (cache ? " (+" + fmtTok(cache) + " cached)" : "") + eta;
+  }
   const secs = cs.turnT0
     ? Math.max(0, (performance.now() - cs.turnT0) / 1000) : 0;
   return "reading prompt… " + secs.toFixed(0) + "s";
@@ -1135,7 +1323,7 @@ function tickLiveCount(chatId) {
   if (n) n.textContent = liveCountText(cs);
 }
 
-/* the prefill clock only moves if something re-renders it — a light
+/* the prefill clock only moves if something re-renders it - a light
  * ticker keeps the active chat's zero-token phase visibly alive */
 let _liveTicker = null;
 function ensureLiveTicker() {
@@ -1149,18 +1337,20 @@ function ensureLiveTicker() {
 }
 
 /* EAGER cancel (the stop button and Esc): the user is rejecting the
- * output — the UI stops NOW and stale events are discarded while the
+ * output - the UI stops NOW and stale events are discarded while the
  * backend unwinds. Returns false when nothing was running. */
 function stopChatGeneration(chatId) {
   const cs = chatState(chatId);
   if (!cs.running && !cs.compacting) return false;
   Api.call("chat_stop", chatId);
-  cs.churn = mkChurn(cs, true) || cs.churn;
+  cs.churn = mkChurn(cs, "cancel") || cs.churn;
   cs.discarding = true;
   cs.running = false;
   cs.compacting = false;
   cs.compactTok = 0;
   cs.live = null;
+  cs.progress = null;
+  cs.liveTimings = null;
   cs.tools = {};
   renderSendButton(chatId);
   renderChatThread(chatId);
@@ -1176,7 +1366,7 @@ function waitingToolId(chatId) {
   return null;
 }
 
-/* Ctrl+I from anywhere: land in a message input — the active chat's, or
+/* Ctrl+I from anywhere: land in a message input - the active chat's, or
  * the first open chat tab's */
 function focusMessageInput() {
   let tab = tabById(st.activeTab);
@@ -1204,7 +1394,7 @@ function renderChatThread(chatId) {
   if (!panel || !cs.chat) return;
   const thread = panel.querySelector('[data-role="thread"]');
   // copying from the thread must survive streaming: never rebuild the DOM
-  // out from under a live selection — retry once it's gone
+  // out from under a live selection - retry once it's gone
   if (selectionWithin(thread)) {
     clearTimeout(cs._selRetry);
     cs._selRetry = setTimeout(() => renderChatThread(chatId), 1000);
@@ -1215,7 +1405,7 @@ function renderChatThread(chatId) {
 
   const msgs = cs.chat.messages || [];
   // windowed history: only the fetched tail is in msgs; older messages
-  // load on demand (keeps 100k-message chats usable — render and bridge
+  // load on demand (keeps 100k-message chats usable - render and bridge
   // transfer stay O(window))
   const hidden = Math.max(0, (cs.chat.totalMessages ?? msgs.length) - msgs.length);
   if (hidden > 0) {
@@ -1252,7 +1442,7 @@ function renderChatThread(chatId) {
         const row = statsRow(m);
         const calls = new Set((m.tool_calls || []).map((c) => c.id));
         if (calls.size) {
-          // this row will land under tool cards — align it with THEIR
+          // this row will land under tool cards - align it with THEIR
           // centered, narrower column instead of the message nudge
           row.classList.add("after-tools");
           pendingStats = { row, calls };
@@ -1264,7 +1454,8 @@ function renderChatThread(chatId) {
       thread.append(toolCardEl(chatId, {
         callId: m.tool_call_id, tool: m.name,
         args: argsOfCall(msgs, i, m.tool_call_id),
-        state: m.ok === false ? "failed" : "done",
+        state: m.cancelled ? "cancelled"
+          : m.ok === false ? "failed" : "done",
         result: m.content,
       }));
       if (pendingStats) {
@@ -1274,6 +1465,9 @@ function renderChatThread(chatId) {
     } else if (m.role === "compact") {
       flushStats();
       thread.append(compactCardEl(chatId, m, i));
+    } else if (m.role === "artifact") {
+      flushStats();
+      thread.append(artifactMsgEl(chatId, m));
     }
   }
   if (cs.compacting) {
@@ -1289,7 +1483,7 @@ function renderChatThread(chatId) {
       cancelBtn));
   }
 
-  // live streaming block — the cursor FOLLOWS the phases, in order:
+  // live streaming block - the cursor FOLLOWS the phases, in order:
   //   prefill  → a bare cursor line (no header yet; elapsed time ticks)
   //   thinking → the thought entry, EXPANDED, cursor inside it
   //   message  → thought collapses, the model-name header appears, and
@@ -1299,7 +1493,7 @@ function renderChatThread(chatId) {
     const inMessage = !!cs.live.text;
     const inThink = !!cs.live.think && !inMessage;
     if (!cs.live.think && !cs.live.text) {
-      // prefill: nothing exists yet — just the heartbeat
+      // prefill: nothing exists yet - just the heartbeat
       thread.append(el("div", { class: "msg live-wait" },
         el("span", { class: "cursor" }), liveCountEl(cs)));
     }
@@ -1314,7 +1508,7 @@ function renderChatThread(chatId) {
       if (inThink) t.append(el("span", { class: "cursor" }), liveCountEl(cs));
       thread.append(el("div", { class: "msg think-entry" },
         el("div", { class: "think-toggle",
-          text: inThink ? "▾ " + name + " — thinking…"
+          text: inThink ? "▾ " + name + " - thinking…"
                         : "▸ " + name + " thought for a bit" }),
         t));
     }
@@ -1337,8 +1531,11 @@ function renderChatThread(chatId) {
     }
   }
   // a turn whose tool calls are still executing: its stats land after
-  // the live cards — never before the results they belong with
+  // the live cards - never before the results they belong with
   flushStats();
+  if (cs.running && cs.retryNote) {
+    thread.append(el("div", { class: "sysnote", text: cs.retryNote }));
+  }
   if (cs.error) {
     thread.append(el("div", { class: "sysnote err", text: cs.error }));
   }
@@ -1353,9 +1550,9 @@ function renderChatThread(chatId) {
     const last = msgs[msgs.length - 1];
     let label = null;
     if (last.role === "user" || last.role === "tool") {
-      label = "↻ Retry — generate a response";
+      label = "↻ Retry - generate a response";
     } else if (last.role === "assistant" && last.stopped) {
-      label = "→ Continue — the response stopped early";
+      label = "→ Continue - the response stopped early";
     }
     if (label) {
       thread.append(el("div", { class: "chat-resume" },
@@ -1374,11 +1571,11 @@ function renderChatThread(chatId) {
       el("div", { text: "Attach images or folders below; shell commands run sandboxed in a container." })));
   }
   if (stick) thread.scrollTop = thread.scrollHeight;
-  // an explicit position (tab switch, session restore) beats sticking —
+  // an explicit position (tab switch, session restore) beats sticking -
   // the user was comparing chats mid-scroll; put them back exactly there.
   // Only consumable while visible: a hidden panel can't scroll.
   if (cs.restoreScroll != null && thread.clientHeight) {
-    // CSSOM trap: assigning Infinity to scrollTop is normalized to 0 —
+    // CSSOM trap: assigning Infinity to scrollTop is normalized to 0 -
     // the "restore to bottom" sentinel must become a real pixel value
     thread.scrollTop = Number.isFinite(cs.restoreScroll)
       ? cs.restoreScroll : thread.scrollHeight;
@@ -1475,7 +1672,7 @@ function userMsgEl(m) {
 
 /* the thought as a standalone entry: model name in its header, its own
  * estimated stats revealed with the text. Expanded/collapsed survives
- * redraws AND tab switches — tracked in chat state like tool cards. */
+ * redraws AND tab switches - tracked in chat state like tool cards. */
 function thinkEntryEl(chatId, m, model, idx) {
   const openMap = chatState(chatId).thinkOpen
     || (chatState(chatId).thinkOpen = {});
@@ -1483,7 +1680,7 @@ function thinkEntryEl(chatId, m, model, idx) {
   const isOpen = !!openMap[key];
   const name = model || "assistant";
   const label = (open) => (open ? "▾ " : "▸ ") + name
-    + (open ? " — thinking" : " thought for a bit");
+    + (open ? " - thinking" : " thought for a bit");
   const wrap = el("div", { class: "msg think-entry" });
   const think = el("div", {
     class: "think" + (isOpen ? "" : " collapsed"), text: m.thinking,
@@ -1495,7 +1692,7 @@ function thinkEntryEl(chatId, m, model, idx) {
     class: "think-stats" + (isOpen ? "" : " hidden"),
     text: "~" + fmtTok(tokens) + " tok (estimated)",
     title: "Estimated size of the thought (characters ÷ 4). The server "
-      + "reports speed/time per TURN, not per part — those live in the "
+      + "reports speed/time per TURN, not per part - those live in the "
       + "stats row at the end of the turn.",
   });
   const tog = el("div", {
@@ -1531,7 +1728,7 @@ function assistantMsgEl(chatId, m, model, idx) {
  * marked emits <pre><code class="language-x">; decorate each block with
  * the editor's tokenizer (same colors as everywhere else) and a hover
  * Copy button. Skipped for very large live streams (O(n²) re-highlight
- * per delta) — those get their final pass when the message persists. */
+ * per delta) - those get their final pass when the message persists. */
 const ENHANCE_LIVE_MAX = 20000;
 
 function enhanceCodeBlocks(root) {
@@ -1645,44 +1842,99 @@ function toolArgsObj(t) {
   return {};
 }
 
+/* ---------- shell cards: like edits/writes, a special-cased preview ----------
+ * The command renders as bash (syntax-highlighted, every line - split
+ * lines and heredocs stay readable), never as JSON. `$` marks where the
+ * command starts. */
+function shellCmdEl(cmd, maxLines) {
+  const wrap = el("div", { class: "code-prev tool-cmd" });
+  const lines = String(cmd ?? "").replace(/\n$/, "").split("\n");
+  const cap = maxLines || PREV_MAX_LINES;
+  const state = { inBlock: false };
+  lines.slice(0, cap).forEach((line, i) => {
+    wrap.append(_codeLineEl(line, "sh", state, i === 0 ? "$" : ""));
+  });
+  if (lines.length > cap) {
+    wrap.append(el("div", { class: "cl more" },
+      el("span", { class: "ln", text: "" }),
+      el("span", { class: "lc",
+        text: "… " + (lines.length - cap) + " more lines" })));
+  }
+  return wrap;
+}
+
+/* the END of a shell result - the part that says what actually happened.
+ * Shown on the card even when collapsed. The leading "exit N" line is the
+ * state chip's job, so it leaves the tail (unless it's all there is). */
+function shellTail(result, n = 3) {
+  const lines = String(result ?? "").replace(/\s+$/, "").split("\n");
+  if (!lines.length || !lines[0]) return "";
+  const body = lines.filter((l, i) =>
+    !(i === 0 && /^exit -?\d+/.test(l))
+    && !/^\[(cancelled|timed out)\]$/.test(l));
+  const pick = (body.length ? body : lines).slice(-n);
+  return pick.map((l) => (l.length > 200 ? l.slice(0, 200) + "…" : l))
+    .join("\n");
+}
+
 function toolCardEl(chatId, t) {
+  // three resolved outcomes: ok / failed / cancelled (plus denied for a
+  // declined permission) - a cancelled command must never read as "ok"
   const stateTxt = {
     announced: "…", waiting: "waiting for permission", running: "running…",
-    done: "ok", failed: "failed", denied: "denied",
+    done: "ok", failed: "failed", denied: "denied", cancelled: "cancelled",
   }[t.state] || t.state;
   const a = toolArgsObj(t);
   const isFileTool = ["read_file", "edit_file", "write_file"].includes(t.tool);
+  const isShell = t.tool === "shell";
   // resolved cards collapse to a one-line preview; clicking toggles.
   // Active cards (waiting/running) always render in full.
-  const resolved = ["done", "failed", "denied"].includes(t.state);
+  const resolved = ["done", "failed", "denied", "cancelled"].includes(t.state);
   const open = !resolved || !!chatState(chatId).toolsOpen[t.callId];
-  const summary = String(
-    a.path || a.query || a.command || "").split("\n")[0].slice(0, 120);
+  // shell skips the head summary - its command renders in full below
+  const summary = isShell ? "" : String(
+    a.path || a.query || "").split("\n")[0].slice(0, 120);
   const card = el("div", {
     class: "tool-card " + (open ? "open" : "closed") + (resolved ? " resolved" : ""),
   });
+  const stateCls = t.state === "failed" || t.state === "denied" ? " err"
+    : t.state === "cancelled" ? " cancel"
+    : t.state === "done" ? " ok" : "";
   const head = el("div", { class: "tool-head" + (resolved ? " toggleable" : "") },
     resolved ? el("span", { class: "tool-chevron", text: open ? "▾" : "▸" }) : null,
     el("span", { html: icon("gear", 13) }),
     el("span", { class: "tool-name", text: t.tool || "tool" }),
-    el("span", {
-      class: "tool-state" + (t.state === "failed" || t.state === "denied" ? " err" : t.state === "done" ? " ok" : ""),
-      text: stateTxt,
-    }));
+    el("span", { class: "tool-state" + stateCls, text: stateTxt }));
   if (summary) head.append(el("span", { class: "tool-path", text: summary, title: summary }));
-  if (resolved) {
-    head.addEventListener("click", () => {
-      const openMap = chatState(chatId).toolsOpen;
-      if (openMap[t.callId]) delete openMap[t.callId];
-      else openMap[t.callId] = true;
-      renderChatThread(chatId);
-    });
-  }
+  const toggleCard = () => {
+    const openMap = chatState(chatId).toolsOpen;
+    if (openMap[t.callId]) delete openMap[t.callId];
+    else openMap[t.callId] = true;
+    renderChatThread(chatId);
+  };
+  if (resolved) head.addEventListener("click", toggleCard);
   card.append(head);
+  if (isShell && a.command) {
+    // even collapsed: the command (capped) + the END of its output -
+    // what ran and how it ended, always visible at a glance
+    const cmd = shellCmdEl(a.command, open ? 0 : 6);
+    card.append(cmd);
+    if (!open) {
+      cmd.classList.add("toggleable");
+      cmd.addEventListener("click", toggleCard);
+      const tail = shellTail(t.output || t.result);
+      if (tail) {
+        const tl = el("div", { class: "tool-tail toggleable", text: tail });
+        tl.addEventListener("click", toggleCard);
+        card.append(tl);
+      }
+      return card;
+    }
+  }
   if (!open) return card;   // the minimal preview row is the whole card
 
-  // file tools show previews, not raw JSON args
-  if (!isFileTool) {
+  // file tools and shell show previews, not raw JSON args
+  if (!isFileTool && !isShell) {
     const args = typeof t.args === "string" ? t.args : JSON.stringify(t.args ?? {}, null, 1);
     if (args && args !== "{}") {
       card.append(el("div", { class: "tool-args", text: args }));
@@ -1720,7 +1972,41 @@ function toolCardEl(chatId, t) {
   return card;
 }
 
-/* compaction marker: everything above it left the model's context — the
+/* artifact delivery: a timeline entry for WHEN the model handed files
+ * over. It keeps its own open/save buttons, so a dismissed pill loses
+ * nothing - the delivery record stays right here in the history. */
+function artifactMsgEl(chatId, m) {
+  const items = Array.isArray(m.items) ? m.items : [];
+  const card = el("div", { class: "art-msg" },
+    el("div", { class: "art-msg-head" },
+      el("span", { html: icon("box", 13) }),
+      el("span", { text: "artifact" + (items.length > 1 ? "s" : "")
+        + " delivered" }),
+      tago(m.ts)));
+  for (const it of items) {
+    card.append(el("div", { class: "art-msg-row" },
+      el("span", { html: icon(it.dir ? "box" : "file", 12) }),
+      el("button", {
+        class: "art-msg-name", text: it.name,
+        title: "Open in the preview window",
+        onclick: () => { Api.call("artifact_open", chatId, it.name); },
+      }),
+      el("span", { class: "arc-meta",
+        text: (it.dir ? "folder" : fmtBytes(it.bytes)) }),
+      el("button", {
+        class: "btn btn-sm", text: it.dir ? "zip…" : "save…",
+        title: it.dir ? "Save this folder as a zip…" : "Save this file…",
+        onclick: async () => {
+          const res = await Api.call("artifact_save", chatId, it.name);
+          if (!res.ok) { toast(res.error, "err"); return; }
+          if (res.data.saved) toast("Saved " + res.data.saved, "ok");
+        },
+      })));
+  }
+  return card;
+}
+
+/* compaction marker: everything above it left the model's context - the
  * collapsed row says so; expanding shows the summary that replaced it */
 function compactCardEl(chatId, m, idx) {
   const key = "compact:" + (m.ts || idx);
@@ -1761,25 +2047,37 @@ function statsRow(m) {
   const totalMs = (t.prompt_ms || 0) + (t.predicted_ms || 0);
   if (totalMs > 0) {
     row.append(stat("took", fmtDur(Math.round(totalMs)),
-      "Total turn time — prompt processing ("
+      "Total turn time - prompt processing ("
       + fmtDur(Math.round(t.prompt_ms || 0)) + ") plus generation ("
       + fmtDur(Math.round(t.predicted_ms || 0)) + ")"));
   }
   if (t.predicted_per_second) {
     row.append(stat("tok/s", t.predicted_per_second.toFixed(1),
-      "Generation speed — output tokens per second for this turn"));
+      "Generation speed - output tokens per second for this turn"));
+  }
+  if (t.prompt_per_second && t.prompt_n) {
+    row.append(stat("pp tok/s", Math.round(t.prompt_per_second),
+      "Prompt processing speed - how fast the server read the "
+      + t.prompt_n + " NEW prompt tokens this turn (cached tokens are "
+      + "free and not counted here)"));
   }
   if (m.ttftMs) {
     row.append(stat("ttft", (m.ttftMs / 1000).toFixed(2) + "s",
-      "Time to first token — how long the server processed the prompt "
+      "Time to first token - how long the server processed the prompt "
       + "before anything streamed back"));
   }
   if (u.prompt_tokens != null) {
-    row.append(stat("prompt", u.prompt_tokens,
-      "Prompt tokens — the full context the model read this turn "
-      + "(system prompt, history, tool results, tool definitions)"));
+    const cached = Number(t.cache_n
+      ?? u.prompt_tokens_details?.cached_tokens) || 0;
+    row.append(stat("prompt",
+      fmtTok(u.prompt_tokens) + (cached ? " (" + Math.round(
+        100 * cached / Math.max(1, u.prompt_tokens)) + "% cached)" : ""),
+      "Prompt tokens - the full context the model read this turn "
+      + "(system prompt, history, tool results, tool definitions)"
+      + (cached ? ". " + cached + " of them were reused from the "
+        + "server's KV cache - only the rest cost prefill time" : "")));
   }
-  const outTip = "Output tokens — everything the model generated this "
+  const outTip = "Output tokens - everything the model generated this "
     + "turn: thinking, the message, and any tool calls";
   if (u.completion_tokens != null) row.append(stat("out", u.completion_tokens, outTip));
   else if (t.predicted_n != null) row.append(stat("out", t.predicted_n, outTip));
@@ -1798,15 +2096,12 @@ function renderQueue(chatId) {
   if (!host) return;
   const cs = chatState(chatId);
   // the queue panel grows/shrinks the composer, which resizes the thread
-  // viewport — a bottom-follower must be re-stuck or the growth HIDES
+  // viewport - a bottom-follower must be re-stuck or the growth HIDES
   // the newest generated text behind the composer
   const thread = panel.querySelector('[data-role="thread"]');
   const wasBottom = thread && thread.clientHeight && atBottom(thread);
   host.replaceChildren();
-  // "Send now" is only honest when the model can actually take the
-  // message — while it's stopped/starting/loading the queue auto-flushes
-  // on ready, so the button would be a lie
-  const canSendNow = modelStateByName(chatModelName(cs)) === "running";
+  const canSendNow = true;   // providers take requests whenever reachable
   (cs.queue || []).forEach((q, i) => {
     host.append(el("div", { class: "queue-row" },
       el("span", { class: "q-badge", text: "queued" }),
@@ -1861,7 +2156,7 @@ function queueToInput(chatId, i) {
   input.setSelectionRange(it.text.length, it.text.length);
 }
 
-/* `item` STAYS at the queue head while the send is in flight — it is
+/* `item` STAYS at the queue head while the send is in flight - it is
  * only removed on success. A bounced send (racing a still-unwinding
  * cancelled stream) therefore never makes the queued row flicker. */
 async function dispatchMessage(chatId, item) {
@@ -1871,8 +2166,8 @@ async function dispatchMessage(chatId, item) {
   const res = await Api.call("chat_send", chatId, item.text, item.images || []);
   cs._dispatching = false;
   if (!res.ok) {
-    // the item never left the queue — nothing is ever lost. Losing a
-    // race with a still-unwinding stream is not an error — and the done
+    // the item never left the queue - nothing is ever lost. Losing a
+    // race with a still-unwinding stream is not an error - and the done
     // event may ALREADY have fired, so never depend on it: retry
     // shortly until the worker is really gone
     if (/already streaming/i.test(res.error || "")) {
@@ -1889,98 +2184,53 @@ async function dispatchMessage(chatId, item) {
   cs.running = true;
   cs.respT0 = performance.now();
   cs.churn = null;
+  cs.retryNote = null;
   cs.turnT0 = performance.now();
   cs.live = { text: "", think: "" };
+  cs.progress = null;
+  cs.liveTimings = null;
   cs.tools = {};
   renderChatThread(chatId);
   renderSendButton(chatId);
   renderTabs();
 }
 
-/* dispatch the queue head if possible; otherwise arrange for it (start
- * dialog for a stopped model; loading/streaming flush on their events) */
+/* dispatch the queue head if possible - the provider takes the request
+ * or errors honestly; nothing to start, nothing to wait for */
 function attemptFlush(chatId, interactive) {
   const cs = chatState(chatId);
   if (!cs.queue?.length || cs.running || cs._dispatching) return;
-  const name = chatModelName(cs);
-  if (!name) {
-    if (interactive) toast("No models defined in loom.yaml yet.", "warn");
+  const ep = activeEndpoint(cs);
+  if (!ep.provider) {
+    if (interactive) toast("No providers defined in loom.yaml yet.", "warn");
     return;
   }
-  const state = modelStateByName(name);
-  if (state && state !== "running") {
-    if (state === "starting" || state === "loading") return;  // flush on ready
-    // sending to a stopped model means the user wants it running — start
-    // it without asking; queued messages send once it's ready
-    const m = (st.config?.models || []).find((x) => x.name === name);
-    if (m) {
-      Api.call("server_start", m.id);
-      toast("Starting " + name + " — queued messages send when it's ready.",
-        "ok");
-      renderModelButton(chatId);
-    }
-    return;
-  }
-  dispatchMessage(chatId, cs.queue[0]);   // peek — removed on success
+  dispatchMessage(chatId, cs.queue[0]);   // peek - removed on success
 }
 
-/* continue/retry still needs the start gate (no queue item involved) */
-function ensureModelRunning(chatId, flag) {
-  const cs = chatState(chatId);
-  const name = chatModelName(cs);
-  if (!name) { toast("No models defined in loom.yaml yet.", "warn"); return false; }
-  const state = modelStateByName(name);
-  if (!state || state === "running") return true;
-  if (state === "starting" || state === "loading") {
-    cs[flag] = true;
-    toast(name + " is still loading — this goes as soon as it's ready.", "warn");
-    return false;
-  }
-  const m = (st.config?.models || []).find((x) => x.name === name);
-  if (m) {
-    cs[flag] = true;
-    Api.call("server_start", m.id);
-    toast("Starting " + name + " — resumes when it's ready.", "ok");
-    renderModelButton(chatId);
-  }
-  return false;
-}
-
-/* called from the srv event stream: fire anything waiting on a start */
-function chatsOnSrvEvent() {
+/* called on every providers event: refresh the queue chrome */
+function chatsOnProvidersEvent() {
   for (const tab of st.tabs) {
     if (tab.type !== "chat") continue;
     const cs = st.chats[tab.chatId];
-    if (!cs) continue;
-    const state = modelStateByName(chatModelName(cs));
-    if (cs.queue?.length) renderQueue(tab.chatId);   // Send-now visibility
-    if (state === "running") {
-      if (cs.autoContinue) {
-        cs.autoContinue = false;
-        continueChat(tab.chatId);
-      } else {
-        attemptFlush(tab.chatId, false);
-      }
-    } else if (state === "error" && (cs.queue?.length || cs.autoContinue)) {
-      cs.autoContinue = false;
-      toast(chatModelName(cs) + " failed to start — your queued message is "
-        + "kept. See the Servers tab log.", "err");
-    }
+    if (cs?.queue?.length) renderQueue(tab.chatId);
   }
 }
 
 async function continueChat(chatId) {
   const cs = chatState(chatId);
   if (cs.running) return;
-  if (!ensureModelRunning(chatId, "autoContinue")) return;
   cs.error = null;
   const res = await Api.call("chat_continue", chatId);
   if (!res.ok) { toast(res.error, "err"); return; }
   cs.running = true;
   cs.respT0 = performance.now();
   cs.churn = null;
+  cs.retryNote = null;
   cs.turnT0 = performance.now();
   cs.live = { text: "", think: "" };
+  cs.progress = null;
+  cs.liveTimings = null;
   cs.tools = {};
   renderChatThread(chatId);
   renderSendButton(chatId);
@@ -2021,7 +2271,7 @@ function handleInputHistory(chatId, input, dir) {
   if (!hist.length) return false;
   const panel = chatPanel(chatId);
   if (cs.histIdx == null) {
-    // engage only from the very start of an input (or an empty one) —
+    // engage only from the very start of an input (or an empty one) -
     // otherwise the arrows move the caret like any textarea
     if (dir > 0) return false;
     if (input.value && (input.selectionStart !== 0 || input.selectionEnd !== 0)) return false;
@@ -2059,7 +2309,7 @@ function queueThreadRedraw(chatId) {
 function onChatEvent(ev) {
   const chatId = ev.chatId;
   const cs = chatState(chatId);
-  // after an eager cancel everything in-flight is slop being discarded —
+  // after an eager cancel everything in-flight is slop being discarded -
   // only the terminal events (done/error) end the discard window
   if (cs.discarding && !["done", "error", "title", "compact_done",
                          "compact_error", "compact_cancelled"].includes(ev.kind)) {
@@ -2068,6 +2318,7 @@ function onChatEvent(ev) {
   switch (ev.kind) {
     case "start":
       cs.running = true;
+      cs.retryNote = null;
       cs.turnT0 = performance.now();   // the prefill clock
       cs.live = cs.live || { text: "", think: "" };
       renderSendButton(chatId);
@@ -2097,14 +2348,14 @@ function onChatEvent(ev) {
     case "think": {
       cs.live = cs.live || { text: "", think: "" };
       cs.live.think += ev.text;
-      // fast path mirrors delta: patch the live think block in place —
+      // fast path mirrors delta: patch the live think block in place -
       // full-thread redraws during streaming caused visible churn
       const panel = chatPanel(chatId);
       const tEl = panel?.querySelector('[data-role="live-think"]');
       if (tEl && tEl.firstChild && !selectionWithin(tEl)) {
         const thread = panel.querySelector('[data-role="thread"]');
         const stick = atBottom(thread);
-        // update the TEXT NODE only — the cursor + count siblings live
+        // update the TEXT NODE only - the cursor + count siblings live
         // inside the thought while it streams and must survive deltas
         tEl.firstChild.nodeValue = cs.live.think;
         tickLiveCount(chatId);   // thinking counts toward liveness too
@@ -2144,7 +2395,20 @@ function onChatEvent(ev) {
     case "tool_result":
       delete cs.tools[ev.callId];
       cs.live = { text: "", think: "" };   // next turn streams next
+      cs.progress = null;                  // its prefill starts fresh
+      cs.liveTimings = null;
       cs.turnT0 = performance.now();       // its prefill clock restarts
+      refreshChatSilently(chatId);
+      break;
+    case "retry":
+      // the turn ended without an answer (a thought that halted, an
+      // empty stream) - the loop is passing it back to the model
+      cs.retryNote = "The model stopped without answering - passing the "
+        + "turn back (attempt " + ev.attempt + "/" + ev.max + ")";
+      cs.live = { text: "", think: "" };
+      cs.progress = null;
+      cs.liveTimings = null;
+      cs.turnT0 = performance.now();
       refreshChatSilently(chatId);
       break;
     case "stats": {
@@ -2152,13 +2416,23 @@ function onChatEvent(ev) {
       cs.lastStats = { timings: ev.timings, usage: ev.usage, ttftMs: ev.ttftMs };
       break;
     }
+    case "live_stats":
+      // per-chunk timings snapshot - the tok/s beside the cursor
+      cs.liveTimings = ev.timings;
+      tickLiveCount(chatId);
+      break;
+    case "progress":
+      // the server is reading the prompt: {total, cache, processed, time_ms}
+      cs.progress = ev.progress;
+      tickLiveCount(chatId);
+      break;
     case "title":
       if (cs.chat) cs.chat.title = ev.title;
       renderTabs();
       refreshArchiveTab();
       break;
     case "artifacts":
-      // the model left something in /artifacts — surface it immediately
+      // the model left something in /artifacts - surface it immediately
       if (cs.chat) cs.chat.artifacts = ev.items || [];
       renderAttachBar(chatId);
       if (ev.fresh?.length) {
@@ -2189,13 +2463,13 @@ function onChatEvent(ev) {
       cs.compacting = false;
       cs.compactTok = 0;
       cs.discarding = false;
-      toast("Context compacted — " + (ev.replaced || 0)
+      toast("Context compacted - " + (ev.replaced || 0)
         + " earlier messages summarized.", "ok");
       refreshChatSilently(chatId);
       renderSendButton(chatId);
       break;
     case "compact_cancelled":
-      // the user's own Esc/✕ — quiet, not an error
+      // the user's own Esc/✕ - quiet, not an error
       cs.compacting = false;
       cs.compactTok = 0;
       cs.discarding = false;
@@ -2211,10 +2485,13 @@ function onChatEvent(ev) {
       renderSendButton(chatId);
       break;
     case "done":
-      cs.churn = mkChurn(cs, false) || cs.churn;
+      cs.churn = mkChurn(cs, ev.gaveUp ? "fail" : "done") || cs.churn;
+      cs.retryNote = null;
       cs.discarding = false;
       cs.running = false;
       cs.live = null;
+      cs.progress = null;
+      cs.liveTimings = null;
       cs.tools = {};
       refreshChatSilently(chatId);
       renderSendButton(chatId);
@@ -2222,10 +2499,13 @@ function onChatEvent(ev) {
       attemptFlush(chatId, false);   // next queued message goes out
       break;
     case "error":
-      cs.churn = mkChurn(cs, false) || cs.churn;
+      cs.churn = mkChurn(cs, "done") || cs.churn;
+      cs.retryNote = null;
       cs.discarding = false;
       cs.running = false;
       cs.live = null;
+      cs.progress = null;
+      cs.liveTimings = null;
       cs.tools = {};
       cs.error = ev.msg;
       renderSendButton(chatId);
@@ -2251,4 +2531,6 @@ async function refreshChatSilently(chatId) {
   renderCtxChip(chatId);
   renderAttachBar(chatId);   // artifacts ride on the chat doc
   queueThreadRedraw(chatId);
+  // an open diagnostics view (tab or popped-out window) follows along
+  if (typeof refreshDiagView === "function") refreshDiagView(chatId);
 }

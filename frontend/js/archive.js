@@ -1,4 +1,4 @@
-/* archive.js — the Chat Archive tab (singleton). Closed chats land here;
+/* archive.js - the Chat Archive tab (singleton). Closed chats land here;
  * clicking one re-opens it as a chat tab (un-archives). */
 "use strict";
 
@@ -61,7 +61,8 @@ async function refreshArchiveTab() {
     },
       el("span", { html: icon("chat", 14) }),
       el("span", { class: "arc-title", text: c.title }),
-      el("span", { class: "arc-meta", text: (c.model || "") }),
+      el("span", { class: "arc-meta",
+        text: (c.provider ? c.provider + " · " : "") + (c.model || "") }),
       el("span", { class: "arc-meta" },
         c.messages + " msgs · ", tago(c.updatedTs))));
   }

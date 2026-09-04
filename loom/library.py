@@ -1,6 +1,6 @@
-"""A library is a folder the user owns — Loom's whole world while open.
+"""A library is a folder the user owns - Loom's whole world while open.
 
-Layout (created by create_library, tolerated loosely on open — the only
+Layout (created by create_library, tolerated loosely on open - the only
 hard requirement is loom.yaml or loom.yml at the root):
 
     <library>/
@@ -9,16 +9,16 @@ hard requirement is loom.yaml or loom.yml at the root):
       knowledge/       plain-markdown knowledge base, searchable by the model
       containers/      container build files, named by loom.yaml configs
       documentation/   the app docs, seeded once and then user-owned
-      internals/       Loom's working data (chats/ transcripts) — hidden
+      internals/       Loom's working data (chats/ transcripts) - hidden
                        in the tree unless "show hidden" is toggled on
 
 New libraries are stamped from a TEMPLATE (built-ins in loom/templates/,
-user templates in ~/.loom/templates/) — a template is simply a library
+user templates in ~/.loom/templates/) - a template is simply a library
 skeleton that gets copied in.
 
 File I/O in this module is sandboxed: every path from the frontend is
 resolved against the library root and refused if it escapes it (symlink
-targets included — resolve() runs before the containment check).
+targets included - resolve() runs before the containment check).
 """
 
 from __future__ import annotations
@@ -40,13 +40,13 @@ CONFIG_NAMES = ("loom.yaml", "loom.yml")
 # tree unless "show hidden" is on; skipped by search always.
 INTERNALS = "internals"
 
-# tree/search skip these ALWAYS — noise, never library content
+# tree/search skip these ALWAYS - noise, never library content
 SKIP_DIRS = {".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv"}
 
 BUILTIN_TEMPLATES = Path(__file__).resolve().parent / "templates"
 DOCS_DIR = Path(__file__).resolve().parent / "docs"
 
-TEXT_MAX = 4 * 1024 * 1024   # editor refuses files past this — not a doc
+TEXT_MAX = 4 * 1024 * 1024   # editor refuses files past this - not a doc
 
 
 def config_path(root: Path) -> Path | None:
@@ -85,7 +85,7 @@ pleasantries and dead ends. Reply with ONLY the summary.
 """
 
 DEFAULT_TITLE_PROMPT = """\
-Name this conversation. Reply with ONLY the title — 2 to 6 words, no
+Name this conversation. Reply with ONLY the title - 2 to 6 words, no
 quotes, no trailing punctuation.
 
 If the conversation has a concrete subject, be specific about it. If it is
@@ -95,45 +95,26 @@ any of the existing titles you are shown.
 """
 
 DEFAULT_LOOM_YAML = """\
-# loom.yaml — this library's configuration. (loom.yml works too.)
+# loom.yaml - this library's configuration. (loom.yml works too.)
 
-# llama-server instances Loom manages for you. Loom composes
-#   llama-server --host <unix socket> -m <model> [--mmproj <mmproj>] \\
-#                --alias <name> -c <context> <your flags> --jinja
-# and passes `flags` verbatim (newlines are just whitespace; # comments ok).
-models: []
-# Complete example — every field, with its default where one exists:
-# - name: Qwen 3.8 27B 128k   # required — chats select by this; also --alias
-#   ssh: ""                   # default "" = this machine; else user@host /
-#                             # a ~/.ssh/config alias to run there
-#   context: 128000           # required — the -c window (VRAM: see docs)
-#   model: ~/.lmstudio/models/lmstudio-community/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf
-#   mmproj: ~/.lmstudio/models/lmstudio-community/Qwen3.8-27B-GGUF/mmproj-Qwen3.8-27B-BF16.gguf
-#                             # optional — vision projector; enables images
-#   binary: llama-server      # default — name/path of the server binary on
-#                             # that machine (point at a specific build)
-#   flags: |                  # optional — passed to llama-server verbatim
-#     -ngl 99
-#     -fa on
-#     -kvu
-#     -ctk q4_0 -ctv q4_0
-#     -np 1
-#
-# A second real-world shape — Gemma 4 (vision, no MTP layers):
-# - name: gemma 4 12B it QAT
-#   context: 262144
-#   model: ~/.lmstudio/models/lmstudio-community/gemma-4-12B-it-QAT-GGUF/gemma-4-12B-it-QAT-Q4_0.gguf
-#   mmproj: ~/.lmstudio/models/lmstudio-community/gemma-4-12B-it-QAT-GGUF/mmproj-gemma-4-12B-it-QAT-BF16.gguf
-#   flags: |
-#     -ngl 99
-#     -fa on
-#     -ctk q4_0 -ctv q4_0
-#     -np 1
-#     # no --spec-* flags: gemma ships no MTP layers — with them the
-#     # server refuses to start (see documentation/inference-tips.md)
+# Inference providers - the HTTP APIs Loom talks to. Loom does NOT
+# launch inference: run llama.cpp's `llama-server` or `ninfer-serve`
+# yourself and point an entry at it. Models are pulled live from each
+# provider's API (GET /v1/models).
+providers: []
+# Complete example - every field:
+# - name: workstation           # required - how chats refer to it
+#   type: llama-cpp             # llama-cpp | ninfer
+#   url: http://127.0.0.1:8080  # required - the API's base URL
+#   ssh: ""                     # default "" = connect directly; else an
+#                               # ssh destination - the url is resolved
+#                               # FROM that host over an ssh stdio
+#                               # tunnel. SSH KEYS ONLY.
 
 chat:
-  # default model (by name) for new chats; empty = first defined model
+  # default provider (by name) for new chats; empty = the first one
+  provider: ""
+  # default model id for new chats; empty = the provider's first model
   model: ""
   # default permission mode for new chats (pick per chat in the composer)
   permission_mode: always-ask
@@ -147,8 +128,8 @@ chat:
     auto: true          # compact automatically when the context fills up
     threshold: 0.8      # fraction of the context window that triggers it
 
-# Permission MODES — a chat runs under one mode; switch it in the chat's
-# input box. These tables are the ACTUAL levels chats run under — edit
+# Permission MODES - a chat runs under one mode; switch it in the chat's
+# input box. These tables are the ACTUAL levels chats run under - edit
 # them freely, or add brand-new modes. A tool left out of a table falls
 # back to that built-in mode's default.
 # Levels: allow / ask / deny / disabled (disabled = tool not offered).
@@ -203,7 +184,7 @@ containers:
 # ---------------------------------------------------------------------------
 # templates: a template is a library skeleton that gets copied in. Built-ins
 # ship in loom/templates/<id>/; user templates live in ~/.loom/templates/<id>/.
-# An optional template.txt (one line) is the picker description — not copied.
+# An optional template.txt (one line) is the picker description - not copied.
 
 def user_templates_dir() -> Path:
     from loom import store
@@ -259,7 +240,7 @@ def _copy_template(src: Path, root: Path) -> None:
 
 def ensure_documentation(root: Path) -> None:
     """Seed the app documentation once. Only when documentation/ is absent
-    entirely — a user's edited docs are never overwritten."""
+    entirely - a user's edited docs are never overwritten."""
     dst = root / "documentation"
     if dst.exists() or not DOCS_DIR.is_dir():
         return
@@ -269,7 +250,7 @@ def ensure_documentation(root: Path) -> None:
 
 
 def _migrate_layout(root: Path) -> None:
-    """Older libraries kept chats at ./chats — they now live under
+    """Older libraries kept chats at ./chats - they now live under
     ./internals/chats. Move transcripts, never overwrite."""
     legacy = root / "chats"
     if not legacy.is_dir():
@@ -291,7 +272,7 @@ def _migrate_layout(root: Path) -> None:
 
 def create_library(path: str, template: str = "starter") -> Path:
     """Scaffold a new library at `path` from a template (created if
-    missing; must be empty or already a library — never silently adopt a
+    missing; must be empty or already a library - never silently adopt a
     random full folder)."""
     root = Path(path).expanduser()
     root.mkdir(parents=True, exist_ok=True)
@@ -299,10 +280,10 @@ def create_library(path: str, template: str = "starter") -> Path:
     if config_path(root) is not None:
         _migrate_layout(root)
         ensure_documentation(root)
-        return root   # already a library — opening it is the right move
+        return root   # already a library - opening it is the right move
     if any(root.iterdir()):
         raise LibraryError(
-            f"{root} is not empty and not a library — pick an empty folder "
+            f"{root} is not empty and not a library - pick an empty folder "
             "or an existing library")
     _copy_template(_template_dir(template), root)
     (root / INTERNALS / "chats").mkdir(parents=True, exist_ok=True)
@@ -318,7 +299,7 @@ def open_library(path: str) -> Path:
         raise LibraryError(f"not a folder: {path}")
     if config_path(root) is None:
         raise LibraryError(
-            f"{path} has no loom.yaml (or loom.yml) — not a library. "
+            f"{path} has no loom.yaml (or loom.yml) - not a library. "
             "Use Create to scaffold one.")
     root = root.resolve()
     _migrate_layout(root)
@@ -331,7 +312,7 @@ def open_library(path: str) -> Path:
 
 def tree(root: Path, show_hidden: bool = False) -> list[dict]:
     """Nested listing: [{name, rel, dir, children?}], dirs first, sorted.
-    Hidden entries — dotfiles and the root-level internals/ dir — only
+    Hidden entries - dotfiles and the root-level internals/ dir - only
     appear when show_hidden (the tree's right-click toggle) is on."""
     def walk(d: Path, rel: str) -> list[dict]:
         out = []
@@ -367,7 +348,7 @@ def read_file(root: Path, rel: str) -> dict:
     if not p.is_file():
         raise LibraryError(f"no such file: {rel}")
     if p.stat().st_size > TEXT_MAX:
-        raise LibraryError(f"{rel} is over {TEXT_MAX // (1024*1024)} MB — "
+        raise LibraryError(f"{rel} is over {TEXT_MAX // (1024*1024)} MB - "
                            "too large for the editor")
     data = p.read_bytes()
     if looks_binary(data):
@@ -382,7 +363,7 @@ def write_file(root: Path, rel: str, text: str) -> dict:
     if p.is_dir():
         raise LibraryError(f"{rel} is a folder")
     p.parent.mkdir(parents=True, exist_ok=True)
-    # pid AND thread — concurrent writers in one process must never
+    # pid AND thread - concurrent writers in one process must never
     # share a tmp file (store.py sets the pattern)
     tmp = p.with_name(p.name + f".{os.getpid()}.{threading.get_ident()}.tmp")
     try:
@@ -439,7 +420,7 @@ def _lock_holder_alive(pid: int) -> bool:
     Dead pid → stale lock; live pid that clearly is not Loom → pid reuse,
     also stale; uninspectable → assume the lock is honest (a false
     "alive" merely refuses the open; a false "stale" would let two
-    instances share a library — always err toward alive)."""
+    instances share a library - always err toward alive)."""
     if pid <= 0:
         return False
     try:
@@ -447,8 +428,8 @@ def _lock_holder_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        pass   # alive but not ours — the checks below still apply
-    # the executable must be plausible for Loom (python/uv/loom) — this
+        pass   # alive but not ours - the checks below still apply
+    # the executable must be plausible for Loom (python/uv/loom) - this
     # rules out a recycled pid whose CMDLINE merely mentions a loom path
     # (an editor open on ~/projects/loom is not a Loom instance)
     try:
@@ -456,7 +437,7 @@ def _lock_holder_alive(pid: int) -> bool:
         if exe and not (exe.startswith("python") or exe in ("loom", "uv")):
             return False
     except OSError:
-        pass   # unreadable exe (perms) — fall through to the cmdline
+        pass   # unreadable exe (perms) - fall through to the cmdline
     try:
         cmd = Path(f"/proc/{pid}/cmdline").read_bytes() \
             .decode("utf-8", "replace").lower()
@@ -467,7 +448,7 @@ def _lock_holder_alive(pid: int) -> bool:
 
 def acquire_lock(root: Path) -> None:
     """Claim a library for THIS process via .loom-pid at its root. Two
-    Loom instances must never consume the same library — the second one
+    Loom instances must never consume the same library - the second one
     is refused with a pointer at the first. A stale lock (crashed or
     recycled pid) is taken over silently."""
     p = root / PID_FILE
@@ -479,13 +460,13 @@ def acquire_lock(root: Path) -> None:
         if pid and pid != os.getpid() and _lock_holder_alive(pid):
             raise LibraryError(
                 f"this library is already open in another Loom instance "
-                f"(pid {pid}) — close it there first; two instances may "
+                f"(pid {pid}) - close it there first; two instances may "
                 "not share a library")
     p.write_text(str(os.getpid()), encoding="utf-8")
 
 
 def release_lock(root: Path | None) -> None:
-    """Drop our claim — only ever our OWN: a lock another live instance
+    """Drop our claim - only ever our OWN: a lock another live instance
     holds is never deleted."""
     if root is None:
         return
@@ -499,8 +480,8 @@ def release_lock(root: Path | None) -> None:
 
 def git_branch(path: Path) -> str | None:
     """The checked-out branch of a folder, or a short sha when detached,
-    or None when it isn't a git worktree. Reads .git/HEAD directly — no
-    subprocess — so it's cheap enough to poll for the attachment pills."""
+    or None when it isn't a git worktree. Reads .git/HEAD directly - no
+    subprocess - so it's cheap enough to poll for the attachment pills."""
     try:
         gd = Path(path) / ".git"
         if gd.is_file():   # worktree / submodule pointer file

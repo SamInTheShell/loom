@@ -14,13 +14,13 @@ Then open http://localhost:8080. Ctrl-C stops and removes it.
 
 Every flag is deliberate:
 
-- `--rm -it` — a throwaway, interactive foreground container: logs in
+- `--rm -it` - a throwaway, interactive foreground container: logs in
   your terminal, Ctrl-C tears it down, nothing left behind.
-- `-p 127.0.0.1:8080:80` — **loopback only**. A bare `-p 8080:80` binds
+- `-p 127.0.0.1:8080:80` - **loopback only**. A bare `-p 8080:80` binds
   every interface and serves your working tree to the whole LAN; the
   `127.0.0.1:` prefix is the difference between a dev preview and an
   accidental file server.
-- `:ro` on the mount — nginx (and anything that compromises it) cannot
+- `:ro` on the mount - nginx (and anything that compromises it) cannot
   write into your tree. Serving never needs write access.
 - the fully-qualified image name pulls identically under podman and
   docker (podman has no implicit Docker Hub default).
@@ -38,4 +38,4 @@ serve: ## serve this directory at http://localhost:8080 (Ctrl-C stops)
 ```
 
 For a subdirectory (a `docs/` build, a `dist/` bundle), mount that path
-instead of the repo root — the less you serve, the less you leak.
+instead of the repo root - the less you serve, the less you leak.

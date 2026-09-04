@@ -1,4 +1,4 @@
-"""Interactive terminal sessions (Ctrl+T) — adapted from CodeTree.
+"""Interactive terminal sessions (Ctrl+T) - adapted from CodeTree.
 
 One session per terminal tab: the user picks a container definition from
 loom.yaml (and optionally folders to mount, view or write mode, same
@@ -9,7 +9,7 @@ chunks over the bus ({type:"term", sid, kind:"data"|"line"|"snapshot"|
 
 The --rm container is a CHILD of this process holding the PTY: when Loom
 dies the PTY closes, the shell gets HUP, and the container removes itself
-— no orphans. A rolling output buffer replays on (re)attach so terminals
+- no orphans. A rolling output buffer replays on (re)attach so terminals
 survive tab switches and close-to-tray. Networking is off unless the tab
 enables it.
 """
@@ -66,11 +66,11 @@ def _set_winsize(fd: int, cols: int, rows: int) -> None:
 
 
 def open_session(push, root: Path, tab_id: str, container: str,
-                 folders: list[dict] | None = None, network: bool = False,
+                 folders: list[dict] | None = None, network="none",
                  cols: int = 120, rows: int = 32,
                  env_name: str = "") -> None:
     """Build/pull the image if needed and start the interactive shell.
-    Blocking (image builds take a while) — call on a worker thread;
+    Blocking (image builds take a while) - call on a worker thread;
     progress and errors arrive as term events."""
     sid = str(tab_id)
     with _LOCK:
@@ -123,7 +123,7 @@ def open_session(push, root: Path, tab_id: str, container: str,
     env_args = []
     for k, v in _TERM_ENV.items():
         env_args += ["--env", f"{k}={v}"]
-    # a named environment's vars ride a 0600 env-file — NEVER the argv,
+    # a named environment's vars ride a 0600 env-file - NEVER the argv,
     # where secrets would show in the host process list
     env_file = None
     if env_name:
@@ -144,10 +144,10 @@ def open_session(push, root: Path, tab_id: str, container: str,
                        + ", ".join(sorted(extra)))
         if missing:
             _emit(push, sid, "line",
-                  text="[loom] missing secrets (UNSET — set them in the "
+                  text="[loom] missing secrets (UNSET - set them in the "
                        "Environments tab): " + ", ".join(missing))
     argv = [engine, "run", "--rm", "-it", "--name", name,
-            *([] if network else ["--network=none"]),
+            *containers.net_args(engine, network),
             "-v", f"{home}:/home/loom:rw",
             *vol, *containers._user_args(engine),
             "-e", "HOME=/home/loom", *env_args, "-w", "/home/loom",
@@ -212,7 +212,7 @@ def open_session(push, root: Path, tab_id: str, container: str,
 
     def reader():
         # COALESCED streaming: one bus event per ~25ms window (or 128KB),
-        # not one per PTY read — a firehose must not flood the JS bridge
+        # not one per PTY read - a firehose must not flood the JS bridge
         dec = codecs.getincrementaldecoder("utf-8")("replace")
         pend, pend_len, last_flush, eof = [], 0, 0.0, False
         while not eof:
@@ -275,7 +275,7 @@ def attach(push, tab_id: str, cols: int, rows: int) -> bool:
 
 
 def write(tab_id: str, data: str) -> bool:
-    """False = no live shell — the page reconnects and replays the input."""
+    """False = no live shell - the page reconnects and replays the input."""
     with _LOCK:
         sess = _SESS.get(str(tab_id))
     if not sess or sess["proc"].poll() is not None:
@@ -316,7 +316,7 @@ def resize(tab_id: str, cols: int, rows: int) -> bool:
 
 
 def _infra_cmdline(cmd: str) -> bool:
-    """Session plumbing vs the user's work — full command line, never the
+    """Session plumbing vs the user's work - full command line, never the
     bare name (`sleep 86000` typed by the user is work)."""
     parts = cmd.split()
     if not parts:
@@ -331,7 +331,7 @@ def _infra_cmdline(cmd: str) -> bool:
 
 
 def procs(tab_id: str, timeout: int = 15) -> list[str]:
-    """Processes in the tab's container BEYOND the shell — non-empty means
+    """Processes in the tab's container BEYOND the shell - non-empty means
     closing kills real work. Never raises."""
     with _LOCK:
         sess = _SESS.get(str(tab_id))
@@ -383,7 +383,7 @@ def close_session(tab_id: str) -> None:
 
 
 def cleanup(tab_id: str) -> None:
-    """Tab closed for good. Mounted folders are the user's — untouched."""
+    """Tab closed for good. Mounted folders are the user's - untouched."""
     close_session(str(tab_id))
 
 

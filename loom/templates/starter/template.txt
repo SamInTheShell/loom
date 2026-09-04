@@ -1,1 +1,1 @@
-Starter — bare essentials: harness basics, compaction and titling prompts, an empty knowledge base. No persona, no role instructions.
+Starter - bare essentials: harness basics, compaction and titling prompts, an empty knowledge base. No persona, no role instructions.

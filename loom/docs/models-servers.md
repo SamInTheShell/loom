@@ -1,63 +1,66 @@
-# Models and servers
+# Providers and models
 
-## The Models utility (⤓ in the top bar)
+Loom does **not** launch inference. You run an inference server
+yourself - llama.cpp's `llama-server` or `ninfer-serve` - wherever the
+hardware lives, and Loom talks to its HTTP API. Each such endpoint is a
+**provider** in `loom.yaml`; the models come from the provider's own
+API (`GET /v1/models`), so there is nothing to configure about model
+files, flags, or process management here.
 
-- **Fetch** a GGUF by URL — or give it a Hugging Face repo and pick the
-  quant — into `~/.loom/models/`. When the repo ships an `mmproj`
-  (the vision projector), it downloads automatically alongside the
-  quant you pick.
-- **One tab per machine**: Local first, then every ssh host you add
-  (**+ add ssh host…**). Drag a host tab to reorder; right-click it to
-  rescan or forget. Each tab scans its machine's usual model folders on
-  first open — `~/.loom/models`, LM Studio's folders, the Hugging Face
-  cache, `~/models`, `~/Downloads` — with a reload button and a filter.
-  `mmproj` files are flagged and paired with the model beside them.
-- **Copy to…** on a Local row pushes that model (its mmproj comes
-  along) to a host's `~/.loom/models/` over ssh.
-- **Server…** on any row opens the New-model wizard with that machine
-  and file already chosen.
-
-Turning a file into configuration is the **New model… wizard** — the
-Server… button here, the Servers tab, and a chat's model menu when no
-models exist: pick the host and GGUF (choosing it advances), shape
-name / context / backend, review the exact yaml, and it lands
-non-destructively at the end of the `models:` block.
-
-## loom.yaml model entries
+## loom.yaml provider entries
 
 ```yaml
-models:
-- name: Qwen 27B          # the name chats select; also the --alias
-  ssh: ""                 # ssh destination = run on that machine
-  context: 128000         # -c
-  model: ~/models/qwen.gguf
-  mmproj: ~/models/mmproj-qwen.gguf   # optional, enables images
-  binary: llama-server    # optional, a specific build/path on that host
-  flags: |                # passed to llama-server verbatim
-    -ngl 99
-    -fa on
+providers:
+- name: workstation           # how chats refer to it
+  type: llama-cpp             # llama-cpp | ninfer
+  url: http://127.0.0.1:8080  # the API's base URL
+  ssh: ""                     # optional ssh destination (see below)
+
+chat:
+  provider: workstation       # default provider for new chats
+  model: ""                   # default model id; empty = first listed
 ```
 
-Loom composes the socket, `-m`, `--mmproj`, `--alias`, `-c`, and
-`--jinja` (required for tool calling); every other flag is yours,
-verbatim. `~` expands on the machine that runs the server.
+Start `llama-server` however you like (`llama-server -m model.gguf
+--port 8080 --jinja …`) - see [inference tips](inference-tips.md) for
+flags worth knowing. Tool calling needs `--jinja` on llama-server;
+ninfer speaks tools out of the box.
 
-## The Servers tab
+## Over SSH
 
-Start / stop / restart each model; the dot tracks stopped → loading →
-running, and the **Log** button shows llama-server's real output (the
-honest answer when something fails). Edits to loom.yaml apply on the
-next restart.
+Set `ssh:` to a destination (`user@host`, or a `~/.ssh/config` alias -
+ProxyJump and friends apply) and the `url` is resolved **from that
+host**: `http://127.0.0.1:8080` then means "port 8080 on the remote
+machine". Traffic rides an ssh stdio tunnel over one multiplexed
+connection; no local port is ever opened.
 
-Servers bind **unix sockets only** — no TCP ports on any interface.
-Remote servers are reached over one multiplexed ssh connection
-(`~/.ssh/config` aliases, keys, ProxyJump all apply; passphrase prompts
-surface in-app). Every server is supervised so it dies with Loom —
-however Loom dies — and never orphans.
+**Key authentication only.** Loom runs ssh with `BatchMode=yes`: a host
+that would ask for a password (or an unloaded key passphrase) fails
+immediately with `Permission denied` instead of hanging on a prompt.
+Load the key into `ssh-agent` (`ssh-add`) or use an unencrypted key
+file.
 
-The model popup in a chat's input panel can also start/stop servers,
-filter by name, and shows live state dots. Two per-model controls live
-on its rows: the **pin** floats a model to the top of every picker
-(handy past a handful of entries), and the **brain** opens that model's
-reasoning-effort submenu — the configured level shows under the model
-name and on the composer's model button. Both persist per library.
+## The Providers tab (Ctrl+E)
+
+One card per provider: reachability, the models it lists (with each
+model's context window), a **Probe** button to re-check, and a **Key**
+button for servers started with `--api-key` - the key is stored in this
+machine's OS keyring (never in `loom.yaml`) and rides every request as
+`Authorization: Bearer`. **Add provider…** writes a new entry into
+`loom.yaml` non-destructively, with a **Test** button that probes
+(key included) before anything is written.
+
+Providers are other people's processes - Loom never starts, stops, or
+supervises them, and quitting Loom leaves them exactly as they were.
+
+## Picking models in a chat
+
+The composer's model button (Ctrl+.) opens the picker: **provider →
+model → reasoning**, all keyboard-driven - ↑/↓ walk (starting from the
+current value), → descends, ← goes back, Enter picks, 1-9 jump. Each
+model row shows its context window and carries two per-model controls:
+the **pin** floats it to the top of the list, and the **brain** opens
+its reasoning submenu - first *how* to steer thinking
+(`reasoning_effort` request field, `enable_thinking` template kwarg, or
+a `/think` prompt switch), then the level. The configured level shows
+on the composer's model button. Both persist per library.

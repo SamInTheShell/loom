@@ -1,0 +1,36 @@
+<!doctype html>
+<!--
+  GENERATED FILE - do not edit diagwin.html directly.
+  Source of truth: frontend/templates/ (rendered by loom/compose.py at app
+  launch, or manually via `uv run python -m loom.compose`).
+
+  The popped-out diagnostics window: one chat's diag view in a real OS
+  window (system frame). It shares the pywebview bridge api and the
+  event bus with the main window, so it updates live - and it closes
+  whenever the main window does.
+-->
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Diagnostics</title>
+{% for href in styles %}
+  <link rel="stylesheet" href="{{ href }}">
+{% endfor %}
+  <style>
+    /* the diag view expects a .tabpanel host filling the viewport */
+    html, body { height: 100%; }
+    body { background: var(--bg-0); }
+    #diagroot { position: absolute; inset: 0; }
+  </style>
+</head>
+<body>
+  <div id="diagroot" class="tabpanel diagtab"></div>
+  <div id="ctx-root"></div>
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+{% for src in scripts %}
+  <script src="{{ src }}"></script>
+{% endfor %}
+</body>
+</html>

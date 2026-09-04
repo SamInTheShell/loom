@@ -1,5 +1,5 @@
 // Ctrl+/ toggle-comment logic (edToggleCommentLines in mdedit.js).
-// Script-style: node tests/test_toggle_comment.js — nonzero exit on failure.
+// Script-style: node tests/test_toggle_comment.js - nonzero exit on failure.
 "use strict";
 
 const fs = require("fs");
@@ -17,7 +17,7 @@ let fails = 0;
 function check(name, got, want) {
   const ok = JSON.stringify(got) === JSON.stringify(want);
   console.log((ok ? "ok  " : "FAIL") + "  " + name
-    + (ok ? "" : ` — got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`));
+    + (ok ? "" : ` - got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`));
   if (!ok) fails = 1;
 }
 
@@ -67,7 +67,7 @@ check("lone blank line comments",
 check("lone blank line uncomments",
   toggle(["# "], "#").texts, [""]);
 
-// two-char markers (js //) — regex escaping must hold
+// two-char markers (js //) - regex escaping must hold
 check("double-slash marker",
   toggle(["const x = 1;"], "//"),
   { texts: ["// const x = 1;"], deltas: [3] });

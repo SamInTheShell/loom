@@ -1,6 +1,6 @@
 /* Design tokens. Neutral zinc palette after llama-server's webui: dark is
    near-black with a WHITE primary accent; light is the inverse (white with
-   a near-black primary). No colored accent — color is reserved for
+   a near-black primary). No colored accent - color is reserved for
    semantic status (ok / warn / err / run). */
 
 :root {
@@ -30,13 +30,13 @@
   --bg-4: #3f3f46;   /* active */
 
   --bd-0: #26262b;   /* subtle borders */
-  --bd-1: #3f3f46;   /* strong borders — must survive washed-out panels */
+  --bd-1: #3f3f46;   /* strong borders - must survive washed-out panels */
 
   --fg-0: #fafafa;   /* primary text */
   --fg-1: #a1a1aa;   /* secondary */
   --fg-2: #71717a;   /* muted */
 
-  --acc: #fafafa;        /* primary (actions, focus) — white on dark */
+  --acc: #fafafa;        /* primary (actions, focus) - white on dark */
   --acc-fg: #18181b;
   --acc-dim: #52525b;
   --acc-bg: #27272a;     /* selected/tinted surfaces */
@@ -71,13 +71,13 @@
   --bg-4: #d4d4d8;
 
   --bd-0: #e0e0e4;
-  --bd-1: #c4c4cb;   /* strong borders — must survive washed-out panels */
+  --bd-1: #c4c4cb;   /* strong borders - must survive washed-out panels */
 
   --fg-0: #09090b;
   --fg-1: #52525b;
   --fg-2: #a1a1aa;
 
-  --acc: #18181b;        /* primary — near-black on light (the inverse) */
+  --acc: #18181b;        /* primary - near-black on light (the inverse) */
   --acc-fg: #fafafa;
   --acc-dim: #a1a1aa;
   --acc-bg: #e4e4e7;

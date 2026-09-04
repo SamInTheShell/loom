@@ -1,8 +1,8 @@
-// Inline markdown tokenizing (edInlineSegs in mdedit.js) — above all that
+// Inline markdown tokenizing (edInlineSegs in mdedit.js) - above all that
 // links stay CLICKABLE inside emphasis: the library docs bold their
 // cross-references (**[Quick start](quick-start.md)**) and Ctrl+Click
 // must keep working on them.
-// Script-style: node tests/test_inline_links.js — nonzero exit on failure.
+// Script-style: node tests/test_inline_links.js - nonzero exit on failure.
 "use strict";
 
 const fs = require("fs");
@@ -19,7 +19,7 @@ const segsOf = vm.runInContext("edInlineSegs", sandbox);
 let fails = 0;
 function check(name, cond, detail) {
   console.log((cond ? "ok  " : "FAIL") + "  " + name
-    + (cond ? "" : " — " + (detail || "")));
+    + (cond ? "" : " - " + (detail || "")));
   if (!cond) fails = 1;
 }
 
@@ -31,7 +31,7 @@ let l = firstLink(s);
 check("plain link carries its target",
   l && l[0] === "docs" && l[2] === "library.md", JSON.stringify(s));
 
-s = segsOf("- **[Quick start](quick-start.md)** — from zero");
+s = segsOf("- **[Quick start](quick-start.md)** - from zero");
 l = firstLink(s);
 check("link inside bold still a link",
   !!l && l[2] === "quick-start.md", JSON.stringify(s));

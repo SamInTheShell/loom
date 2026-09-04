@@ -6,7 +6,7 @@ conventions make that true with zero external tooling.
 
 ## Rule of thumb: `make` alone prints help
 
-Every Makefile defaults to a help target — never to a build. Building on
+Every Makefile defaults to a help target - never to a build. Building on
 a bare `make` surprises people; help never does.
 
 ```make
@@ -22,12 +22,12 @@ help: ## show this help
 	@echo '  clean   remove build artifacts'
 ```
 
-Annotate real targets with a trailing `## one-line description` — the
+Annotate real targets with a trailing `## one-line description` - the
 same line the help text explains. Keep the two in sync when you add a
 target; the help IS the documentation of record.
 
 Mark all targets `.PHONY` when the toolchain (Go, uv, npm) already does
-its own incremental builds — make-level file tracking then only causes
+its own incremental builds - make-level file tracking then only causes
 stale-target bugs.
 
 ## Auto-detect podman vs docker (and let the user override)
@@ -41,7 +41,7 @@ DOCKER_CMD := $(shell command -v podman >/dev/null 2>&1 && echo podman || echo d
 
 Every container recipe then uses `$(DOCKER_CMD) build`, `$(DOCKER_CMD)
 run`, … Overriding is standard make: any variable set on the command
-line beats the file —
+line beats the file -
 
 ```sh
 make docker DOCKER_CMD=docker     # force docker on a podman machine
@@ -59,7 +59,7 @@ KIND_CLUSTER ?= myapp
 
 Always fully qualify local image tags as `localhost/<name>:<tag>`.
 Podman qualifies bare tags as `localhost/<name>` while docker leaves
-them bare — using the fully-qualified form everywhere is what keeps
+them bare - using the fully-qualified form everywhere is what keeps
 `kind load`, `save`, and retagging behaving identically under both
 engines.
 

@@ -22,7 +22,7 @@ silent failure or a cryptic JS error.
   of the result.
 - **Return values become JSON.** Python return values are serialized to
   the JS side. Return `True`/`False` for success flags, dicts for
-  structured data. Keep return shapes consistent — a good convention is
+  structured data. Keep return shapes consistent - a good convention is
   `{ok: bool, error: str|None, ...payload}` so the frontend handles every
   call the same way.
 - **Store the window reference** via a setter so API methods can use it:
@@ -59,7 +59,7 @@ assert hasattr(api, 'open_devtools'), 'Missing open_devtools method'
 ```
 
 Then, with the app running and DevTools open, every `JsApi` method is
-callable from the JS console as `window.pywebview.api.<method>(...)` — so
+callable from the JS console as `window.pywebview.api.<method>(...)` - so
 you can drive the Python side live without restarting (see debugging.md).
 
 ## Common failures

@@ -1,4 +1,4 @@
-/* Terminal tabs — the emulator surface, its 16-color palette, cursor
+/* Terminal tabs - the emulator surface, its 16-color palette, cursor
    shapes, permission asks, and the setup form. Plus the Models utility. */
 
 .termtab { flex-direction: column; background: var(--bg-0); }
@@ -215,4 +215,5 @@
 }
 .term-head .term-net { cursor: pointer; }
 .term-head .term-net.on { border-color: var(--warn); color: var(--warn); }
+.term-head .term-net.loop { border-color: var(--acc); color: var(--acc); }
 .term-head .term-envkey { display: inline-flex; color: var(--fg-2); margin-left: 2px; }

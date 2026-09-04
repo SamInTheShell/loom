@@ -17,7 +17,7 @@ FAILS = []
 
 
 def check(name, cond, detail=""):
-    print(("ok  " if cond else "FAIL") + f"  {name}" + (f" — {detail}" if detail and not cond else ""))
+    print(("ok  " if cond else "FAIL") + f"  {name}" + (f" - {detail}" if detail and not cond else ""))
     if not cond:
         FAILS.append(name)
 
@@ -254,7 +254,7 @@ with tempfile.TemporaryDirectory() as d:
     hits = search.search(root, "findme")
     check("content line hit", any(h["kind"] == "line" and h.get("line") == 2 for h in hits), str(hits[:3]))
 
-    # config — permission modes
+    # config - permission modes
     cfg = libconfig.load(root)
     check("builtin modes present",
           {"always-ask", "allow-edits", "always-allow"}
@@ -284,7 +284,7 @@ with tempfile.TemporaryDirectory() as d:
                   for tool, lv in table.items()
                   if libconfig.permission_for(_tcfg, tool, mo) != lv]
         check(f"{_name} yaml modes match the built-ins", not _drift, str(_drift))
-        # the RAW yaml must spell out every tool level itself — empty
+        # the RAW yaml must spell out every tool level itself - empty
         # tools:{} blocks hiding the real table behind code is the bug
         # this guards against
         import yaml as _yamlmod
@@ -297,20 +297,43 @@ with tempfile.TemporaryDirectory() as d:
                    for mo in libconfig.BUILTIN_MODES}))
     check("always-allow allows shell",
           libconfig.permission_for(cfg, "shell", "always-allow") == "allow")
-    (root / "loom.yaml").write_text("models:\n- name: m1\n  model: /x.gguf\n  context: 4096\n  mmproj: /mm.gguf\n")
+    (root / "loom.yaml").write_text(
+        "providers:\n- name: p1\n  type: ninfer\n"
+        "  url: http://127.0.0.1:9999/\n  ssh: box\n"
+        "chat:\n  provider: p1\n  model: qwen\n")
     cfg = libconfig.load(root)
-    check("model parsed", cfg["models"][0]["ctx"] == 4096 and cfg["models"][0]["mmproj"] == "/mm.gguf")
-    from loom import srv
-    args = srv.compose_args(cfg["models"][0])
-    check("mmproj in argv", "--mmproj" in args and args[args.index("--mmproj") + 1] == "/mm.gguf")
-    check("jinja appended", args[-1] == "--jinja")
+    check("provider parsed",
+          cfg["providers"][0]["type"] == "ninfer"
+          and cfg["providers"][0]["url"] == "http://127.0.0.1:9999"
+          and cfg["providers"][0]["ssh"] == "box"
+          and cfg["chat"]["provider"] == "p1"
+          and cfg["chat"]["model"] == "qwen", str(cfg["providers"]))
+    check("provider_by_name resolves + defaults",
+          libconfig.provider_by_name(cfg, "p1")["name"] == "p1"
+          and libconfig.provider_by_name(cfg, "")["name"] == "p1"
+          and libconfig.provider_by_name(cfg, "nope") is None)
 
-    (root / "loom.yaml").write_text("models: {not: a list}\n")
+    for bad in ("providers: {not: a list}\n",
+                "providers:\n- name: x\n  url: ftp://nope\n",
+                "providers:\n- name: x\n  type: vllm\n  url: http://h\n",
+                "providers:\n- name: x\n  type: ninfer\n  url: http://h\n"
+                "  ssh: '-oProxyCommand=evil'\n"):
+        (root / "loom.yaml").write_text(bad)
+        try:
+            libconfig.load(root)
+            check(f"bad config rejected: {bad.splitlines()[-1].strip()}", False)
+        except libconfig.ConfigError:
+            check(f"bad config rejected: {bad.splitlines()[-1].strip()}", True)
+
+    # the old process-managing scheme gets a MIGRATION hint, not silence
+    (root / "loom.yaml").write_text(
+        "models:\n- name: m1\n  model: /x.gguf\n")
     try:
         libconfig.load(root)
-        check("bad config rejected", False)
-    except libconfig.ConfigError:
-        check("bad config rejected", True)
+        check("old models: scheme raises a migration hint", False)
+    except libconfig.ConfigError as e:
+        check("old models: scheme raises a migration hint",
+              "providers" in str(e), str(e))
 
     # custom mode + disabled level + legacy shape
     (root / "loom.yaml").write_text(
@@ -356,7 +379,7 @@ with tempfile.TemporaryDirectory() as d:
         check("unknown default mode rejected", False)
     except libconfig.ConfigError:
         check("unknown default mode rejected", True)
-    (root / "loom.yaml").write_text("models: []\n")   # restore sanity
+    (root / "loom.yaml").write_text("providers: []\n")   # restore sanity
 
     # ---------- programming tools (grep / find_files / read gate / edit) ----------
     import threading
@@ -375,7 +398,7 @@ with tempfile.TemporaryDirectory() as d:
           "shell" in names_all and "write_file" in names_all
           and "edit_file" in names_all, str(names_all))
 
-    # /artifacts: the model's delivery folder — writable via file tools
+    # /artifacts: the model's delivery folder - writable via file tools
     out = chatmod._exec_tool(root, cfg, {"id": "t1", "folders": []},
                              "write_file",
                              {"path": "/artifacts/notes.md", "content": "hi"},
@@ -399,6 +422,21 @@ with tempfile.TemporaryDirectory() as d:
                              {"query": "needle42"}, cancel)
     check("grep finds content with line no",
           "/mnt/proj/src/main.py:2:" in out, out)
+    # ONE path convention, the container view: every root entry and every
+    # knowledge hit leads with a slash, and both spellings resolve
+    out = chatmod._exec_tool(root, cfg, chat_doc, "list_dir",
+                             {"path": "/"}, cancel)
+    check("root listing uses container-view paths consistently",
+          "/knowledge/" in out
+          and all(l.startswith("/") for l in out.splitlines()), out)
+    out = chatmod._exec_tool(root, cfg, chat_doc, "knowledge_search",
+                             {"query": "note2"}, cancel)
+    check("knowledge hits lead with /knowledge/",
+          "/knowledge/note2.md" in out, out)
+    for _kp in ("/knowledge/note2.md", "knowledge/note2.md"):
+        out = chatmod._exec_tool(root, cfg, chat_doc, "read_file",
+                                 {"path": _kp}, cancel)
+        check(f"read_file accepts {_kp}", "Needle" in out, out[:80])
     try:
         chatmod._exec_tool(root, cfg, chat_doc, "read_file",
                            {"path": "/mnt/proj/big.txt"}, cancel)
@@ -437,6 +475,119 @@ with tempfile.TemporaryDirectory() as d:
     except chatsmod.ChatError:
         check("edit_file refused on view-mode folder", True)
 
+    # ---------- network modes: none / loopback / on ----------
+    from loom import containers as contmod
+    check("net_mode normalizes",
+          contmod.net_mode(True) == "on" and contmod.net_mode(False) == "none"
+          and contmod.net_mode(None) == "none"
+          and contmod.net_mode("loopback") == "loopback"
+          and contmod.net_mode("on") == "on"
+          and contmod.net_mode("junk") == "none")
+    check("net_args: none isolates",
+          contmod.net_args("podman", "none") == ["--network=none"]
+          and contmod.net_args("docker", False) == ["--network=none"])
+    check("net_args: on opens", contmod.net_args("podman", "on") == []
+          and contmod.net_args("docker", True) == [])
+    check("net_args: loopback = slirp4netns host-loopback + loopback-bound "
+          "outbound",
+          contmod.net_args("podman", "loopback")
+          == ["--network=slirp4netns:allow_host_loopback=true,"
+              "outbound_addr=127.0.0.1"])
+    try:
+        contmod.net_args("docker", "loopback")
+        check("loopback on docker refused honestly", False)
+    except contmod.ContainerError as e:
+        check("loopback on docker refused honestly", "podman" in str(e))
+
+    # ---------- shell signals: network state + model-supplied timeouts ----
+    _specs_off = {t["function"]["name"]: t["function"]
+                  for t in chatmod.tool_specs(cfg, "always-allow",
+                                              network=False)}
+    check("shell spec spells out NO NETWORK",
+          "NO NETWORK ACCESS" in _specs_off["shell"]["description"]
+          and "not a bug" in _specs_off["shell"]["description"],
+          _specs_off["shell"]["description"])
+    check("shell spec REQUIRES a timeout",
+          "timeout" in _specs_off["shell"]["parameters"]["required"])
+    _specs_on = {t["function"]["name"]: t["function"]
+                 for t in chatmod.tool_specs(cfg, "always-allow",
+                                             network=True)}
+    check("network on = NO network signal (online is the assumed default)",
+          "network" not in _specs_on["shell"]["description"].lower(),
+          _specs_on["shell"]["description"])
+    _specs_lo = {t["function"]["name"]: t["function"]
+                 for t in chatmod.tool_specs(cfg, "always-allow",
+                                             network="loopback")}
+    check("shell spec explains loopback-only (10.0.2.2 for host services)",
+          "LOOPBACK-ONLY" in _specs_lo["shell"]["description"]
+          and "10.0.2.2" in _specs_lo["shell"]["description"],
+          _specs_lo["shell"]["description"])
+    for _s in ("curl: (6) Could not resolve host: x",
+               "Temporary failure in name resolution",
+               "connect: Network is unreachable",
+               "npm ERR! errno EAI_AGAIN",
+               "fatal: unable to access 'x': Connection timed out"):
+        check(f"network error recognized: {_s[:30]}",
+              chatmod._looks_network_error(_s))
+    check("plain failure NOT tagged as network",
+          not chatmod._looks_network_error("SyntaxError: invalid syntax"))
+
+    _seen_kw = {}
+
+    class _FakeRes:
+        rc = 6
+        output = "curl: (6) Could not resolve host: example.com"
+        timed_out = False
+        cancelled = False
+
+    _orig_ens = chatmod.containers.ensure_image_named
+    _orig_run = chatmod.containers.run_shell
+    chatmod.containers.ensure_image_named = lambda *a, **k: ("podman", "img")
+
+    def _fake_run(engine, image, cid, cmd, **kw):
+        _seen_kw.update(kw)
+        return _FakeRes()
+    chatmod.containers.run_shell = _fake_run
+    try:
+        _out, _stt = chatmod._exec_tool(
+            root, cfg, {"id": "t9", "folders": [], "network": False},
+            "shell", {"command": "curl example.com", "timeout": 999999},
+            threading.Event())
+        check("network-off failure carries the no-network note",
+              _stt == "failed" and "NO NETWORK ACCESS" in _out, _out)
+        check("model timeout clamped to the ceiling",
+              _seen_kw["timeout"] == chatmod.containers.EXEC_TIMEOUT_MAX,
+              str(_seen_kw.get("timeout")))
+        _outL, _sttL = chatmod._exec_tool(
+            root, cfg, {"id": "t9", "folders": [], "network": "loopback"},
+            "shell", {"command": "curl example.com", "timeout": 30},
+            threading.Event())
+        check("loopback failure carries the loopback note (10.0.2.2)",
+              _sttL == "failed" and "LOOPBACK-ONLY" in _outL
+              and "10.0.2.2" in _outL, _outL)
+        check("loopback run passes the slirp4netns network arg",
+              _seen_kw["network"] == "loopback")
+        _out2, _ = chatmod._exec_tool(
+            root, cfg, {"id": "t9", "folders": [], "network": True},
+            "shell", {"command": "curl example.com", "timeout": 30},
+            threading.Event())
+        check("network-on failure gets NO note",
+              "NO NETWORK ACCESS" not in _out2
+              and "LOOPBACK-ONLY" not in _out2, _out2)
+        check("model-supplied timeout passes through",
+              _seen_kw["timeout"] == 30)
+        _FakeRes.timed_out = True
+        _out3, _stt3 = chatmod._exec_tool(
+            root, cfg, {"id": "t9", "folders": [], "network": True},
+            "shell", {"command": "sleep 99", "timeout": 7},
+            threading.Event())
+        check("timeout marker names the budget",
+              _stt3 == "failed" and "[timed out after 7s" in _out3, _out3)
+        _FakeRes.timed_out = False
+    finally:
+        chatmod.containers.ensure_image_named = _orig_ens
+        chatmod.containers.run_shell = _orig_run
+
     # ---------- wire: thought truncation + compaction markers ----------
     check("compaction defaults on",
           cfg["chat"]["compaction"]["auto"] is True
@@ -470,11 +621,30 @@ with tempfile.TemporaryDirectory() as d:
     check("env maps knowledge contents", "knowledge/" in sysmsg, sysmsg[-500:])
     check("env carries current UTC time",
           "Session started" in sysmsg and "UTC" in sysmsg)
+    check("network-off chat: the system prompt says so, loudly",
+          "NO NETWORK ACCESS" in sysmsg and "not a bug" in sysmsg,
+          sysmsg[-600:])
+    _wire_net = chatmod._wire_messages(root, cfg, {"id": "w3", "folders": [],
+                                                   "network": True,
+                                                   "messages": []})
+    check("network-on chat: Loom makes NO network claim (online is the "
+          "assumed default)",
+          "NO NETWORK ACCESS" not in _wire_net[0]["content"]
+          and "LOOPBACK-ONLY" not in _wire_net[0]["content"]
+          and "WITH network access" not in _wire_net[0]["content"],
+          _wire_net[0]["content"][-400:])
+    _wire_lo = chatmod._wire_messages(root, cfg, {"id": "w4", "folders": [],
+                                                  "network": "loopback",
+                                                  "messages": []})
+    check("loopback chat: the system prompt explains 10.0.2.2",
+          "LOOPBACK-ONLY" in _wire_lo[0]["content"]
+          and "10.0.2.2" in _wire_lo[0]["content"],
+          _wire_lo[0]["content"][-500:])
     check("user message carries UTC stamp signal",
           wire2[1]["content"].startswith("[2026-")
           and "UTC] hi" in wire2[1]["content"], wire2[1]["content"][:48])
     # PREFIX STABILITY: two wire builds of the same chat must be byte-
-    # identical — any per-call variance (a live clock…) breaks the
+    # identical - any per-call variance (a live clock…) breaks the
     # server's prompt cache and forces full reprocessing every turn
     time.sleep(0.05)
     wire2b = chatmod._wire_messages(root, cfg, doc2)
@@ -660,9 +830,33 @@ _now[0] = 101.8
 h()                       # still spamming → still forcing
 check("continued spam keeps forcing", _sig_log[-1] == "force")
 
+# ---------- window geometry: persistence + sanity ----------
+from loom.app import sane_geometry  # noqa: E402
+
+check("no geometry saved yet", store.window_geometry() == {})
+store.set_window_geometry({"x": 40, "y": 60, "width": 1400, "height": 900,
+                           "maximized": False, "junk": 1})
+check("geometry roundtrip drops unknown keys",
+      store.window_geometry() == {"x": 40, "y": 60, "width": 1400,
+                                  "height": 900, "maximized": False})
+check("sane geometry passes sane values",
+      sane_geometry({"x": 40, "y": 60, "width": 1400, "height": 900,
+                     "maximized": True})
+      == {"x": 40, "y": 60, "width": 1400, "height": 900,
+          "maximized": True})
+check("absurd sizes rejected (defaults win)",
+      sane_geometry({"width": 50, "height": 900}) == {}
+      and sane_geometry({"width": 99999, "height": 900}) == {})
+check("void positions rejected, size kept",
+      sane_geometry({"x": -99999, "y": 0, "width": 1280, "height": 800})
+      == {"width": 1280, "height": 800})
+check("garbage geometry fails closed",
+      sane_geometry({"x": "a", "width": None}) == {}
+      and sane_geometry({}) == {})
+
 # ---------- switching libraries (JsApi level) ----------
 from loom.app import Bus, JsApi  # noqa: E402
-api = JsApi(Bus(), None)
+api = JsApi(Bus())
 with tempfile.TemporaryDirectory() as d:
     r = api.library_create(d + "/lib")
     check("switch: library opens", r["ok"], str(r))
@@ -709,7 +903,7 @@ with tempfile.TemporaryDirectory() as d:
           rd["ok"] and all(r["tokens"] > 0 and r["preview"]
                            for r in rd["data"]["rows"]), str(rd)[:300])
     _drows = rd["data"]["rows"]
-    check("diag: durations — user instant, tool from ts gap, "
+    check("diag: durations - user instant, tool from ts gap, "
           "assistant split across think+body",
           _drows[0]["durMs"] == 0 and _drows[3]["durMs"] == 1000
           and (_drows[1]["durMs"] + _drows[2]["durMs"]) == 1000,
@@ -723,15 +917,20 @@ with tempfile.TemporaryDirectory() as d:
     cid_net = rc2["data"]["chat"]["id"]
     check("network off by default",
           not chmod2.load_chat(rt2, cid_net).get("network"))
-    rn = api.chat_set_network(cid_net, True)
-    check("network toggles on",
-          rn["ok"] and rn["data"]["network"] is True
-          and chmod2.load_chat(rt2, cid_net)["network"] is True, str(rn))
-    rn = api.chat_set_network(cid_net, False)
-    check("network toggles off", rn["ok"] and rn["data"]["network"] is False)
-    rc_net = api.chat_new({"network": True})
-    check("chat_new clones network",
-          rc_net["ok"] and rc_net["data"]["chat"].get("network") is True)
+    rn = api.chat_set_network(cid_net, True)   # legacy bool → "on"
+    check("network sets on (legacy bool accepted)",
+          rn["ok"] and rn["data"]["network"] == "on"
+          and chmod2.load_chat(rt2, cid_net)["network"] == "on", str(rn))
+    rn = api.chat_set_network(cid_net, "loopback")
+    check("network sets loopback",
+          rn["ok"] and rn["data"]["network"] == "loopback"
+          and chmod2.load_chat(rt2, cid_net)["network"] == "loopback")
+    rn = api.chat_set_network(cid_net, "garbage")
+    check("unknown network mode fails closed to none",
+          rn["ok"] and rn["data"]["network"] == "none")
+    rc_net = api.chat_new({"network": "loopback"})
+    check("chat_new clones the network mode",
+          rc_net["ok"] and rc_net["data"]["chat"].get("network") == "loopback")
     rc3 = api.chat_new({"permMode": "no-such-mode"})
     check("chat_new drops unknown perm mode",
           rc3["ok"] and "permMode" not in rc3["data"]["chat"], str(rc3))
@@ -775,41 +974,242 @@ with tempfile.TemporaryDirectory() as d:
     check("stale empty archived chat purged",
           not any(x["id"] == stale["id"] for x in chmod.list_chats(rt)))
 
+    # ---------- provider API keys (keyring-backed) ----------
+    from loom import envs as _envs2
+    _fk = {}
+    _okg, _oks, _okd = _envs2._kr_get, _envs2._kr_set, _envs2._kr_del
+    _envs2._kr_get = lambda n: _fk.get(n)
+    _envs2._kr_set = lambda n, v: _fk.__setitem__(n, v)
+    _envs2._kr_del = lambda n: _fk.pop(n, None)
+    try:
+        (api._need_root() / "loom.yaml").write_text(
+            "providers:\n- name: kp\n  type: llama-cpp\n"
+            "  url: http://127.0.0.1:1\n")
+        r = api.provider_key_set("kp", "sk-123")
+        check("provider key lands in the keyring",
+              r["ok"] and r["data"]["hasKey"] is True
+              and any(k.startswith("loom-provider-key::") for k in _fk),
+              str((r, _fk)))
+        r = api.providers_get()
+        check("providers_get reports hasKey",
+              r["ok"] and r["data"]["providers"][0]["hasKey"] is True)
+        check("the resolver name matches JsApi's keyring entry",
+              api._provider_key("kp") == "sk-123")
+        r = api.provider_key_set("kp", "")
+        check("provider key clears", r["ok"] and not _fk, str(_fk))
+        r = api.provider_key_set("nope", "x")
+        check("key for an unknown provider refused", not r["ok"])
+    finally:
+        _envs2._kr_get, _envs2._kr_set, _envs2._kr_del = _okg, _oks, _okd
+        (api._need_root() / "loom.yaml").write_text("providers: []\n")
+
+    # ---------- artifacts: preview / edit-in-place / dismiss ----------
+    from loom import chat as _cm3
+    ca = api.chat_new(None)["data"]["chat"]
+    _adir2 = chats.artifacts_dir(api._need_root(), ca["id"], create=True)
+    (_adir2 / "notes.md").write_text("# hello")
+    r = api.artifact_read(ca["id"], "notes.md")
+    check("artifact_read serves text for the editor",
+          r["ok"] and r["data"]["kind"] == "text"
+          and r["data"]["text"] == "# hello", str(r))
+    r = api.artifact_write(ca["id"], "notes.md", "# edited by the user")
+    check("artifact_write edits IN PLACE (the model sees it)",
+          r["ok"] and (_adir2 / "notes.md").read_text()
+          == "# edited by the user", str(r))
+    (_adir2 / "blob.bin").write_bytes(b"\x00\x01\x02\x03")
+    r = api.artifact_read(ca["id"], "blob.bin")
+    check("binary artifact degrades to download-only",
+          r["ok"] and r["data"]["kind"] == "binary", str(r))
+    (_adir2 / "pic.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    r = api.artifact_read(ca["id"], "pic.png")
+    check("image artifact reports its path for rendering",
+          r["ok"] and r["data"]["kind"] == "image"
+          and r["data"]["path"].endswith("pic.png"))
+    r = api.artifact_read(ca["id"], "../escape")
+    check("artifact path escape refused", not r["ok"])
+    # the sync appends a timeline entry the user can save from forever
+    cdoc = chats.load_chat(api._need_root(), ca["id"])
+    fresh = _cm3._sync_artifacts(api._need_root(), cdoc)
+    chats.save_chat(api._need_root(), cdoc)
+    # notes.md is rightly ABSENT here: artifact_write refreshed the
+    # records, so the user's own edit is not re-announced as a delivery
+    check("artifact sync appends a timeline message",
+          fresh and cdoc["messages"]
+          and cdoc["messages"][-1]["role"] == "artifact"
+          and {i["name"] for i in cdoc["messages"][-1]["items"]}
+          == {"blob.bin", "pic.png"}, str(cdoc["messages"][-1:]))
+    check("a user edit via artifact_write is not re-announced",
+          "notes.md" not in {i["name"]
+                             for i in cdoc["messages"][-1]["items"]})
+    check("artifact messages never reach the wire",
+          not any("artifact" == m.get("role") for m in
+                  _cm3._wire_messages(api._need_root(),
+                                      api._config_or_error(), cdoc)))
+    r = api.artifact_dismiss(ca["id"], "notes.md")
+    check("pill dismissal records (file + timeline entry stay)",
+          r["ok"] and r["data"]["dismissed"] == ["notes.md"]
+          and (_adir2 / "notes.md").is_file(), str(r))
+    r = api.artifact_dismiss(ca["id"], "never-existed.md")
+    check("dismissing an unknown artifact refused", not r["ok"])
+    time.sleep(0.02)
+    (_adir2 / "notes.md").write_text("# regenerated by the model")
+    cdoc = chats.load_chat(api._need_root(), ca["id"])
+    _cm3._sync_artifacts(api._need_root(), cdoc)
+    check("a fresh regeneration un-dismisses the pill",
+          "notes.md" not in (cdoc.get("artifactsDismissed") or []))
+
     b = api.switch_blockers()
     check("switch blockers shape",
-          b["ok"] and b["data"]["servers"] == [] and b["data"]["chats"] == 0,
-          str(b))
+          b["ok"] and b["data"]["chats"] == 0
+          and b["data"]["terminals"] == 0, str(b))
     r2 = api.library_close()
-    check("library_close ok", r2["ok"] and r2["data"]["stopping"] == 0, str(r2))
+    check("library_close ok", r2["ok"], str(r2))
     st_now = api.app_state()
     check("switch: no library open after close",
           st_now["ok"] and st_now["data"]["library"] is None, str(st_now))
     r3 = api.lib_tree()
     check("closed library refuses file ops", not r3["ok"])
 
-# ---------- models: host list order ----------
-from loom import models  # noqa: E402
+# ---------- providers: yaml injection ----------
+from loom import providers  # noqa: E402
 
-models.add_host("a@x")
-models.add_host("b@y")
-models.add_host("c@z")
-check("hosts stored in add order", models.hosts() == ["a@x", "b@y", "c@z"])
-check("reorder persists",
-      models.reorder_hosts(["c@z", "a@x", "b@y"]) == ["c@z", "a@x", "b@y"])
-try:
-    models.reorder_hosts(["c@z", "a@x"])
-    check("reorder refuses a non-permutation", False)
-except models.ModelsError:
-    check("reorder refuses a non-permutation", True)
-try:
-    models.reorder_hosts(["c@z", "a@x", "b@y", "d@w"])
-    check("reorder refuses an invented host", False)
-except models.ModelsError:
-    check("reorder refuses an invented host", True)
-check("failed reorders left the order intact",
-      models.hosts() == ["c@z", "a@x", "b@y"])
-for _h in ("a@x", "b@y", "c@z"):
-    models.remove_host(_h)
+_base = "chat:\n  model: x\n"
+_t1 = providers.inject_provider(_base, "ws", "llama-cpp",
+                                "http://127.0.0.1:8080")
+import yaml as _y2
+_p1 = _y2.safe_load(_t1)
+check("inject_provider creates the block",
+      _p1["providers"][0] == {"name": "ws", "type": "llama-cpp",
+                              "url": "http://127.0.0.1:8080"}
+      and _p1["chat"] == {"model": "x"}, _t1)
+_t2 = providers.inject_provider(_t1, "gpu", "ninfer",
+                                "http://127.0.0.1:9090", "sam@gpu")
+_p2 = _y2.safe_load(_t2)
+check("inject_provider appends to the block",
+      [p["name"] for p in _p2["providers"]] == ["ws", "gpu"]
+      and _p2["providers"][1]["ssh"] == "sam@gpu", _t2)
+# ---------- bus broadcast + child-window lifecycle ----------
+from loom import app as appmod  # noqa: E402
+
+
+class _Ev:
+    def __init__(self):
+        self._cbs = []
+
+    def __iadd__(self, cb):
+        self._cbs.append(cb)
+        return self
+
+    def fire(self):
+        for cb in self._cbs:
+            cb()
+
+
+class _FakeWin:
+    def __init__(self):
+        self.js = []
+        self.destroyed = False
+        self.events = type("E", (), {})()
+        self.events.closed = _Ev()
+
+    def evaluate_js(self, p):
+        self.js.append(p)
+
+    def destroy(self):
+        self.destroyed = True
+
+
+def _wait(cond, timeout=3.0):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if cond():
+            return True
+        time.sleep(0.02)
+    return cond()
+
+
+_bus = appmod.Bus()
+_main = _FakeWin()
+_bus.set_window(_main)
+_bus.push({"type": "x", "n": 1})
+check("bus reaches the main window", _wait(lambda: len(_main.js) == 1))
+_child = _FakeWin()
+appmod.register_child_window("diag:c1", _child, _bus)
+_bus.push({"type": "x", "n": 2})
+check("bus broadcasts to registered children",
+      _wait(lambda: len(_child.js) == 1 and len(_main.js) == 2))
+check("child_window lookup", appmod.child_window("diag:c1") is _child)
+# the OS closed the child: it unregisters itself
+_child.events.closed.fire()
+_bus.push({"type": "x", "n": 3})
+check("closed child stops receiving",
+      _wait(lambda: len(_main.js) == 3) and len(_child.js) == 1)
+check("closed child left the registry", appmod.child_window("diag:c1") is None)
+# pop-in: the window is handed back for destruction
+_c2 = _FakeWin()
+appmod.register_child_window("diag:c2", _c2, _bus)
+check("pop_child_window returns and unregisters",
+      appmod.pop_child_window("diag:c2", _bus) is _c2
+      and appmod.child_window("diag:c2") is None)
+# main-window close: every remaining child dies with it
+_c3, _c4 = _FakeWin(), _FakeWin()
+appmod.register_child_window("diag:c3", _c3, _bus)
+appmod.register_child_window("diag:c4", _c4, _bus)
+appmod.close_child_windows(_bus)
+check("close_child_windows destroys every child",
+      _c3.destroyed and _c4.destroyed
+      and appmod.child_window("diag:c3") is None
+      and appmod.child_window("diag:c4") is None)
+_bus.push({"type": "x", "n": 4})
+check("destroyed children left the bus",
+      _wait(lambda: len(_main.js) == 4)
+      and len(_c3.js) == 0 and len(_c4.js) == 0)
+
+check("model_key stable", providers.model_key("a", "b") == "a::b")
+check("tilde collapses homes",
+      providers.tilde("path /home/sam/x and /Users/kim/y")
+      == "path ~/x and ~/y")
+
+# the shipped templates' `providers: []` placeholder must be REPLACED,
+# never left to shadow a duplicate key appended at EOF
+_t3 = providers.inject_provider(
+    "# head\nproviders: []\n# example comment\nchat:\n  model: x\n",
+    "ws", "llama-cpp", "http://h:1")
+_p3 = _y2.safe_load(_t3)
+check("inject replaces the [] placeholder (no duplicate key)",
+      _t3.count("providers") == 1
+      and _p3["providers"][0]["name"] == "ws"
+      and "# example comment" in _t3, _t3)
+_tpl_files = sorted((Path(__file__).resolve().parent.parent / "loom"
+                     / "templates").glob("*/loom.yaml"))
+for _tf in _tpl_files:
+    _out = providers.inject_provider(_tf.read_text(), "ws", "ninfer",
+                                     "http://h:2", "me@box")
+    _parsed = _y2.safe_load(_out)
+    check(f"inject into template {_tf.parent.name} parses",
+          isinstance(_parsed.get("providers"), list)
+          and _parsed["providers"][0]["name"] == "ws", _out[:300])
+# an INDENTED hand-written list keeps its indentation
+_t4 = providers.inject_provider(
+    "providers:\n  - name: a\n    type: ninfer\n    url: http://x:1\n"
+    "chat:\n  model: m\n", "b", "llama-cpp", "http://y:2")
+_p4 = _y2.safe_load(_t4)
+check("inject matches existing list indentation",
+      [p["name"] for p in _p4["providers"]] == ["a", "b"], _t4)
+
+# compaction request budget: a tiny window must not shred the history
+import threading as _th2
+with tempfile.TemporaryDirectory() as _cd:
+    _croot = library.create_library(_cd + "/lib")
+    _cfg = libconfig.load(_croot)
+    from loom import chat as _cm2
+    _small = {"id": "sm", "folders": [], "messages": [
+        {"role": "user", "content": "keep this short history"}]}
+    _msgs, _dropped = _cm2._compact_request(_croot, _cfg, _small, 2048)
+    check("tiny context window keeps the history intact",
+          _dropped == 0 and any("keep this short history"
+                                in str(m.get("content")) for m in _msgs),
+          str((_dropped, _msgs))[:200])
 
 print()
 if FAILS:

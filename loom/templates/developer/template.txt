@@ -1,1 +1,1 @@
-Developer — a ready-to-go software engineer: phased workflow prompt, the Python and Go engineering knowledge base, and a Go+Python dev container.
+Developer - a ready-to-go software engineer: phased workflow prompt, the Python and Go engineering knowledge base, and a Go+Python dev container.

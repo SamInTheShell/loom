@@ -1,11 +1,11 @@
-"""Named environments — sets of environment variables a chat can load
+"""Named environments - sets of environment variables a chat can load
 into its shell containers (cloud keys, API tokens, plain settings).
 
 Split storage, deliberately:
 
-  * `environments.yaml` at the LIBRARY root holds the definitions —
+  * `environments.yaml` at the LIBRARY root holds the definitions -
     names, plain (non-secret) values, and SECRET STUBS: a key mapped to
-    null. Stubs are indicators — anyone opening the library sees which
+    null. Stubs are indicators - anyone opening the library sees which
     variables a container needs, which is exactly what troubleshooting
     requires. The file is shareable and commit-safe by construction.
   * Secret VALUES never touch the library. They live in the OS keyring
@@ -14,7 +14,7 @@ Split storage, deliberately:
 
 At shell time the two merge: plain values from the file, secret values
 from the keyring. A stub with no local keyring value stays UNSET in the
-container — the honest failure mode — and is reported as missing so
+container - the honest failure mode - and is reported as missing so
 the model (and the user) can say what to fix.
 """
 
@@ -31,17 +31,17 @@ SERVICE = "loom-environments"
 FILENAME = "environments.yaml"
 
 _HEADER = """\
-# Environments — sets of variables for chat shell containers.
+# Environments - sets of variables for chat shell containers.
 # Pick one per chat next to the permission-mode pill.
 #
 # Plain values live right here and travel with the library. A key with
 # NO value (null) is a SECRET STUB: the real value lives in your OS
-# keyring, set via the Environments tab on each machine — the stub
+# keyring, set via the Environments tab on each machine - the stub
 # documents that the variable is required without ever storing it.
 #
 # aws-dev:
-#   AWS_REGION: us-east-1        # plain — shared with the library
-#   AWS_ACCESS_KEY_ID:           # secret — value in the keyring
+#   AWS_REGION: us-east-1        # plain - shared with the library
+#   AWS_ACCESS_KEY_ID:           # secret - value in the keyring
 #   AWS_SECRET_ACCESS_KEY:       # secret
 """
 
@@ -85,7 +85,7 @@ def _check_name(name: str) -> str:
 def _check_key(key: str) -> str:
     k = str(key or "").strip()
     if not _KEY_RE.match(k):
-        raise EnvError(f"bad variable name {k!r} — letters, digits, "
+        raise EnvError(f"bad variable name {k!r} - letters, digits, "
                        "underscores, not starting with a digit")
     return k
 
@@ -173,7 +173,7 @@ def set_secrets(name: str, values: dict) -> None:
 
 
 def secret_status(root, name: str) -> dict:
-    """{KEY: bool} — which of an environment's secret stubs have a value
+    """{KEY: bool} - which of an environment's secret stubs have a value
     in THIS machine's keyring."""
     n = _check_name(name)
     defs = read_defs(root)
@@ -186,7 +186,7 @@ def secret_status(root, name: str) -> dict:
 
 def save_env(root, name: str, variables: list, secret_values: dict) -> list[str]:
     """Create/replace one environment. variables: [{key, value, secret}]
-    — secret rows land as stubs in the file; their non-empty values (and
+    - secret rows land as stubs in the file; their non-empty values (and
     removals via empty string in secret_values) go to the keyring."""
     n = _check_name(name)
     body: dict = {}

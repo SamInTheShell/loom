@@ -1,4 +1,4 @@
-# Pebble — the storage engine
+# Pebble - the storage engine
 
 `github.com/cockroachdb/pebble` is a pure-Go LSM key-value engine
 (RocksDB-compatible design, built for CockroachDB). It is the
@@ -16,11 +16,11 @@ go get github.com/cockroachdb/pebble
 db, err := pebble.Open(dir, &pebble.Options{})
 defer db.Close()
 
-// writes — Sync waits for the WAL fsync; NoSync rides a later one
+// writes - Sync waits for the WAL fsync; NoSync rides a later one
 err = db.Set([]byte("k"), []byte("v"), pebble.Sync)
 err = db.Delete([]byte("k"), pebble.Sync)
 
-// reads — value is only valid until closer.Close()
+// reads - value is only valid until closer.Close()
 value, closer, err := db.Get([]byte("k"))   // err == pebble.ErrNotFound
 if err == nil {
     v := append([]byte(nil), value...)      // copy out, then
@@ -43,12 +43,12 @@ it.Close()
 ```
 
 Keys and values are plain `[]byte`, ordered bytewise. There are no
-column families and no transactions with reads — batches are write-only
+column families and no transactions with reads - batches are write-only
 atomicity, which is exactly enough for a raft apply loop (reads never
 need to be transactional with writes because ALL writes come from the
-single apply thread — the Engine contract in this folder's README).
+single apply thread - the Engine contract in this folder's README).
 
-## Key schema — one DB, many namespaces
+## Key schema - one DB, many namespaces
 
 Byte-ordered keys make prefixes into namespaces. The databox layout
 (shared by multigroup-raft.md):
@@ -59,7 +59,7 @@ r/<group>/e/<index>       raft log entry        (index big-endian!)
 r/<group>/h               raft HardState
 r/<group>/desc            group descriptor
 d/<group>/<userkey>       user data
-c/<chunkhash>             blob chunks (blob-storage.md) — often a
+c/<chunkhash>             blob chunks (blob-storage.md) - often a
                           separate pebble instance; see below
 ```
 
@@ -70,7 +70,7 @@ parts without one.
 
 ## The applied-index trick (idempotent replay)
 
-The single most important pattern for a raft state machine — apply the
+The single most important pattern for a raft state machine - apply the
 batch AND record how far you applied, atomically:
 
 ```go
@@ -86,7 +86,7 @@ func (e *Eng) ApplyBatch(ops []Op, group GroupID, index uint64) error {
 ```
 
 Fsync note: the raft LOG must be `Sync` (it is the durability raft
-promises). The APPLY batch may be `NoSync` — after a crash, replay from
+promises). The APPLY batch may be `NoSync` - after a crash, replay from
 the durable log re-derives it. This is a large write-amplification win.
 If log and state share one pebble DB, the log write's Sync covers the
 WAL anyway; keep the reasoning explicit in a comment.
@@ -96,9 +96,9 @@ WAL anyway; keep the reasoning explicit in a comment.
 - Point-in-time reads: `snap := db.NewSnapshot()` → `snap.Get`,
   `snap.NewIter` see a frozen view while writes continue. Use for
   `Engine.SnapshotForRange` (stream a shard's `d/<group>/` range to a
-  learner — sharding.md).
+  learner - sharding.md).
 - Receiving a snapshot: write the incoming stream into SSTs with
-  `sstable.NewWriter` and hand them to `db.Ingest([]string{...})` —
+  `sstable.NewWriter` and hand them to `db.Ingest([]string{...})` -
   files drop into the LSM wholesale, no per-key write path. Fall back
   to plain batched Sets if ingestion is fiddly; correctness first
   (build-plan.md rule: optimize later).
@@ -117,7 +117,7 @@ WAL anyway; keep the reasoning explicit in a comment.
 }
 ```
 
-- `db.Metrics()` returns a rich struct — expose it on the admin
+- `db.Metrics()` returns a rich struct - expose it on the admin
   frontend (frontends.md) from day one; LSM problems (L0 pileup,
   compaction debt) are visible there long before they hurt.
 - One pebble instance per node is the default. A SECOND instance for
@@ -127,12 +127,12 @@ WAL anyway; keep the reasoning explicit in a comment.
 ## Gotchas
 
 - `Get` values and iterator Key/Value are only valid until
-  Close/Next — copy if kept. The #1 pebble bug in new code.
-- `pebble.ErrNotFound` is the sentinel — map it to the Engine's
+  Close/Next - copy if kept. The #1 pebble bug in new code.
+- `pebble.ErrNotFound` is the sentinel - map it to the Engine's
   ErrNotFound at the boundary, don't leak pebble types upward.
 - Iterators pin memtables/SSTs: long-lived iterators block reclaim.
   Scan in bounded chunks and re-seek.
-- Open is exclusive (file lock) — a second Open on the same dir fails;
+- Open is exclusive (file lock) - a second Open on the same dir fails;
   tests must use `t.TempDir()` per instance.
 - Reopen after crash replays the WAL automatically; your job is only
   the applied-index skip shown above.
