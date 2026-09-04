@@ -472,6 +472,9 @@ document.addEventListener("keydown", (e) => {
         return;
       }
       if (k === "f" && st.activeTab === "library") {
+        // inside the editor's find bar, Ctrl+F belongs to the editor
+        // (re-select the query) — not the library-wide search
+        if (e.target.closest && e.target.closest(".md-findbar")) return;
         e.preventDefault();
         st.lib.ui?.searchIn?.focus();
         return;
@@ -517,9 +520,11 @@ document.addEventListener("keydown", (e) => {
     if (anyMenu) { e.preventDefault(); closeCtxTop(); return; }
     if (closeTopModal()) { e.preventDefault(); return; }
     // nothing stacked on top: Esc cancels the active chat's generation
+    // (a running compaction counts — it must be cancellable too)
     if (!mod && st.library) {
       const active = tabById(st.activeTab);
-      if (active?.type === "chat" && st.chats[active.chatId]?.running
+      const acs = active?.type === "chat" ? st.chats[active.chatId] : null;
+      if (acs && (acs.running || acs.compacting)
           && !(e.target.closest && e.target.closest(".term-emu"))) {
         e.preventDefault();
         stopChatGeneration(active.chatId);

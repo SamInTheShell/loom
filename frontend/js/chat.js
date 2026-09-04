@@ -989,6 +989,11 @@ function wireCtxHover(btn, chatId) {
       row("Auto-compaction", bd.auto
         ? "on at " + Math.round((Number(bd.threshold) || 0.8) * 100) + "%"
         : "off"),
+      // the predictive trigger's inputs: what recent turns actually cost
+      bd.turnSamples ? row("Recent turn growth",
+        "~" + fmtTok(bd.turnAvg) + "/turn · peak " + fmtTok(bd.turnMax)) : null,
+      bd.auto && bd.headroom ? row("Reserved headroom",
+        fmtTok(bd.headroom)) : null,
     ].filter(Boolean));
     card.append(el("div", { class: "ctx-actions" },
         el("button", {
@@ -1039,17 +1044,20 @@ function renderSendButton(chatId) {
   if (!panel) return;
   const cs = chatState(chatId);
   const b = panel.querySelector('[data-role="send"]');
-  b.classList.toggle("stop", !!cs.running);
+  const busy = !!(cs.running || cs.compacting);   // compaction stops too
+  b.classList.toggle("stop", busy);
   // stop is a FILLED square (currentColor = black via .stop), not the
   // stroked outline the icon set draws
-  b.innerHTML = cs.running
+  b.innerHTML = busy
     ? '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">'
       + '<rect x="7" y="7" width="10" height="10" rx="1.5"'
       + ' fill="currentColor"/></svg>'
     : icon("up");
-  b.title = cs.running ? "Stop generating  (Esc)" : "Send  (Enter)";
+  b.title = busy
+    ? (cs.running ? "Stop generating  (Esc)" : "Cancel compaction  (Esc)")
+    : "Send  (Enter)";
   // only the stop state earns a chip — Enter-to-send is placeholder lore
-  if (cs.running) setHotkey(b, "Esc");
+  if (busy) setHotkey(b, "Esc");
   else b.removeAttribute("data-hotkey");
   renderComposerHints(chatId);
 }
@@ -1145,11 +1153,13 @@ function ensureLiveTicker() {
  * backend unwinds. Returns false when nothing was running. */
 function stopChatGeneration(chatId) {
   const cs = chatState(chatId);
-  if (!cs.running) return false;
+  if (!cs.running && !cs.compacting) return false;
   Api.call("chat_stop", chatId);
   cs.churn = mkChurn(cs, true) || cs.churn;
   cs.discarding = true;
   cs.running = false;
+  cs.compacting = false;
+  cs.compactTok = 0;
   cs.live = null;
   cs.tools = {};
   renderSendButton(chatId);
@@ -1267,9 +1277,16 @@ function renderChatThread(chatId) {
     }
   }
   if (cs.compacting) {
-    thread.append(el("div", { class: "sysnote", "data-role": "compacting",
-      text: "Compacting context… ~" + fmtTok(cs.compactTok || 0)
-        + " tok summarized" }));
+    // the token count lives in its own span so compact_tick can update it
+    // without nuking the cancel button next to it
+    const cancelBtn = el("button", { class: "btn btn-sm",
+      text: "✕ cancel", title: "Cancel compaction  (Esc)" });
+    cancelBtn.addEventListener("click", () => stopChatGeneration(chatId));
+    thread.append(el("div", { class: "sysnote", "data-role": "compacting" },
+      el("span", { "data-role": "compact-tok",
+        text: "Compacting context… ~" + fmtTok(cs.compactTok || 0)
+          + " tok summarized " }),
+      cancelBtn));
   }
 
   // live streaming block — the cursor FOLLOWS the phases, in order:
@@ -2044,8 +2061,8 @@ function onChatEvent(ev) {
   const cs = chatState(chatId);
   // after an eager cancel everything in-flight is slop being discarded —
   // only the terminal events (done/error) end the discard window
-  if (cs.discarding && !["done", "error", "title",
-                         "compact_done", "compact_error"].includes(ev.kind)) {
+  if (cs.discarding && !["done", "error", "title", "compact_done",
+                         "compact_error", "compact_cancelled"].includes(ev.kind)) {
     return;
   }
   switch (ev.kind) {
@@ -2153,15 +2170,16 @@ function onChatEvent(ev) {
       cs.compacting = true;
       cs.compactTok = 0;
       queueThreadRedraw(chatId);
+      renderSendButton(chatId);   // stop button + Esc work during compaction
       break;
     case "compact_tick": {
       // the rising number IS the health indicator: frozen = stalled
       cs.compacting = true;
       cs.compactTok = ev.tokens || 0;
-      const note = chatPanel(chatId)?.querySelector('[data-role="compacting"]');
-      if (note) {
-        note.textContent = "Compacting context… ~"
-          + fmtTok(cs.compactTok) + " tok summarized";
+      const tok = chatPanel(chatId)?.querySelector('[data-role="compact-tok"]');
+      if (tok) {
+        tok.textContent = "Compacting context… ~"
+          + fmtTok(cs.compactTok) + " tok summarized ";
       } else {
         queueThreadRedraw(chatId);
       }
@@ -2170,15 +2188,27 @@ function onChatEvent(ev) {
     case "compact_done":
       cs.compacting = false;
       cs.compactTok = 0;
+      cs.discarding = false;
       toast("Context compacted — " + (ev.replaced || 0)
         + " earlier messages summarized.", "ok");
       refreshChatSilently(chatId);
+      renderSendButton(chatId);
+      break;
+    case "compact_cancelled":
+      // the user's own Esc/✕ — quiet, not an error
+      cs.compacting = false;
+      cs.compactTok = 0;
+      cs.discarding = false;
+      queueThreadRedraw(chatId);
+      renderSendButton(chatId);
       break;
     case "compact_error":
       cs.compacting = false;
       cs.compactTok = 0;
+      cs.discarding = false;
       toast(ev.msg || "compaction failed", "err");
       queueThreadRedraw(chatId);
+      renderSendButton(chatId);
       break;
     case "done":
       cs.churn = mkChurn(cs, false) || cs.churn;

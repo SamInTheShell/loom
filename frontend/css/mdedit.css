@@ -30,6 +30,36 @@
 }
 .md-status .spacer { flex: 1; }
 
+/* ---------- find-in-file bar (Ctrl+F) ---------- */
+.md-findbar {
+  flex: none; display: flex; align-items: center; gap: 4px;
+  padding: 4px 10px; border-bottom: 1px solid var(--bd-0);
+  background: var(--bg-1);
+}
+.md-findbar .gtb {
+  background: transparent; border: 1px solid transparent;
+  border-radius: var(--r-md); padding: 3px 8px; cursor: pointer;
+  color: var(--fg-1); font-size: var(--fs-sm);
+}
+.md-findbar .gtb:hover { background: var(--bg-3); color: var(--fg-0); }
+.md-findbar .gtb.np-on { background: var(--acc-bg); color: var(--acc); }
+.md-findbar .spacer { flex: 1; }
+.md-findin {
+  width: 240px; padding: 3px 8px; border-radius: var(--r-md);
+  border: 1px solid var(--bd-1); background: var(--bg-2); color: var(--fg-0);
+  font: inherit; font-size: var(--fs-sm);
+}
+.md-findin:focus { outline: none; border-color: var(--acc); }
+.md-findcount {
+  font-size: var(--fs-xs); color: var(--fg-2); min-width: 60px;
+  padding-left: 4px; white-space: nowrap;
+}
+.md-findcount.md-findmiss { color: var(--warn); }
+/* match highlights (CSS Custom Highlight API — no DOM inside the lines).
+   Amber reads on both themes; the current match flips to dark-on-amber. */
+::highlight(loom-find) { background-color: rgba(250, 204, 21, .30); }
+::highlight(loom-find-cur) { background-color: #f59e0b; color: #18181b; }
+
 .md-scroll { flex: 1; overflow: auto; background: var(--ed-bg); padding: 18px; }
 .md-wrapper { position: relative; min-height: 100%; }
 .md-surface {

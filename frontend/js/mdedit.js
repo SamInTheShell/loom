@@ -58,6 +58,28 @@ for (const [l, words] of Object.entries(ED_KW)) edKwSets[l] = new Set(words.spli
 
 const YAML_KEY_RE = /^(\s*(?:-\s+)?)((?:"[^"]*"|'[^']*'|[^\s:#][^:#]*?))(:)(\s|$)/;
 
+/* find-in-file: matches past this cap aren't tracked (the counter shows
+ * "2000+") — keeps a 1-char query in a huge file from stalling the UI */
+const ED_FIND_MAX = 2000;
+
+/* scan lines for a plain-text query → [{line, start, end}], non-
+ * overlapping, capped at `max`. Pure — node-testable. */
+function edFindMatches(lines, query, caseSense, max = ED_FIND_MAX) {
+  const out = [];
+  if (!query) return out;
+  const fold = caseSense ? (x) => x : (x) => x.toLowerCase();
+  const needle = fold(query);
+  for (let li = 0; li < lines.length && out.length < max; li++) {
+    const hay = fold(String(lines[li]));
+    let idx = hay.indexOf(needle);
+    while (idx !== -1 && out.length < max) {
+      out.push({ line: li, start: idx, end: idx + needle.length });
+      idx = hay.indexOf(needle, idx + needle.length);
+    }
+  }
+  return out;
+}
+
 /* Toggle line comments over a run of lines (Ctrl+/), VS Code semantics:
  * every non-blank line already commented → uncomment them all; otherwise
  * comment every non-blank line, inserting `marker + space` at the run's
@@ -228,7 +250,8 @@ class LoomEditor {
     this.counts = el('span');
     this.saveState = el('span');
     this.status.append(this.counts, el('span', { class: 'spacer' }), this.saveState);
-    host.append(this.toolbar, this.scroller, this.status);
+    this._buildFindbar();
+    host.append(this.toolbar, this.findbar, this.scroller, this.status);
 
     this._buildToolbar();
     this._wire();
@@ -269,6 +292,7 @@ class LoomEditor {
         tbtn('`', 'Inline code — wrap selection in backticks (Ctrl+E)', () => this._wrapSel('`'));
       }
     }
+    tbtn('Find', 'Find in file (Ctrl+F)', () => this.openFind());
     this.wrapBtn = tbtn('Wrap', 'Toggle word wrapping (remembered per file type)', () => {
       this.wrapOn = !this.wrapOn;
       localStorage.setItem('loom-md-' + this._wrapKey(), this.wrapOn ? '1' : '0');
@@ -341,6 +365,7 @@ class LoomEditor {
     this._destroyed = true;
     clearTimeout(this._decoTimer);
     clearTimeout(this._diffTimer);
+    this._clearFindHl();
     this.host.replaceChildren();
     this.host.classList.remove('mdapp');
   }
@@ -513,6 +538,9 @@ class LoomEditor {
     this.copyLayer.replaceChildren();
     for (const e of fenceOpens) this._addCopyBtn(e);
     this._positionCopyBtns();
+    // re-render pass killed the highlight ranges on rewritten lines —
+    // rebuild them (and recount: the text may have changed)
+    if (this._find && this._find.open) this._findApply(false);
   }
 
   /* one markdown table line → table-cells. Every source character stays
@@ -587,6 +615,192 @@ class LoomEditor {
       const lineRight = e.offsetLeft + e.offsetWidth;
       b.style.top = (e.offsetTop + 2) + 'px';
       b.style.left = Math.max(0, Math.min(lineRight, visRight) - b.offsetWidth - 6) + 'px';
+    }
+  }
+
+  /* ---- find in file (Ctrl+F) ----
+   * Matches are highlighted via the CSS Custom Highlight API (no DOM
+   * mutation — the decorator's sig cache and the caret walker never see
+   * them; ranges are simply rebuilt after every decorate pass). Where the
+   * API is missing the current match falls back to a plain selection. */
+  _buildFindbar() {
+    this._find = { open: false, matches: [], cur: -1, caseSense: false,
+                   anchor: null };
+    this.findIn = el('input', { type: 'text', class: 'md-findin',
+      placeholder: 'Find in file…' });
+    this.findCount = el('span', { class: 'md-findcount' });
+    const fbtn = (label, title, fn) => {
+      const b = el('button', { type: 'button', class: 'gtb', text: label, title });
+      b.addEventListener('mousedown', (e) => e.preventDefault());
+      b.addEventListener('click', fn);
+      return b;
+    };
+    this.caseBtn = fbtn('Aa', 'Match case', () => {
+      this._find.caseSense = !this._find.caseSense;
+      this.caseBtn.classList.toggle('np-on', this._find.caseSense);
+      this._findApply(true);
+      this.findIn.focus();
+    });
+    this.findbar = el('div', { class: 'md-findbar' },
+      this.findIn, this.caseBtn,
+      fbtn('↑', 'Previous match (Shift+Enter)', () => this._findStep(-1)),
+      fbtn('↓', 'Next match (Enter)', () => this._findStep(1)),
+      this.findCount,
+      el('span', { class: 'spacer' }),
+      fbtn('✕', 'Close (Esc)', () => this.closeFind()));
+    this.findbar.style.display = 'none';
+    this.findIn.addEventListener('input', () => this._findApply(true));
+    this.findIn.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === 'F3') {
+        e.preventDefault();
+        this._findStep(e.shiftKey ? -1 : 1);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        this.closeFind();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        this.findIn.select();
+      }
+    });
+  }
+  openFind() {
+    // anchor: search starts from where the caret was, like every editor
+    const caret = this._caretInfo();
+    this._find.anchor = caret
+      ? { line: [...this.surface.children].indexOf(caret.el),
+          offset: caret.offset }
+      : null;
+    const s = getSelection();
+    if (s && s.rangeCount && !s.isCollapsed
+        && this.surface.contains(s.anchorNode)) {
+      const t = s.toString();
+      if (t && t.length <= 200 && !t.includes('\n')) this.findIn.value = t;
+    }
+    this._find.open = true;
+    this.findbar.style.display = 'flex';
+    this.findIn.focus();
+    this.findIn.select();
+    this._findApply(true);
+  }
+  closeFind() {
+    const f = this._find;
+    if (!f.open) return;
+    const m = f.matches[f.cur];
+    f.open = false;
+    f.matches = [];
+    f.cur = -1;
+    this.findbar.style.display = 'none';
+    this.findCount.textContent = '';
+    this._clearFindHl();
+    this.surface.focus();
+    if (m && !this.readOnly) {
+      // leave the caret ON the match the user was looking at
+      const line = this.surface.children[m.line];
+      if (line) this._setCaret(line, m.start);
+    }
+  }
+  _findApply(userAction) {
+    const f = this._find;
+    if (!f.open) return;
+    const q = this.findIn.value;
+    const prev = f.matches[f.cur] || null;
+    f.matches = edFindMatches(this._snapshot(), q, f.caseSense);
+    if (!f.matches.length) {
+      f.cur = -1;
+    } else if (userAction || !prev) {
+      f.cur = this._findFrom(f.anchor);
+    } else {
+      // a decorate refresh mid-find: stay on (or nearest after) the match
+      // the user was on
+      f.cur = f.matches.findIndex((m) => m.line > prev.line
+        || (m.line === prev.line && m.start >= prev.start));
+      if (f.cur === -1) f.cur = f.matches.length - 1;
+    }
+    this._renderFindHl(userAction);
+  }
+  _findFrom(anchor) {
+    if (!anchor) return 0;
+    const i = this._find.matches.findIndex((m) => m.line > anchor.line
+      || (m.line === anchor.line && m.start >= anchor.offset));
+    return i === -1 ? 0 : i;
+  }
+  _findStep(dir) {
+    const f = this._find;
+    if (!f.matches.length) return;
+    f.cur = (f.cur + dir + f.matches.length) % f.matches.length;
+    this._renderFindHl(true);
+  }
+  _matchRange(m) {
+    const line = this.surface.children[m.line];
+    if (!line) return null;
+    const r = document.createRange();
+    const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+    let pos = 0, node, haveStart = false;
+    while ((node = walker.nextNode())) {
+      const len = node.textContent.length;
+      if (!haveStart && m.start <= pos + len) {
+        r.setStart(node, m.start - pos);
+        haveStart = true;
+      }
+      if (haveStart && m.end <= pos + len) {
+        r.setEnd(node, m.end - pos);
+        return r;
+      }
+      pos += len;
+    }
+    return null;
+  }
+  _renderFindHl(scroll) {
+    const f = this._find;
+    const n = f.matches.length;
+    this.findCount.textContent = !this.findIn.value ? ''
+      : n ? `${f.cur + 1}/${n}${n >= ED_FIND_MAX ? '+' : ''}`
+          : 'no matches';
+    this.findCount.classList.toggle('md-findmiss',
+      !!this.findIn.value && !n);
+    const cur = f.cur >= 0 ? f.matches[f.cur] : null;
+    if (!(window.Highlight && CSS.highlights)) {
+      // no Custom Highlight API: show the current match as a selection
+      if (scroll && cur) {
+        const r = this._matchRange(cur);
+        if (r) {
+          const s = getSelection();
+          s.removeAllRanges();
+          s.addRange(r.cloneRange());
+          this._scrollToRange(r);
+        }
+      }
+      return;
+    }
+    const all = [];
+    for (const m of f.matches) {
+      if (m === cur) continue;
+      const r = this._matchRange(m);
+      if (r) all.push(r);
+    }
+    CSS.highlights.set('loom-find', new Highlight(...all));
+    const curR = cur ? this._matchRange(cur) : null;
+    if (curR) CSS.highlights.set('loom-find-cur', new Highlight(curR));
+    else CSS.highlights.delete('loom-find-cur');
+    if (scroll && curR) this._scrollToRange(curR);
+  }
+  _clearFindHl() {
+    if (window.CSS && CSS.highlights) {
+      CSS.highlights.delete('loom-find');
+      CSS.highlights.delete('loom-find-cur');
+    }
+  }
+  _scrollToRange(r) {
+    const rect = r.getBoundingClientRect();
+    const sr = this.scroller.getBoundingClientRect();
+    if (rect.top < sr.top + 8 || rect.bottom > sr.bottom - 8) {
+      this.scroller.scrollTop += rect.top - sr.top
+        - this.scroller.clientHeight / 3;
+    }
+    if (rect.left < sr.left + 8 || rect.right > sr.right - 24) {
+      this.scroller.scrollLeft += rect.left - sr.left
+        - this.scroller.clientWidth / 3;
     }
   }
 
@@ -810,8 +1024,25 @@ class LoomEditor {
     });
 
     this.surface.addEventListener('keydown', (e) => {
-      if (this.readOnly) return;
       const mod = e.ctrlKey || e.metaKey;
+      // find works in read-only editors too — handled before the gate
+      if (mod && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        this.openFind();
+        return;
+      }
+      if (e.key === 'F3') {
+        e.preventDefault();
+        if (this._find.open) this._findStep(e.shiftKey ? -1 : 1);
+        else this.openFind();
+        return;
+      }
+      if (e.key === 'Escape' && this._find.open) {
+        e.preventDefault();
+        this.closeFind();
+        return;
+      }
+      if (this.readOnly) return;
       if (mod && !e.altKey) {
         const k = e.key.toLowerCase();
         if (this.mode === 'md') {

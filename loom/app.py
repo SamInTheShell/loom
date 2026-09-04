@@ -1063,7 +1063,7 @@ class JsApi:
                                  + ("" if m.get("ok", True) else " · FAILED")})
                 elif role == "compact":
                     rows.append({"i": i, "kind": "compact", "ts": ts,
-                                 "durMs": delta,
+                                 "durMs": m.get("durMs") or delta,
                                  "tokens": est(m.get("content")),
                                  "preview": prev(m.get("content")),
                                  "extra": str(m.get("replaced") or 0)
@@ -1075,6 +1075,76 @@ class JsApi:
                 pass
             return {"rows": rows, "title": c.get("title") or "Chat",
                     "nCtx": nctx}
+        return _api_call(do)()
+
+    def chat_diag_export(self, chat_id):
+        """Save a metadata/stats-only JSON snapshot of the chat: per-entry
+        token estimates, the server's REAL usage/timings objects, context
+        breakdown, and compaction settings — NO message or response text.
+        Made for pasting into a bug report or handing to an assistant."""
+        def do():
+            root = self._need_root()
+            c = chats.load_chat(root, str(chat_id))
+            cfg, context, nctx = None, None, 0
+            try:
+                cfg = libconfig.load(root)
+                nctx = chat._nctx_for(cfg, c)
+                context = chat.context_breakdown(root, cfg, c)
+            except Exception:
+                pass   # a broken loom.yaml still exports the entry stats
+            est = chat._est
+            entries = []
+            for i, m in enumerate(c.get("messages") or []):
+                role = m.get("role")
+                e = {"i": i, "role": role, "ts": m.get("ts"),
+                     "chars": len(str(m.get("content") or "")),
+                     "estTokens": est(m.get("content"))}
+                if role == "user" and m.get("images"):
+                    e["images"] = len(m["images"])
+                elif role == "assistant":
+                    if m.get("thinking"):
+                        e["thinkingChars"] = len(str(m["thinking"]))
+                        e["estThinkTokens"] = est(m["thinking"])
+                    if m.get("tool_calls"):
+                        e["toolCalls"] = [
+                            tc.get("function", {}).get("name", "?")
+                            for tc in m["tool_calls"]]
+                        e["estToolCallTokens"] = sum(
+                            est(json.dumps(tc)) for tc in m["tool_calls"])
+                    if isinstance(m.get("usage"), dict):
+                        e["usage"] = m["usage"]
+                    if isinstance(m.get("timings"), dict):
+                        e["timings"] = m["timings"]
+                    if m.get("stopped"):
+                        e["stopped"] = True
+                elif role == "tool":
+                    e["tool"] = m.get("name") or "tool"
+                    e["ok"] = bool(m.get("ok", True))
+                elif role == "compact":
+                    for k in ("replaced", "omitted", "tokensBefore", "durMs"):
+                        if m.get(k) is not None:
+                            e[k] = m[k]
+                entries.append(e)
+            doc = {"exportedAt": int(time.time() * 1000),
+                   "chatId": c.get("id"), "title": c.get("title"),
+                   "createdTs": c.get("createdTs"),
+                   "model": c.get("model")
+                   or ((cfg or {}).get("chat") or {}).get("model") or "",
+                   "nCtx": nctx,
+                   "compaction": ((cfg or {}).get("chat") or {}).get("compaction"),
+                   "context": context, "totalMessages": len(entries),
+                   "entries": entries}
+            if self._window is None:
+                raise chats.ChatError("window not ready")
+            suggest = f"loom-diag-{str(c.get('id'))[:8]}.json"
+            got = self._window.create_file_dialog(
+                webview.FileDialog.SAVE, save_filename=suggest)
+            if not got:
+                return {"saved": None}
+            dest = Path(got[0] if isinstance(got, (list, tuple)) else got)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+            return {"saved": str(dest)}
         return _api_call(do)()
 
     def chat_compact(self, chat_id):

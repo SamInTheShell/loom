@@ -899,13 +899,53 @@ def _nctx_for(cfg: dict, chat: dict) -> int:
 
 def _last_used_tokens(chat: dict) -> int:
     """The real context size after the last completed turn: that turn's
-    prompt_tokens + completion_tokens, from llama-server's usage object."""
-    for m in reversed(chat.get("messages") or []):
+    prompt_tokens + completion_tokens, from llama-server's usage object.
+    Only the LIVE slice counts — usage from before a compaction marker
+    describes a context that no longer exists, and letting it linger kept
+    usedTokens pinned at the pre-compaction value (which made the chip lie
+    and auto-compaction re-fire for nothing)."""
+    _compact, live = _active_slice(chat)
+    for m in reversed(live):
         u = m.get("usage")
         if m.get("role") == "assistant" and isinstance(u, dict):
             return int(u.get("prompt_tokens") or 0) \
                 + int(u.get("completion_tokens") or 0)
     return 0
+
+
+# how many recent turn-growth samples feed the adaptive headroom
+TURN_WINDOW = 8
+
+
+def _turn_growth(chat: dict) -> dict:
+    """Recent per-turn context growth, from llama-server's REAL usage
+    objects: {avg, max, n} tokens added per model turn over the last
+    TURN_WINDOW turns. Deltas that span a compaction (totals shrink) are
+    skipped. This is what lets auto-compaction anticipate a spiky turn
+    instead of being shocked into a full window."""
+    totals: list[int | None] = []
+    for m in chat.get("messages") or []:
+        if m.get("role") == "compact":
+            totals.append(None)   # boundary — don't diff across it
+            continue
+        u = m.get("usage")
+        if m.get("role") == "assistant" and isinstance(u, dict):
+            totals.append(int(u.get("prompt_tokens") or 0)
+                          + int(u.get("completion_tokens") or 0))
+    deltas = [b - a for a, b in zip(totals, totals[1:])
+              if a is not None and b is not None and b > a]
+    recent = deltas[-TURN_WINDOW:]
+    if not recent:
+        return {"avg": 0, "max": 0, "n": 0}
+    return {"avg": sum(recent) // len(recent), "max": max(recent),
+            "n": len(recent)}
+
+
+def _headroom(chat: dict, nctx: int) -> int:
+    """Tokens the NEXT turn should be assumed to need: the recent worst
+    case, padded average, or a 5% floor — whichever is largest."""
+    g = _turn_growth(chat)
+    return max(nctx // 20, g["max"], (g["avg"] * 3) // 2)
 
 
 def context_breakdown(root: Path, cfg: dict, chat: dict) -> dict:
@@ -943,11 +983,15 @@ def context_breakdown(root: Path, cfg: dict, chat: dict) -> dict:
     nctx = _nctx_for(cfg, chat)
     used = max(est_total, last_used)
     comp = ch.get("compaction") or {"auto": True, "threshold": 0.8}
+    growth = _turn_growth(chat)
     return {"parts": parts, "images": images, "estTokens": est_total,
             "lastUsedTokens": last_used, "usedTokens": used, "nCtx": nctx,
             "pct": round(100 * used / nctx, 1) if nctx else None,
             "auto": bool(comp.get("auto", True)),
             "threshold": float(comp.get("threshold", 0.8)),
+            "turnAvg": growth["avg"], "turnMax": growth["max"],
+            "turnSamples": growth["n"],
+            "headroom": _headroom(chat, nctx) if nctx else 0,
             "liveMessages": len(live), "compacted": compact is not None}
 
 
@@ -963,10 +1007,16 @@ def _strip_think(text: str) -> str:
 
 
 def _gen_once(chat_id: str, server: dict, messages: list[dict],
-              cancel: threading.Event, on_progress=None) -> str:
+              cancel: threading.Event, on_progress=None,
+              err_box: dict | None = None) -> str:
     """One plain streamed generation (no tools), accumulated. Registered
     in _streams so stop() can cut it. on_progress(chars_so_far) fires per
-    chunk — the caller turns it into a visible liveness signal."""
+    chunk — the caller turns it into a visible liveness signal.
+
+    err_box (when given) receives err_box['error'] = <reason> if the
+    stream broke or the server sent an SSE error chunk — swallowing those
+    silently is how compaction used to report 'came back empty' for what
+    was really a server error."""
     body = {"model": server["name"], "messages": messages, "stream": True}
     abort_box: dict = {}
     with _lock:
@@ -991,6 +1041,10 @@ def _gen_once(chat_id: str, server: dict, messages: list[dict],
             for chunk in _sse(resp):
                 if cancel.is_set():
                     break
+                if chunk.get("error") and err_box is not None:
+                    e = chunk["error"]
+                    err_box["error"] = str(e.get("message") or e) \
+                        if isinstance(e, dict) else str(e)
                 for ch in chunk.get("choices") or []:
                     txt = (ch.get("delta") or {}).get("content")
                     if txt:
@@ -1001,8 +1055,11 @@ def _gen_once(chat_id: str, server: dict, messages: list[dict],
                                 on_progress(total)
                             except Exception:
                                 pass
-        except STREAM_ERRORS:
-            pass   # aborted/broken stream — return whatever accumulated
+        except STREAM_ERRORS as e:
+            # aborted/broken stream — return whatever accumulated, but
+            # tell the caller (a cancel-induced break is not an error)
+            if err_box is not None and not cancel.is_set():
+                err_box["error"] = f"stream broke: {type(e).__name__}: {e}"
     finally:
         with _lock:
             if _streams.get(chat_id) is resp:
@@ -1014,6 +1071,88 @@ def _gen_once(chat_id: str, server: dict, messages: list[dict],
     return _strip_think("".join(out))
 
 
+# the compaction REQUEST must itself fit the window, with room left to
+# generate the summary — at least this many tokens (or nctx/8) stay free
+COMPACT_RESERVE_TOKENS = 2048
+COMPACT_TOOL_TRIM = 2_000       # chars kept per tool result in the request
+COMPACT_KEEP_LAST = 4           # newest live messages never dropped
+
+
+def _msg_est(m: dict) -> int:
+    """chars/4 estimate for one wire message, tool_calls included."""
+    content = m.get("content")
+    if isinstance(content, list):   # multimodal user message: text parts
+        n = sum(_est(p.get("text")) for p in content
+                if isinstance(p, dict) and p.get("type") == "text")
+    else:
+        n = _est(content)
+    for tc in m.get("tool_calls") or []:
+        n += _est(json.dumps(tc))
+    return n + 8
+
+
+def _compact_request(root: Path, cfg: dict, chat_doc: dict,
+                     nctx: int) -> tuple[list[dict], int]:
+    """(messages for the summarization call, count dropped). At a FULL
+    window the naive request (whole wire + prompt) exceeds nctx and the
+    server errors or stalls — the exact 'hit compact at 100% and nothing
+    happened' failure. So the request is BUDGETED: big tool results are
+    trimmed, then the oldest messages are dropped until it fits with
+    generation room to spare."""
+    prompt = _read_prompt(root,
+                          (cfg.get("chat") or {}).get("compaction_prompt")
+                          or "prompts/compaction.md",
+                          library.DEFAULT_COMPACTION_PROMPT)
+    msgs = _wire_messages(root, cfg, chat_doc)
+    msgs.append({"role": "user", "content": prompt})
+    if not nctx:
+        return msgs, 0
+    budget = nctx - max(COMPACT_RESERVE_TOKENS, nctx // 8)
+
+    def total():
+        return sum(_msg_est(m) for m in msgs)
+
+    # pass 1: giant tool results tell the summary nothing a trimmed one
+    # doesn't — keep head + tail
+    if total() > budget:
+        for m in msgs:
+            c = m.get("content")
+            if m.get("role") == "tool" and isinstance(c, str) \
+                    and len(c) > COMPACT_TOOL_TRIM:
+                keep = COMPACT_TOOL_TRIM // 2
+                m["content"] = (c[:keep] + "\n[... trimmed for compaction ...]\n"
+                                + c[-keep:])
+
+    # pass 2: drop the oldest messages (after the system prompt) until the
+    # request fits — the newest COMPACT_KEEP_LAST plus the prompt survive
+    dropped = 0
+    while total() > budget and len(msgs) > COMPACT_KEEP_LAST + 2:
+        msgs.pop(1)
+        dropped += 1
+        # never leave an orphan tool result at the front (strict chat
+        # templates reject a tool message with no preceding call)
+        while len(msgs) > 2 and msgs[1].get("role") == "tool":
+            msgs.pop(1)
+            dropped += 1
+
+    # pass 3 (single huge messages): halve the longest content until it
+    # fits — converges fast, and a truncated transcript still summarizes
+    for _ in range(24):
+        if total() <= budget:
+            break
+        big = max(msgs[1:], key=_msg_est)
+        c = big.get("content")
+        if not isinstance(c, str) or len(c) < 400:
+            break
+        big["content"] = c[:len(c) // 2] + "\n[... trimmed for compaction ...]"
+
+    if dropped:
+        msgs.insert(1, {"role": "user", "content":
+                        f"[Note: the {dropped} oldest messages did not fit "
+                        "in this summarization request and were omitted.]"})
+    return msgs, dropped
+
+
 def compact(root: Path, cfg: dict, chat_doc: dict, server: dict,
             cancel: threading.Event, ev) -> bool:
     """Summarize the live context into a compaction marker. The original
@@ -1022,13 +1161,10 @@ def compact(root: Path, cfg: dict, chat_doc: dict, server: dict,
     _old, live = _active_slice(chat_doc)
     if not live:
         return False
-    prompt = _read_prompt(root,
-                          (cfg.get("chat") or {}).get("compaction_prompt")
-                          or "prompts/compaction.md",
-                          library.DEFAULT_COMPACTION_PROMPT)
+    nctx = _nctx_for(cfg, chat_doc)
+    tokens_before = context_breakdown(root, cfg, chat_doc)["usedTokens"]
+    msgs, dropped = _compact_request(root, cfg, chat_doc, nctx)
     ev("compact_start", messages=len(live))
-    msgs = _wire_messages(root, cfg, chat_doc) + [{"role": "user",
-                                                   "content": prompt}]
     # visible liveness: the page shows this count rising — if it stops,
     # the user KNOWS compaction stalled instead of wondering
     last_tick = {"t": 0.0}
@@ -1038,17 +1174,40 @@ def compact(root: Path, cfg: dict, chat_doc: dict, server: dict,
         if now - last_tick["t"] >= 0.25:
             last_tick["t"] = now
             ev("compact_tick", tokens=(chars + 3) // 4)
+    err_box: dict = {}
+    t0 = time.monotonic()
     try:
         summary = _gen_once(str(chat_doc["id"]), server, msgs, cancel,
-                            on_progress=prog)
+                            on_progress=prog, err_box=err_box)
     except (OSError, urllib.error.URLError, urllib.error.HTTPError) as e:
-        ev("compact_error", msg=f"compaction failed: {e}")
+        if cancel.is_set():
+            # the user's stop tore the request down — that's a cancel
+            ev("compact_cancelled")
+            return False
+        detail = ""
+        if isinstance(e, urllib.error.HTTPError):
+            try:
+                detail = ": " + e.read().decode("utf-8", "replace")[:300]
+            except Exception:
+                pass
+        ev("compact_error", msg=f"compaction failed: {e}{detail}")
         return False
-    if cancel.is_set() or not summary:
-        ev("compact_error", msg="compaction was cancelled or came back empty")
+    if cancel.is_set():
+        ev("compact_cancelled")
+        return False
+    if err_box.get("error"):
+        # a summary cut off mid-stream silently loses history — refuse it
+        ev("compact_error", msg="compaction failed: " + str(err_box["error"]))
+        return False
+    if not summary:
+        ev("compact_error", msg="compaction failed: the model returned an "
+                                "empty summary — try again, or pick a "
+                                "different model for this chat")
         return False
     chat_doc["messages"].append({"role": "compact", "content": summary,
-                                 "replaced": len(live),
+                                 "replaced": len(live), "omitted": dropped,
+                                 "tokensBefore": tokens_before,
+                                 "durMs": int((time.monotonic() - t0) * 1000),
                                  "ts": int(time.time() * 1000)})
     chats.save_chat(root, chat_doc)
     ev("compact_done", replaced=len(live))
@@ -1056,16 +1215,26 @@ def compact(root: Path, cfg: dict, chat_doc: dict, server: dict,
 
 
 def _maybe_autocompact(root: Path, cfg: dict, chat_doc: dict, server: dict,
-                       cancel: threading.Event, ev) -> None:
+                       cancel: threading.Event, ev) -> bool | None:
+    """None = not needed; True/False = compaction ran and succeeded/failed.
+
+    Two triggers, either fires:
+    - the classic threshold (default 80% of the window);
+    - PREDICTIVE: recent turns' real token growth (avg/worst over the last
+      TURN_WINDOW turns) says the next turn could crash into the window —
+      so a run of unusually fat turns compacts EARLY instead of shocking
+      the chat into a wedged full-context state."""
     comp = (cfg.get("chat") or {}).get("compaction") or {}
     if not comp.get("auto", True):
-        return
+        return None
     nctx = _nctx_for(cfg, chat_doc)
     if not nctx:
-        return
-    bd = context_breakdown(root, cfg, chat_doc)
-    if bd["usedTokens"] >= float(comp.get("threshold", 0.8)) * nctx:
-        compact(root, cfg, chat_doc, server, cancel, ev)
+        return None
+    used = context_breakdown(root, cfg, chat_doc)["usedTokens"]
+    if used >= float(comp.get("threshold", 0.8)) * nctx \
+            or used + _headroom(chat_doc, nctx) >= nctx:
+        return compact(root, cfg, chat_doc, server, cancel, ev)
+    return None
 
 
 def start_compaction(root: Path, chat_id: str, push) -> None:
@@ -1134,9 +1303,11 @@ def _worker(root: Path, chat_id: str, cancel: threading.Event, push) -> None:
         chat = chats.load_chat(root, chat_id)
         server = _server_for(cfg, chat)
         ev("start", model=server["name"])
-        # auto-compaction: runs BEFORE the turn when the context has grown
-        # past the loom.yaml threshold
-        _maybe_autocompact(root, cfg, chat, server, cancel, ev)
+        # auto-compaction: before the first turn, AND between tool-loop
+        # turns — a long agentic run grows the context mid-send, and only
+        # checking once per send let it blow straight past the threshold.
+        # One failure stops retrying for this send (no error-event spam).
+        compact_ok = _maybe_autocompact(root, cfg, chat, server, cancel, ev)
         while True:
             if cancel.is_set():
                 break
@@ -1144,6 +1315,9 @@ def _worker(root: Path, chat_id: str, cancel: threading.Event, push) -> None:
             _save_from_loop(root, chat)
             if done or cancel.is_set():
                 break
+            if compact_ok is not False:
+                compact_ok = _maybe_autocompact(root, cfg, chat, server,
+                                                cancel, ev)
         ev("done", cancelled=cancel.is_set())
         # titling happens AFTER done, on its own thread — it must not block
         # the chat becoming usable again

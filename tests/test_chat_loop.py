@@ -64,6 +64,13 @@ class FakeLlama(BaseHTTPRequestHandler):
             self.wfile.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
             self.wfile.flush()
 
+        if self.server.mode == "error":
+            # llama-server's in-stream failure shape: an SSE error chunk
+            sse({"error": {"code": 500, "message": "kaboom from fake server"}})
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+            return
+
         has_tool_result = any(m.get("role") == "tool" for m in req["messages"])
         if not has_tool_result and self.server.mode == "tools":
             sse({"choices": [{"delta": {"reasoning_content": "hmm "}}]})
@@ -349,6 +356,94 @@ with tempfile.TemporaryDirectory() as d:
           any("Hello from fake llama" in str(m.get("content")) for m in wireC)
           and not any("magic number" in str(m.get("content")) for m in wireC),
           str(wireC))
+
+    # ---------- compaction: a server error SURFACES (not 'came back
+    # empty') and leaves no marker ----------
+    sockE = os.environ["LOOM_HOME"] + "/fakeE.sock"
+    serverE = start_fake(sockE, "error")
+    with srv._lock:
+        srv._servers[midC] = {"id": midC, "state": "running", "sock": sockE}
+    ce = chats.new_chat(root, "fake")
+    ce["messages"] = [{"role": "user", "content": "hello"},
+                      {"role": "assistant", "content": "hi"}]
+    chats.save_chat(root, ce)
+    evE, doneE = [], threading.Event()
+
+    def pushE(e):
+        evE.append(e)
+        if e["kind"] in ("compact_done", "compact_error", "compact_cancelled"):
+            doneE.set()
+    chat.start_compaction(root, ce["id"], pushE)
+    check("compaction: server error surfaced with its message",
+          doneE.wait(20) and evE[-1]["kind"] == "compact_error"
+          and "kaboom" in str(evE[-1].get("msg")), str(evE[-1:]))
+    check("compaction: failed run leaves no marker",
+          all(m["role"] != "compact"
+              for m in chats.load_chat(root, ce["id"])["messages"]))
+    serverE.shutdown()
+
+    # ---------- compaction: cancellable even while the server stalls
+    # pre-headers (the 'no stop button' failure) ----------
+    sockF = os.environ["LOOM_HOME"] + "/fakeF.sock"
+    serverF = start_fake(sockF, "stall")
+    with srv._lock:
+        srv._servers[midC] = {"id": midC, "state": "running", "sock": sockF}
+    cf = chats.new_chat(root, "fake")
+    cf["messages"] = [{"role": "user", "content": "hello"},
+                      {"role": "assistant", "content": "hi"}]
+    chats.save_chat(root, cf)
+    evF, doneF = [], threading.Event()
+
+    def pushF(e):
+        evF.append(e)
+        if e["kind"] in ("compact_done", "compact_error", "compact_cancelled"):
+            doneF.set()
+    chat.start_compaction(root, cf["id"], pushF)
+    time.sleep(0.7)                    # request parked pre-headers
+    t0F = time.time()
+    chat.stop(cf["id"])
+    okF = doneF.wait(5)
+    check("compaction: cancel lands fast as compact_cancelled",
+          okF and time.time() - t0F < 2.0
+          and evF[-1]["kind"] == "compact_cancelled",
+          str([e["kind"] for e in evF]))
+    serverF.shutdown()
+
+    # ---------- compaction at an OVER-FULL window: the request itself is
+    # budgeted to fit nctx with generation room to spare ----------
+    sockG = os.environ["LOOM_HOME"] + "/fakeG.sock"
+    serverG = start_fake(sockG, "plain")
+    with srv._lock:
+        srv._servers[midC] = {"id": midC, "state": "running", "sock": sockG}
+    cg = chats.new_chat(root, "fake")
+    cg["messages"] = [{"role": "user", "content": "w " * 20000},  # ~10k tok
+                      {"role": "assistant", "content": "ok"},
+                      {"role": "user", "content": "FINAL-BREADCRUMB"}]
+    chats.save_chat(root, cg)
+    evG, doneG = [], threading.Event()
+
+    def pushG(e):
+        evG.append(e)
+        if e["kind"] in ("compact_done", "compact_error", "compact_cancelled"):
+            doneG.set()
+    chat.start_compaction(root, cg["id"], pushG)
+    check("over-full window still compacts",
+          doneG.wait(20) and evG[-1]["kind"] == "compact_done", str(evG[-1:]))
+    sentG = serverG.requests[-1]["messages"]
+    estG = sum(chat._msg_est(m) for m in sentG)
+    check("compaction request fit the window budget",
+          estG <= 4096 - 2048 + 64, str(estG))
+    check("newest message survived the trim",
+          any("FINAL-BREADCRUMB" in str(m.get("content")) for m in sentG))
+    markG = chats.load_chat(root, cg["id"])["messages"][-1]
+    check("marker carries compaction stats",
+          markG["role"] == "compact" and markG.get("tokensBefore", 0) > 0
+          and "durMs" in markG, str({k: markG.get(k) for k in
+                                     ("role", "tokensBefore", "durMs")}))
+    check("original oversize message untouched on disk",
+          len(chats.load_chat(root, cg["id"])["messages"][0]["content"])
+          == 40000)
+    serverG.shutdown()
 
     # ---------- auto-compaction at the threshold ----------
     sockD = os.environ["LOOM_HOME"] + "/fakeD.sock"

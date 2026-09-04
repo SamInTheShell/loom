@@ -127,7 +127,16 @@ function buildDiagView(panel, chatId, data) {
     legend,
     zbtn("−", "Zoom out (wheel works too)", () => zoomAt(canvas.clientWidth / 2, 1 / 1.3)),
     zbtn("+", "Zoom in", () => zoomAt(canvas.clientWidth / 2, 1.3)),
-    zbtn("fit", "Fit every entry in view", () => { fitAll(); render(); })));
+    zbtn("fit", "Fit every entry in view", () => { fitAll(); render(); }),
+    zbtn("Export JSON",
+      "Save a metadata/stats-only JSON snapshot — token estimates, real "
+        + "usage/timings, context breakdown; NO message contents. Safe to "
+        + "attach to a bug report.",
+      async () => {
+        const res = await Api.call("chat_diag_export", chatId);
+        if (!res.ok) { toast(res.error, "err"); return; }
+        if (res.data.saved) toast("Diagnostics saved to " + res.data.saved, "ok");
+      })));
 
   /* ---- the graph ---- */
   const wrap = el("div", { class: "diag-graph" }, canvas);

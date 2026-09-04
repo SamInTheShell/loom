@@ -484,6 +484,67 @@ with tempfile.TemporaryDirectory() as d:
     check("context breakdown sane",
           bd["estTokens"] > 0 and bd["parts"]["compacted"] > 0
           and bd["auto"] is True and bd["threshold"] == 0.8, str(bd))
+
+    # ---------- adaptive compaction: turn growth, headroom, usage reset --
+    gdoc = {"id": "g1", "folders": [], "messages": [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1",
+         "usage": {"prompt_tokens": 100, "completion_tokens": 50}},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "a2",
+         "usage": {"prompt_tokens": 200, "completion_tokens": 150}},
+        {"role": "compact", "content": "S", "replaced": 4},
+        {"role": "assistant", "content": "a3",
+         "usage": {"prompt_tokens": 80, "completion_tokens": 20}},
+        {"role": "assistant", "content": "a4",
+         "usage": {"prompt_tokens": 300, "completion_tokens": 100}},
+    ]}
+    g = chatmod._turn_growth(gdoc)
+    check("turn growth from real usage, compaction boundary skipped",
+          g == {"avg": 250, "max": 300, "n": 2}, str(g))
+    check("headroom covers the worst recent turn (padded avg, 5% floor)",
+          chatmod._headroom(gdoc, 4096) == 375
+          and chatmod._headroom({"messages": []}, 4000) == 200,
+          str(chatmod._headroom(gdoc, 4096)))
+    check("last-used tokens scoped to the live slice",
+          chatmod._last_used_tokens(gdoc) == 400
+          and chatmod._last_used_tokens({"id": "g2", "messages": [
+              {"role": "assistant", "content": "a",
+               "usage": {"prompt_tokens": 900, "completion_tokens": 100}},
+              {"role": "compact", "content": "S", "replaced": 1},
+              {"role": "user", "content": "next"}]}) == 0)
+    bd2 = chatmod.context_breakdown(root, cfg, gdoc)
+    check("breakdown carries the adaptive stats",
+          bd2["turnAvg"] == 250 and bd2["turnMax"] == 300
+          and bd2["turnSamples"] == 2, str(bd2))
+
+    # ---------- compaction request is budgeted (never exceeds the window)
+    big = {"id": "big1", "folders": [], "messages": [
+        {"role": "user", "content": "start"},
+        {"role": "assistant", "content": "calling",
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "shell", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "y" * 40_000},
+        {"role": "user", "content": "z " * 30_000},
+        {"role": "user", "content": "the end marker"},
+    ]}
+    msgs, dropped = chatmod._compact_request(root, cfg, big, 4096)
+    est = sum(chatmod._msg_est(m) for m in msgs)
+    check("compaction request fits the budget",
+          est <= 4096 - 2048 + 64, str(est))
+    check("newest message survives, drops are announced",
+          any("the end marker" in str(m.get("content")) for m in msgs)
+          and (dropped == 0
+               or any("omitted" in str(m.get("content")) for m in msgs)))
+    check("trimming never mutates the stored chat",
+          len(big["messages"][2]["content"]) == 40_000
+          and len(big["messages"][3]["content"]) == 60_000)
+    msgs_small, dropped_small = chatmod._compact_request(
+        root, cfg, {"id": "s1", "folders": [], "messages": [
+            {"role": "user", "content": "tiny"}]}, 4096)
+    check("small chats compact untrimmed",
+          dropped_small == 0
+          and any("tiny" in str(m.get("content")) for m in msgs_small))
     (root / "loom.yaml").write_text(
         "chat:\n  compaction:\n    threshold: 1.5\n")
     try:
