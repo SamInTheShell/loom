@@ -17,7 +17,8 @@ unprivileged user.
 - **[The library](library.md)** - what this folder is, its layout, and
   how loom.yaml drives everything.
 - **[Chats](chats.md)** - tools, permission modes, attachments, the
-  context window and compaction.
+  context window and compaction; copying, forking, and pruning the
+  history; auto-continue.
 - **[Terminals](terminals.md)** - real shells in containers, hotkeys,
   copy/paste.
 - **[Providers and models](models-servers.md)** - pointing Loom at
@@ -33,10 +34,14 @@ unprivileged user.
 The top bar's buttons open everything: **chat bubble** new chat (Ctrl+N),
 **terminal** (Ctrl+T), **book** the Library tab (these files live there -
 Ctrl+L), **stack** the Providers tab (Ctrl+E), **box** the Chat Archive
-(Ctrl+H), **key** the Environments tab (Ctrl+Shift+E). The bell opens the
-**Alerts tab** (Ctrl+Shift+A): every toast lands there and stays -
-across restarts - until you clear it, so nothing you're shown is lost
-when a popup fades.
+(Ctrl+H), **key** the Environments tab (Ctrl+Shift+E), the **MCP glyph**
+the MCP Servers tab (tool servers for chats), **globe** the API Server
+tab (serve every provider's models back out as one OpenAI-compatible
+API), and **gear** the Configuration tab - the whole loom.yaml in a
+validated editor, plus dialogs for chat defaults, permission modes, and
+containers. The bell opens the **Alerts tab** (Ctrl+Shift+A): every
+toast lands there and stays - across restarts - until you clear it, so
+nothing you're shown is lost when a popup fades.
 
 Curious what a chat actually cost? The context chip's hover card opens
 **Diagnostics** - per-turn tokens, tok/s, prefill speed, cache hits,

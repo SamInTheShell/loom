@@ -1,0 +1,40 @@
+<!doctype html>
+<!--
+  GENERATED FILE - do not edit termwin.html directly.
+  Source of truth: frontend/templates/ (rendered by loom/compose.py at app
+  launch, or manually via `uv run python -m loom.compose`).
+
+  The chat-mirror terminal window: a real shell in ONE chat's exact
+  container setup (image, mounts, network, environment), for diagnosing
+  the environment the way that chat's model sees it. It shares the
+  pywebview bridge api and the event bus with the main window; the shell
+  restarts itself when the chat's setup changes, and dies with the
+  window.
+-->
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Terminal</title>
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="css/chat.css">
+  <link rel="stylesheet" href="css/term.css">
+  <style>
+    html, body { height: 100%; }
+    body { background: var(--bg-0); }
+    #termroot { position: absolute; inset: 0; }
+    .term-head .ts-hint { margin: 0 8px 0 0; white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <div id="termroot" class="tabpanel termtab"></div>
+  <div id="ctx-root"></div>
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+  <script src="js/util.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/termwin.js"></script>
+  <script src="js/terminal.js"></script>
+</body>
+</html>

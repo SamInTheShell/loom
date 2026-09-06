@@ -21,6 +21,8 @@ function chatState(chatId) {
     queue: [],           // [{text, images}] waiting to send
     histIdx: null,       // input history navigation position
     stats: null,
+    follow: true,        // auto-scroll intent - see the block above atBottom
+    followTail: false,   // follower asked for the TAIL of a long reply
   });
 }
 
@@ -49,8 +51,17 @@ async function newChat(cloneActive) {
   if (!res.ok) { toast(res.error, "err"); return; }
   const c = res.data.chat;
   chatState(c.id).chat = c;
+  chatState(c.id).msgBase = 0;
   openTab("chat", c.id);
   renderChat(c.id);
+}
+
+/* the window's ABSOLUTE start in the full history. Captured at fetch
+ * time: client-side appends during a run grow messages without moving
+ * the window start, so `msgBase + i` stays the message's real index. */
+function setMsgBase(cs) {
+  const n = (cs.chat.messages || []).length;
+  cs.msgBase = Math.max(0, (cs.chat.totalMessages ?? n) - n);
 }
 
 async function openChat(chatId) {
@@ -59,6 +70,7 @@ async function openChat(chatId) {
   const cs = chatState(chatId);
   cs.chat = res.data.chat;
   cs.running = res.data.running;
+  setMsgBase(cs);
   if (cs.chat.archived) {
     Api.call("chat_unarchive", chatId);
     cs.chat.archived = false;
@@ -100,11 +112,25 @@ function mountChatTab(panel, chatId) {
     html: icon("down", 15),
   });
   jump.addEventListener("click", () => {
-    thread.scrollTop = thread.scrollHeight;
+    const cs = chatState(chatId);
+    cs.follow = true;                  // an explicit "take me to the tail"
+    cs.followTail = true;
+    cs.atBottom = true;
+    stickBottom(thread, cs);
     updateJump();
   });
   const updateJump = () => jump.classList.toggle("show", !atBottom(thread));
   thread.addEventListener("scroll", updateJump, { passive: true });
+  // an UPWARD wheel flick disarms instantly, position notwithstanding -
+  // waiting for the position to cross the threshold let fast streams
+  // yank the view back mid-gesture and fight the reader
+  thread.addEventListener("wheel", (e) => {
+    if (e.deltaY >= 0 || !thread.clientHeight) return;
+    const cs = chatState(chatId);
+    cs.follow = false;
+    cs.followTail = false;
+    cs.atBottom = false;
+  }, { passive: true });
   thread.addEventListener("scroll", () => {
     // a hidden panel reads scrollTop 0 - never let that clobber the real
     // position (it's restored when the tab activates again)
@@ -112,11 +138,27 @@ function mountChatTab(panel, chatId) {
     const cs = chatState(chatId);
     cs.scrollPos = thread.scrollTop;   // tab switches + session
     // BOTTOM-NESS is what tab switching must preserve: at-bottom means
-    // "keep following the stream", scrolled-up means "hold my spot"
-    cs.atBottom = atBottom(thread);
+    // "keep following the stream", scrolled-up means "hold my spot".
+    // Only USER scrolls speak for intent - programmatic writes
+    // (progScroll) never re-arm or disarm the follow flag. Scrolling to
+    // the very bottom means "give me the TAIL" (past any read-from-the-
+    // start hold); anywhere else is manual control.
+    if (!cs._progScroll) {
+      cs.follow = atBottom(thread);
+      cs.followTail = cs.follow;
+      cs.atBottom = cs.follow;
+    }
     saveSession();
   }, { passive: true });
   panel._updateJump = updateJump;
+  // window resizes change the fold: a follower keeps the newest content
+  // in frame (holders are position-stable and need nothing)
+  window.addEventListener("resize", () => {
+    const cs = st.chats[chatId];
+    if (cs && thread.clientHeight && chatFollows(cs)) {
+      followScroll(thread, cs);
+    }
+  });
   const threadWrap = el("div", { class: "thread-wrap" }, thread, jump);
 
   const composer = el("div", { class: "composer" });
@@ -129,8 +171,14 @@ function mountChatTab(panel, chatId) {
   });
   setHotkey(input, "Ctrl+I");
   const resizeInput = () => {
+    const before = input.style.height;
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, 220) + "px";
+    // a growing composer shrinks the thread viewport - a follower must
+    // not lose the newest line behind it
+    if (input.style.height !== before && chatFollows(chatState(chatId))) {
+      requestAnimationFrame(() => followScroll(thread, chatState(chatId)));
+    }
   };
   panel._resizeInput = resizeInput;
   input.addEventListener("input", () => {
@@ -194,20 +242,20 @@ function mountChatTab(panel, chatId) {
   });
   wireCtxHover(ctxBtn, chatId);
 
-  const netBtn = el("button", {
-    class: "perm-pill net-chip", "data-role": "net",
-    title: "Container network for shell commands - cycles no network → "
-      + "loopback only → network on",
+  const thoughtBtn = el("button", {
+    class: "perm-pill think-chip", "data-role": "thoughts",
+    title: "Per-chat thought truncation - how much stored thinking rides "
+      + "the wire  (Ctrl+])",
   });
-  netBtn.addEventListener("click", async () => {
+  setHotkey(thoughtBtn, "Ctrl+]");
+  thoughtBtn.addEventListener("click", async () => {
     const cs = chatState(chatId);
-    const order = ["none", "loopback", "on"];
-    const next = order[(order.indexOf(netMode(cs.chat.network)) + 1) % 3];
-    const res = await Api.call("chat_set_network", chatId, next);
+    const res = await Api.call("chat_set_thought_truncation", chatId,
+      !chatThoughtTrunc(cs));
     if (!res.ok) { toast(res.error, "err"); return; }
-    cs.chat.network = res.data.network;
-    renderNetChip(chatId);
-    refreshChatSilently(chatId);   // the system prompt env note changed
+    cs.chat.thoughtTruncation = res.data.thoughtTruncation;
+    renderThoughtChip(chatId);
+    refreshChatSilently(chatId);   // the context estimate changes
   });
 
   const btnImg = el("button", { class: "iconbtn", title: "Attach images (png/jpeg)", html: icon("image") });
@@ -238,7 +286,7 @@ function mountChatTab(panel, chatId) {
     el("div", { class: "compose-controls" },
       btnImg, btnDir,
       el("span", { class: "spacer" }),
-      ctxBtn, netBtn, modelBtn, btnSend));
+      ctxBtn, thoughtBtn, modelBtn, btnSend));
   box.addEventListener("click", (e) => {
     if (e.target === box) input.focus();   // dead space focuses the input
   });
@@ -334,10 +382,12 @@ function mountChatTab(panel, chatId) {
     }
   });
   // queued messages live in a visible panel ABOVE the input box
+  const autogenEl = el("div", { class: "autogen-bar", "data-role": "autogen" });
   const queueEl = el("div", { class: "send-queue", "data-role": "queue" });
-  inner.append(queueEl, box);
+  inner.append(autogenEl, queueEl, box);
   composer.append(inner);
-  panel.append(threadWrap, composer);
+  const toolsBar = el("div", { class: "chat-toolsbar", "data-role": "toolsbar" });
+  panel.append(toolsBar, threadWrap, composer);
   panel._input = input;
   ensureGitPoll();
   ensureLiveTicker();
@@ -445,46 +495,10 @@ function renderAttachBar(chatId) {
     wireImgPreview(pill, p);   // hover shows the actual image
     bar.append(pill);
   }
-  // artifacts: what the model left in /artifacts for the user. Clicking
-  // a pill opens the preview/editor window; × clears the pill (the file
-  // and its timeline entry stay). Dismissed pills return when the model
-  // regenerates the artifact.
-  const dismissed = new Set(cs.chat?.artifactsDismissed || []);
-  for (const a of cs.chat?.artifacts || []) {
-    if (dismissed.has(a.name)) continue;
-    const isImg = !a.dir && /\.(png|jpe?g|webp|gif|bmp)$/i.test(a.name);
-    const pill = el("span", {
-      class: "pill artifact",
-      title: (a.dir ? "folder - saves as a zip" : "file") + " · "
-        + fmtBytes(a.bytes) + " · click to open",
-      onclick: () => { Api.call("artifact_open", chatId, a.name); },
-    },
-      el("span", { html: icon(a.dir ? "box" : isImg ? "image" : "file", 12) }),
-      el("span", { class: "pname", text: a.name }),
-      el("button", {
-        class: "mode", text: a.dir ? "zip" : "save",
-        title: a.dir ? "Save this folder as a zip…" : "Save this file…",
-        onclick: async (e) => {
-          e.stopPropagation();
-          const res = await Api.call("artifact_save", chatId, a.name);
-          if (!res.ok) { toast(res.error, "err"); return; }
-          if (res.data.saved) toast("Saved " + res.data.saved, "ok");
-        },
-      }),
-      el("button", {
-        text: "×", title: "Clear this pill - the file stays, and the "
-          + "chat's timeline entry keeps its open/save buttons",
-        onclick: async (e) => {
-          e.stopPropagation();
-          const res = await Api.call("artifact_dismiss", chatId, a.name);
-          if (!res.ok) { toast(res.error, "err"); return; }
-          cs.chat.artifactsDismissed = res.data.dismissed;
-          renderAttachBar(chatId);
-        },
-      }));
-    if (isImg && a.path) wireImgPreview(pill, a.path);
-    bar.append(pill);
-  }
+  // artifact pills live in the tools bar's artifacts panel now - the
+  // attach bar is for what YOU bring (folders, images); the timeline
+  // entries in the chat itself still mark every delivery
+  renderChatToolsbar(chatId);   // keep the artifacts count fresh
   updateGitBadges(chatId);   // fill "@ <branch>" on the folder pills
 }
 
@@ -545,22 +559,30 @@ function netMode(v) {
   return "none";
 }
 
+/* the network control lives in the tools bar now (a popout panel) */
 function renderNetChip(chatId) {
-  const panel = chatPanel(chatId);
-  const btn = panel?.querySelector('[data-role="net"]');
+  renderChatToolsbar(chatId);
+}
+
+/* effective per-chat thought truncation: the chat's own value, else the
+ * loom.yaml default (older chats predate the per-chat setting) */
+function chatThoughtTrunc(cs) {
+  const v = cs?.chat?.thoughtTruncation;
+  return v == null ? st.config?.chat?.thought_truncation !== false : !!v;
+}
+
+function renderThoughtChip(chatId) {
+  const btn = chatPanel(chatId)?.querySelector('[data-role="thoughts"]');
   if (!btn) return;
-  const mode = netMode(chatState(chatId).chat?.network);
-  btn.classList.toggle("on", mode === "on");
-  btn.classList.toggle("loop", mode === "loopback");
+  const trunc = chatThoughtTrunc(chatState(chatId));
+  btn.classList.toggle("off", !trunc);
   btn.replaceChildren(el("span", {
-    text: mode === "on" ? "network on"
-      : mode === "loopback" ? "loopback only" : "no network" }));
-  btn.title = mode === "on"
-    ? "Shell containers CAN reach the network - click for no network"
-    : mode === "loopback"
-      ? "Shell containers reach ONLY the host's 127.0.0.1 services "
-        + "(at 10.0.2.2 inside; podman/slirp4netns) - click for full network"
-      : "Shell containers run with --network=none - click for loopback only";
+    text: trunc ? "latest thought" : "all thoughts" }));
+  btn.title = (trunc
+    ? "Only the latest turn's thinking rides the wire - click to keep "
+      + "every stored thought (context-hungry)"
+    : "EVERY stored thought rides the wire - click to keep only the "
+      + "latest turn's") + "  (Ctrl+])";
 }
 
 function activePermMode(cs) {
@@ -1145,20 +1167,25 @@ function wireCtxHover(btn, chatId) {
       ...nextPromptRows(bd),
     ].filter(Boolean));
     card.append(rowsBox);
+    // Compact now LEFT, Diagnostics RIGHT - compaction mutates the
+    // conversation, so it must never sit where the harmless "show me
+    // the numbers" click lands
     card.append(el("div", { class: "ctx-actions" },
         el("button", {
-          class: "btn btn-sm", text: "Diagnostics",
-          title: "Per-entry token graph + table for this chat",
-          onclick: () => { destroy(); openDiagTab(chatId); },
-        }),
-        el("span", { class: "spacer" }),
-        el("button", {
           class: "btn btn-sm", text: "Compact now",
+          title: "Summarize the conversation now and replace the older "
+            + "turns on the wire",
           onclick: async () => {
             const res = await Api.call("chat_compact", chatId);
             if (!res.ok) toast(res.error, "err");
             card?.remove(); card = null;
           },
+        }),
+        el("span", { class: "spacer" }),
+        el("button", {
+          class: "btn btn-sm", text: "Diagnostics",
+          title: "Per-entry token graph + table for this chat",
+          onclick: () => { destroy(); openDiagTab(chatId); },
         })));
     document.body.append(card);
     const a = btn.getBoundingClientRect();
@@ -1183,12 +1210,14 @@ function renderChat(chatId) {
   if (!panel || !cs.chat) return;
 
   renderCtxChip(chatId);
-  renderNetChip(chatId);
+  renderThoughtChip(chatId);
   renderModelButton(chatId);
   renderPermPill(chatId);
   renderContainerPill(chatId);
   renderEnvPill(chatId);
   renderAttachBar(chatId);
+  renderAutoGen(chatId);
+  renderChatToolsbar(chatId);
   renderChatThread(chatId);   // consumes cs.restoreScroll when visible
   renderSendButton(chatId);
 }
@@ -1308,6 +1337,22 @@ function liveCountText(cs) {
   return "reading prompt… " + secs.toFixed(0) + "s";
 }
 
+/* The model may ECHO its own [.. UTC] signal stamp while streaming; the
+ * persisted turn strips it (chat.py) but the LIVE view must never show
+ * it either - signals do not belong in the visible message. The stamp
+ * can arrive split across deltas, so the accumulated text is re-checked
+ * every time, and a plausible partial prefix ("[2026-09-0") is HELD
+ * BACK rather than flashed and yanked. */
+const LIVE_STAMP_RE = /^\s*\[\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\]\s*/;
+const LIVE_STAMP_PARTIAL_RE = /^\s*\[[\d\- :UTC]{0,20}$/;
+
+function liveVisibleText(t) {
+  t = String(t || "");
+  const m = LIVE_STAMP_RE.exec(t);
+  if (m) return t.slice(m[0].length);
+  return LIVE_STAMP_PARTIAL_RE.test(t) ? "" : t;
+}
+
 function liveCountEl(cs) {
   return el("span", { class: "live-count", "data-role": "live-count",
     text: liveCountText(cs),
@@ -1383,6 +1428,107 @@ function atBottom(thread) {
   return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 60;
 }
 
+/* ---------- deterministic auto-scroll ----------
+ * ONE per-chat flag (cs.follow) is the whole truth, and only EXPLICIT
+ * user actions change it:
+ *   arm    - scrolling to the bottom, the jump button, sending a
+ *            message (Enter - queued or not), opening at the bottom
+ *   disarm - scrolling away from the bottom
+ * Programmatic scrolls go through progScroll(), which the scroll
+ * listener recognizes and NEVER treats as intent. Every DOM change then
+ * applies one rule: following → stick to the bottom; not following →
+ * the view must not move (full rebuilds restore the entry that was at
+ * the top of the viewport; in-place toggles compensate by height delta
+ * when the toggled block sits above the viewport). */
+function chatFollows(cs) { return cs.follow !== false; }
+
+function progScroll(thread, cs, top) {
+  cs._progScroll = true;
+  thread.scrollTop = top;
+  requestAnimationFrame(() => { cs._progScroll = false; });
+}
+
+function stickBottom(thread, cs) {
+  progScroll(thread, cs, thread.scrollHeight);
+}
+
+/* ---------- read-from-the-start following ----------
+ * Following does NOT mean welded to the bottom. The follower's view
+ * advances with the stream only until the header of the newest reply
+ * TEXT would leave the top of the panel - then it holds there, so the
+ * newest message is always readable from its beginning while the rest
+ * streams in below the fold. Prefill, thoughts, and tool activity are
+ * NOT anchors: they follow the tail (thoughts stream and collapse the
+ * way they always did); only message text pins.
+ *
+ * The two readers this serves:
+ *   walk-away  - returns to the reply pinned at the top, reads down.
+ *   take-over  - scrolls once text passes the fold: ANY scroll takes
+ *                manual control (the view then never moves on its own);
+ *                scrolling to the very bottom (or the jump button) asks
+ *                for the TAIL instead - cs.followTail sticks to the true
+ *                bottom until the next reply begins, which re-clamps.
+ * Sending a message always resets to read-from-the-start following. */
+function genStartEl(thread, cs) {
+  if (cs.live) {
+    // streaming: ONLY the reply TEXT anchors. Prefill, thoughts and
+    // tool phases return null → tail behavior, so thoughts stream and
+    // collapse exactly like they always did. cs.live resets per turn
+    // (tool_result), so in a tool loop every intermediate message
+    // clamps at ITS start while it streams and the final message is
+    // what ends up held.
+    return thread.querySelector('[data-skey="live-msg"]');
+  }
+  // idle: the newest persisted reply's header
+  const entries = thread.querySelectorAll(".msg.assistant");
+  return entries.length ? entries[entries.length - 1] : null;
+}
+
+function followScroll(thread, cs) {
+  const bottom = Math.max(0, thread.scrollHeight - thread.clientHeight);
+  let target = bottom;
+  if (!cs.followTail) {
+    const start = genStartEl(thread, cs);
+    if (start) target = Math.min(bottom, Math.max(0, start.offsetTop - 8));
+  }
+  progScroll(thread, cs, target);
+}
+
+/* the entry at the top of the viewport + its offset - the thing the
+ * reader's eye is on; restored after a full rebuild by its stable key */
+function captureAnchor(thread) {
+  if (!thread.clientHeight) return null;
+  for (const c of thread.children) {
+    if (c.offsetTop + c.offsetHeight > thread.scrollTop) {
+      return c.dataset.skey
+        ? { key: c.dataset.skey, off: c.offsetTop - thread.scrollTop }
+        : null;
+    }
+  }
+  return null;
+}
+
+function restoreAnchor(thread, anchor) {
+  if (!anchor) return;
+  const el2 = [...thread.children]
+    .find((c) => c.dataset.skey === anchor.key);
+  if (el2) thread.scrollTop = Math.max(0, el2.offsetTop - anchor.off);
+}
+
+/* after an in-place expand/collapse: following sticks; otherwise the
+ * scroll compensates when the resized block is above the viewport */
+function settleAfterToggle(chatId, node, beforeH) {
+  const cs = chatState(chatId);
+  const thread = chatPanel(chatId)?.querySelector('[data-role="thread"]');
+  if (!thread || !thread.clientHeight) return;
+  if (chatFollows(cs)) { followScroll(thread, cs); return; }
+  const delta = thread.scrollHeight - beforeH;
+  if (!delta) return;
+  const nr = node.getBoundingClientRect();
+  const tr = thread.getBoundingClientRect();
+  if (nr.top < tr.top) progScroll(thread, cs, thread.scrollTop + delta);
+}
+
 function selectionWithin(node) {
   const s = getSelection();
   return !!(s && s.rangeCount && !s.isCollapsed && node && node.contains(s.anchorNode));
@@ -1400,7 +1546,15 @@ function renderChatThread(chatId) {
     cs._selRetry = setTimeout(() => renderChatThread(chatId), 1000);
     return;
   }
-  const stick = atBottom(thread);
+  // deterministic scroll: intent from cs.follow only. Not following →
+  // capture the entry under the reader's eye BEFORE the rebuild and put
+  // it back at the same offset after - a redraw must never move the view.
+  const follow = chatFollows(cs);
+  const anchor = follow ? null : captureAnchor(thread);
+  const tag = (node, key) => {
+    if (node) node.dataset.skey = key;
+    return node;
+  };
   thread.replaceChildren();
 
   const msgs = cs.chat.messages || [];
@@ -1409,12 +1563,12 @@ function renderChatThread(chatId) {
   // transfer stay O(window))
   const hidden = Math.max(0, (cs.chat.totalMessages ?? msgs.length) - msgs.length);
   if (hidden > 0) {
-    thread.append(el("div", { class: "chat-resume" },
+    thread.append(tag(el("div", { class: "chat-resume" },
       el("button", {
         class: "btn btn-sm",
         text: `↑ Show earlier messages (${hidden.toLocaleString()} hidden)`,
         onclick: () => loadEarlierMessages(chatId),
-      })));
+      })), "earlier"));
   }
   // a turn's stats render AFTER everything the turn produced: a turn
   // that called tools holds its stats row back until the last of its
@@ -1426,20 +1580,25 @@ function renderChatThread(chatId) {
       pendingStats = null;
     }
   };
+  const base = cs.msgBase ?? hidden;   // window start, as an absolute index
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
     if (m.role === "user") {
       flushStats();
-      thread.append(userMsgEl(m));
+      thread.append(tag(userMsgEl(chatId, m, base + i), "m" + (base + i)));
     } else if (m.role === "assistant") {
       flushStats();
       // the THOUGHT is its own entry above the message, carrying the
       // model's name and its own size when expanded
-      if (m.thinking) thread.append(thinkEntryEl(chatId, m, cs.chat.model, i));
-      const node = assistantMsgEl(chatId, m, cs.chat.model, i);
-      if (node) thread.append(node);
+      if (m.thinking) {
+        thread.append(tag(
+          thinkEntryEl(chatId, m, cs.chat.model, i, base + i),
+          "th" + (base + i)));
+      }
+      const node = assistantMsgEl(chatId, m, cs.chat.model, i, base + i);
+      if (node) thread.append(tag(node, "m" + (base + i)));
       if (m.timings || m.usage) {
-        const row = statsRow(m);
+        const row = tag(statsRow(m), "st" + (base + i));
         const calls = new Set((m.tool_calls || []).map((c) => c.id));
         if (calls.size) {
           // this row will land under tool cards - align it with THEIR
@@ -1451,23 +1610,24 @@ function renderChatThread(chatId) {
         }
       }
     } else if (m.role === "tool") {
-      thread.append(toolCardEl(chatId, {
+      thread.append(tag(toolCardEl(chatId, {
         callId: m.tool_call_id, tool: m.name,
         args: argsOfCall(msgs, i, m.tool_call_id),
         state: m.cancelled ? "cancelled"
           : m.ok === false ? "failed" : "done",
         result: m.content,
-      }));
+        msgIdx: base + i,   // persisted card: copy/fork actions apply
+      }), "m" + (base + i)));
       if (pendingStats) {
         pendingStats.calls.delete(m.tool_call_id);
         if (!pendingStats.calls.size) flushStats();
       }
     } else if (m.role === "compact") {
       flushStats();
-      thread.append(compactCardEl(chatId, m, i));
+      thread.append(tag(compactCardEl(chatId, m, i), "m" + (base + i)));
     } else if (m.role === "artifact") {
       flushStats();
-      thread.append(artifactMsgEl(chatId, m));
+      thread.append(tag(artifactMsgEl(chatId, m), "m" + (base + i)));
     }
   }
   if (cs.compacting) {
@@ -1489,13 +1649,14 @@ function renderChatThread(chatId) {
   //   message  → thought collapses, the model-name header appears, and
   //              the cursor moves into the streaming message
   if (cs.live) {
-    const name = cs.chat.model || "assistant";
-    const inMessage = !!cs.live.text;
+    const name = agentName();
+    const visText = liveVisibleText(cs.live.text);
+    const inMessage = !!visText;
     const inThink = !!cs.live.think && !inMessage;
-    if (!cs.live.think && !cs.live.text) {
-      // prefill: nothing exists yet - just the heartbeat
-      thread.append(el("div", { class: "msg live-wait" },
-        el("span", { class: "cursor" }), liveCountEl(cs)));
+    if (!cs.live.think && !inMessage) {
+      // prefill (or a held-back stamp echo): just the heartbeat
+      thread.append(tag(el("div", { class: "msg live-wait" },
+        el("span", { class: "cursor" })), "live-wait"));
     }
     if (cs.live.think) {
       const t = el("div", {
@@ -1503,31 +1664,35 @@ function renderChatThread(chatId) {
         "data-role": "live-think",
       });
       // text NODE first: the fast path updates firstChild.nodeValue so
-      // the cursor/count siblings survive every delta
+      // the cursor sibling survives every delta
       t.append(document.createTextNode(cs.live.think));
-      if (inThink) t.append(el("span", { class: "cursor" }), liveCountEl(cs));
-      thread.append(el("div", { class: "msg think-entry" },
+      if (inThink) t.append(el("span", { class: "cursor" }));
+      thread.append(tag(el("div", { class: "msg think-entry" },
         el("div", { class: "think-toggle",
           text: inThink ? "▾ " + name + " - thinking…"
                         : "▸ " + name + " thought for a bit" }),
-        t));
+        t), "live-th"));
     }
     if (inMessage) {
       const wrap = el("div", { class: "msg assistant" });
       wrap.append(el("div", { class: "msg-head" },
         el("span", { class: "who", text: name })));
       const body = el("div", { class: "msg-body md-render", "data-role": "live" });
-      body.innerHTML = renderMarkdown(cs.live.text || "");
-      if ((cs.live.text || "").length <= ENHANCE_LIVE_MAX) enhanceCodeBlocks(body);
-      body.append(el("span", { class: "cursor" }), liveCountEl(cs));
+      body.innerHTML = renderMarkdown(visText);
+      if (visText.length <= ENHANCE_LIVE_MAX) enhanceCodeBlocks(body);
+      body.append(el("span", { class: "cursor" }));
       wrap.append(body);
-      thread.append(wrap);
+      thread.append(tag(wrap, "live-msg"));
     }
+    // the status readout lives on its OWN static line below the stream -
+    // inline it sprinted around with the caret, unreadable on fast models
+    thread.append(tag(el("div", { class: "live-status" },
+      liveCountEl(cs)), "live-status"));
   }
   // waiting permission cards render inline via tool state (already in tools)
   for (const [callId, t] of Object.entries(cs.tools)) {
     if (t.state === "waiting" || t.state === "running") {
-      thread.append(toolCardEl(chatId, { callId, ...t }));
+      thread.append(tag(toolCardEl(chatId, { callId, ...t }), "lt" + callId));
     }
   }
   // a turn whose tool calls are still executing: its stats land after
@@ -1568,9 +1733,11 @@ function renderChatThread(chatId) {
   if (!msgs.length && !cs.live) {
     thread.append(el("div", { class: "empty-hint" },
       el("div", { class: "big", text: "New chat" }),
-      el("div", { text: "Attach images or folders below; shell commands run sandboxed in a container." })));
+      el("div", { text: "Attach images or folders below; shell commands run sandboxed in a container." }),
+      el("div", { text: "Ctrl+R lets the model open the conversation - no first message needed." })));
   }
-  if (stick) thread.scrollTop = thread.scrollHeight;
+  if (follow) followScroll(thread, cs);
+  else restoreAnchor(thread, anchor);
   // an explicit position (tab switch, session restore) beats sticking -
   // the user was comparing chats mid-scroll; put them back exactly there.
   // Only consumable while visible: a hidden panel can't scroll.
@@ -1581,6 +1748,9 @@ function renderChatThread(chatId) {
       ? cs.restoreScroll : thread.scrollHeight;
     cs.scrollPos = thread.scrollTop;       // read back the clamped value
     cs.restoreScroll = null;
+    cs.follow = atBottom(thread);          // the restored spot IS the intent
+    cs.followTail = cs.follow;             // restored bottom = tail intent
+    cs.atBottom = cs.follow;
   }
   if (panel._updateJump) panel._updateJump();
   renderComposerHints(chatId);   // tool_wait arrives via thread redraws
@@ -1597,6 +1767,7 @@ async function loadEarlierMessages(chatId) {
   if (!res.ok) { toast(res.error, "err"); return; }
   cs.chat = res.data.chat;
   cs.running = res.data.running;
+  setMsgBase(cs);
   renderChatThread(chatId);
   // keep the message the user was looking at where it was
   if (thread) thread.scrollTop = thread.scrollHeight - oldH + oldTop;
@@ -1656,11 +1827,130 @@ function imgThumb(path) {
   return img;
 }
 
-function userMsgEl(m) {
+/* ---------- per-entry actions: copy the content / fork the chat ----------
+ * Every message, thought, and tool card gets a hover bar. Copy grabs
+ * that entry's text; Fork opens a NEW chat truncated right after the
+ * entry (the backend slices the FULL history - absIdx is absolute). */
+/* `del` names WHAT delete removes: "message" for the whole entry,
+ * "thinking" for just the thought; falsy = no delete button */
+function msgActionsEl(chatId, absIdx, getText, what, del) {
+  const copyBtn = el("button", { class: "msg-act",
+    html: icon("copy", 12), title: "Copy this " + what });
+  copyBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const ok = await copyText(getText() || "");
+    copyBtn.textContent = ok ? "✓" : "✗";
+    setTimeout(() => { copyBtn.innerHTML = icon("copy", 12); }, 1400);
+  });
+  const forkBtn = el("button", { class: "msg-act", html: icon("fork", 12),
+    title: "Fork the chat here - a new chat continues from this "
+      + what + "; everything after it stays in this one" });
+  forkBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    forkChatAt(chatId, absIdx);
+  });
+  let delBtn = null;
+  if (del) {
+    delBtn = el("button", { class: "msg-act msg-act-del",
+      html: icon("trash", 12),
+      title: "Delete this " + what + " from the history" });
+    delBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteChatEntry(chatId, absIdx, what, del);
+    });
+  }
+  return el("div", { class: "msg-actions" }, copyBtn, forkBtn, delBtn);
+}
+
+function deleteChatEntry(chatId, absIdx, what, part) {
+  if (st.chats[chatId]?.running) {
+    toast("Wait for the response to finish first.", "warn");
+    return;
+  }
+  confirmModal("Delete " + what,
+    part === "thinking"
+      ? "Remove this thought from the history? The reply it belongs to "
+        + "stays (unless the thought was all there was), and the model "
+        + "will no longer see it."
+      : "Remove this " + what + " from the chat history? Tool results "
+        + "tied to it go with it, and the model will no longer see any "
+        + "of it.",
+    "Delete", async () => {
+      const r = await Api.call("chat_delete_message", chatId, absIdx,
+        part || "message");
+      if (!r.ok) { toast(r.error, "err"); return; }
+      refreshChatSilently(chatId);
+    }, true, "chat-del-msg");
+}
+
+async function forkChatAt(chatId, absIdx) {
+  const r = await Api.call("chat_fork", chatId, absIdx);
+  if (!r.ok) { toast(r.error, "err"); return; }
+  const c = r.data.chat;
+  const cs = chatState(c.id);
+  cs.chat = c;
+  cs.running = false;
+  cs.msgBase = 0;
+  // land at the BOTTOM of the copied history - the fork point is there
+  cs.atBottom = true;
+  cs.follow = true;
+  cs.restoreScroll = Infinity;
+  openTab("chat", c.id);
+  renderChat(c.id);
+  toast("Forked into \"" + c.title + "\""
+    + (r.data.toolNote
+      ? " - tools ran after this point, so a state-check note was "
+        + "added for the model" : ""), "ok", 5000);
+}
+
+function toolCopyText(t) {
+  const args = typeof t.args === "string" ? t.args
+    : JSON.stringify(t.args ?? {}, null, 1);
+  const out = t.output || t.result || "";
+  return (t.tool || "tool") + " " + (args && args !== "{}" ? args : "()")
+    + (out ? "\n\n" + out : "");
+}
+
+/* the agent's display name - customizable (chat.assistant_name in
+ * loom.yaml), "loom" by default; never the raw model id */
+function agentName() {
+  return (st.config?.chat?.assistant_name || "loom").trim() || "loom";
+}
+
+/* every signal stays user-visible - but OUT of the message body: the
+ * speaker name's hover tells exactly what this message reports to the
+ * model (and, under time travel, what really happened) */
+function whoEl(chatId, label, m, isAssistant, modelId) {
+  const w = el("span", { class: "who", text: label });
+  const fmt = (ms) => new Date(ms).toISOString()
+    .slice(0, 16).replace("T", " ") + " UTC";
+  const sig = m.signalTs || m.ts;
+  let s;
+  if (st.chats[chatId]?.chat?.timeSignalsOff) {
+    s = "No time signal - datetime signals are OFF for this chat "
+      + "(the time travel panel's toggle).";
+  } else if (isAssistant && st.config?.chat?.assistant_signals === false) {
+    s = "No time signal - assistant signals are off "
+      + "(chat.assistant_signals in loom.yaml).";
+  } else if (!sig) {
+    s = "No time signal.";
+  } else {
+    s = "Signals to the model: [" + fmt(sig) + "]"
+      + (isAssistant ? " (generation time)" : " (send time)")
+      + (m.signalTs && m.signalTs !== m.ts
+        ? "\nTime travel - real time: " + fmt(m.ts) : "");
+  }
+  w.title = (isAssistant && modelId ? "model: " + modelId + "\n" : "") + s;
+  return w;
+}
+
+function userMsgEl(chatId, m, absIdx) {
   const wrap = el("div", { class: "msg user" });
   wrap.append(el("div", { class: "msg-head" },
-    el("span", { class: "who", text: "you" }),
-    tago(m.ts)));
+    whoEl(chatId, "you", m, false),
+    tago(m.ts),
+    msgActionsEl(chatId, absIdx, () => m.content || "", "message",
+      "message")));
   const body = el("div", { class: "msg-body", text: m.content || "" });
   wrap.append(body);
   if (m.images?.length) {
@@ -1673,12 +1963,12 @@ function userMsgEl(m) {
 /* the thought as a standalone entry: model name in its header, its own
  * estimated stats revealed with the text. Expanded/collapsed survives
  * redraws AND tab switches - tracked in chat state like tool cards. */
-function thinkEntryEl(chatId, m, model, idx) {
+function thinkEntryEl(chatId, m, model, idx, absIdx) {
   const openMap = chatState(chatId).thinkOpen
     || (chatState(chatId).thinkOpen = {});
   const key = "think:" + (m.ts || idx);
   const isOpen = !!openMap[key];
-  const name = model || "assistant";
+  const name = agentName();
   const label = (open) => (open ? "▾ " : "▸ ") + name
     + (open ? " - thinking" : " thought for a bit");
   const wrap = el("div", { class: "msg think-entry" });
@@ -1698,23 +1988,36 @@ function thinkEntryEl(chatId, m, model, idx) {
   const tog = el("div", {
     class: "think-toggle", text: label(isOpen),
     onclick: () => {
+      // measure BEFORE the toggle: collapsing a tall thought above the
+      // viewport must not shift what the reader is looking at
+      const thread = chatPanel(chatId)?.querySelector('[data-role="thread"]');
+      const beforeH = thread ? thread.scrollHeight : 0;
       const nowOpen = !think.classList.toggle("collapsed");
       if (nowOpen) openMap[key] = true;
       else delete openMap[key];
       tog.textContent = label(nowOpen);
       stats.classList.toggle("hidden", !nowOpen);
+      settleAfterToggle(chatId, wrap, beforeH);
     },
   });
   wrap.append(tog, think, stats);
+  if (absIdx != null) {
+    wrap.append(msgActionsEl(chatId, absIdx,
+      () => m.thinking || "", "thought", "thinking"));
+  }
   return wrap;
 }
 
-function assistantMsgEl(chatId, m, model, idx) {
+function assistantMsgEl(chatId, m, model, idx, absIdx) {
   if (!m.content) return null;  // pure tool turn / thinking-only: no body
   const wrap = el("div", { class: "msg assistant" });
   wrap.append(el("div", { class: "msg-head" },
-    el("span", { class: "who", text: model || "assistant" }),
-    tago(m.ts)));
+    whoEl(chatId, agentName(), m, true, model),
+    tago(m.ts),
+    absIdx != null
+      ? msgActionsEl(chatId, absIdx, () => m.content || "", "message",
+          "message")
+      : null));
   if (m.content) {
     const body = el("div", { class: "msg-body md-render" });
     body.innerHTML = renderMarkdown(m.content);
@@ -1906,6 +2209,11 @@ function toolCardEl(chatId, t) {
     el("span", { class: "tool-name", text: t.tool || "tool" }),
     el("span", { class: "tool-state" + stateCls, text: stateTxt }));
   if (summary) head.append(el("span", { class: "tool-path", text: summary, title: summary }));
+  if (t.msgIdx != null) {
+    // persisted result cards only - live/waiting cards have no index yet
+    head.append(msgActionsEl(chatId, t.msgIdx,
+      () => toolCopyText(t), "tool call", "message"));
+  }
   const toggleCard = () => {
     const openMap = chatState(chatId).toolsOpen;
     if (openMap[t.callId]) delete openMap[t.callId];
@@ -2099,7 +2407,7 @@ function renderQueue(chatId) {
   // viewport - a bottom-follower must be re-stuck or the growth HIDES
   // the newest generated text behind the composer
   const thread = panel.querySelector('[data-role="thread"]');
-  const wasBottom = thread && thread.clientHeight && atBottom(thread);
+  const wasBottom = thread && thread.clientHeight && chatFollows(cs);
   host.replaceChildren();
   const canSendNow = true;   // providers take requests whenever reachable
   (cs.queue || []).forEach((q, i) => {
@@ -2134,7 +2442,7 @@ function renderQueue(chatId) {
   // re-stick after the composer resized (layout settles this frame)
   if (wasBottom) {
     requestAnimationFrame(() => {
-      thread.scrollTop = thread.scrollHeight;
+      followScroll(thread, cs);
       panel._updateJump?.();
     });
   }
@@ -2217,12 +2525,599 @@ function chatsOnProvidersEvent() {
   }
 }
 
-async function continueChat(chatId) {
+/* ---------- the chat tools bar ----------
+ * A strip across the top of every chat for manipulating the SIGNALS the
+ * model receives. Time travel is the first tool; the spacer leaves room
+ * for more.
+ *
+ * TIME TRAVEL: every user message carries its UTC send time in
+ * [brackets] on the wire. With an offset armed, each NEW message is
+ * stamped real-time + offset instead (persisted as `signalTs` at send) -
+ * a probe of the model's signal awareness. Real timestamps, the UI, and
+ * already-sent stamps stay untouched; clearing returns new messages to
+ * real time. */
+const TT_MAX_MS = 3650 * 24 * 3600 * 1000;   // ±10y - matches the backend
+const TT_SLIDER_N = 1000;
+const TT_SPANS = { y: 31536000, w: 604800, d: 86400, h: 3600, m: 60, s: 1 };
+
+/* cubic slider scale: minutes near the middle, years at the ends */
+function ttOffsetFromSlider(v) {
+  const f = Math.abs(v) / TT_SLIDER_N;
+  return Math.round(Math.sign(v) * f * f * f * TT_MAX_MS);
+}
+function ttSliderFromOffset(ms) {
+  const f = Math.cbrt(Math.min(1, Math.abs(ms) / TT_MAX_MS));
+  return Math.round(Math.sign(ms) * f * TT_SLIDER_N);
+}
+
+function fmtTTOffset(ms) {
+  if (!ms) return "off";
+  const sign = ms < 0 ? "-" : "+";
+  let s = Math.round(Math.abs(ms) / 1000);
+  const parts = [];
+  for (const [u, span] of [["y", TT_SPANS.y], ["d", TT_SPANS.d],
+    ["h", TT_SPANS.h], ["m", TT_SPANS.m], ["s", TT_SPANS.s]]) {
+    const n = Math.floor(s / span);
+    if (n) { parts.push(n + u); s -= n * span; }
+  }
+  return sign + (parts.length ? parts.join(" ") : "0s");
+}
+
+/* "+1y 2d 5m 3s" / "-3h 30m" → ms; "" / "off" / "0" → 0; garbage → null */
+function parseTTOffset(text) {
+  const t = String(text || "").trim();
+  if (!t || t === "+" || /^(off|0)$/i.test(t)) return 0;
+  const sign = t.startsWith("-") ? -1 : 1;
+  const body = t.replace(/^[+-]/, "");
+  let secs = 0, matched = 0;
+  const re = /(\d+)\s*([ywdhms])/gi;
+  let m;
+  while ((m = re.exec(body))) {
+    secs += Number(m[1]) * TT_SPANS[m[2].toLowerCase()];
+    matched++;
+  }
+  return matched ? sign * secs * 1000 : null;
+}
+
+/* what a message sent right now would report */
+function ttStamp(offsetMs) {
+  return new Date(Date.now() + offsetMs).toISOString()
+    .slice(0, 16).replace("T", " ") + " UTC";
+}
+
+function renderChatToolsbar(chatId) {
+  const panel = chatPanel(chatId);
+  const bar = panel?.querySelector('[data-role="toolsbar"]');
+  if (!bar) return;
+  const cs = chatState(chatId);
+  const off = Number(cs.chat?.timeTravelMs || 0);
+  const sigs = !cs.chat?.timeSignalsOff;
+  bar.replaceChildren();
+
+  const state = !sigs ? "signals off" : off ? fmtTTOffset(off) : "";
+  const btn = el("button", {
+    class: "perm-pill ttrav-btn" + (!sigs || off ? " on" : ""),
+    "data-role": "ttrav",
+    title: "Datetime signals: what time the model is told, and time "
+      + "travel to shift it - click for the panel",
+  },
+    el("span", { class: "ttrav-lbl", html: icon("clock", 13) }),
+    el("span", { text: "time travel" + (state ? " · " + state : "") }));
+  btn.addEventListener("click", () => timeTravelMenu(btn, chatId));
+  bar.append(btn);
+  if (off && sigs) {
+    bar.append(el("button", { class: "msg-act ttrav-clear", text: "×",
+      title: "Clear time travel - new messages report real time again",
+      onclick: () => setTimeTravel(chatId, 0) }));
+  }
+
+  const pill = (role, ic, label, cls, title, onClick) => {
+    const b = el("button", {
+      class: "perm-pill ttrav-btn" + cls, "data-role": role, title,
+    },
+      el("span", { class: "ttrav-lbl", html: icon(ic, 13) }),
+      el("span", { text: label }));
+    b.addEventListener("click", onClick);
+    bar.append(b);
+    return b;
+  };
+
+  // knowledge base cut: tool, mounts, and prompt mentions all go
+  const kbOn = !cs.chat?.knowledgeOff;
+  pill("kb", "library", kbOn ? "knowledge" : "knowledge · off",
+    kbOn ? "" : " off-warn",
+    kbOn
+      ? "The knowledge base is available to the model - click to cut it "
+        + "off for this chat (the search tool, the /knowledge mount, and "
+        + "every prompt mention all go)"
+      : "The knowledge base is CUT OFF for this chat - click to restore",
+    async () => {
+      const r = await Api.call("chat_set_knowledge", chatId, !kbOn);
+      if (!r.ok) { toast(r.error, "err"); return; }
+      if (r.data.knowledge) delete cs.chat.knowledgeOff;
+      else cs.chat.knowledgeOff = true;
+      renderChatToolsbar(chatId);
+      refreshChatSilently(chatId);   // the context estimate moves too
+    });
+
+  // network: a popout with the three modes
+  const net = netMode(cs.chat?.network);
+  setHotkey(pill("net", "globe",
+    "network · " + (net === "on" ? "on"
+      : net === "loopback" ? "loopback" : "none"),
+    net === "on" ? " off-warn" : net === "loopback" ? " on" : "",
+    "Container network for shell commands - click for the options  (Ctrl+/)",
+    (e) => networkMenu(e.currentTarget, chatId)), "Ctrl+/");
+
+  // MCP tools: per-chat permission overrides
+  const nOver = Object.keys(cs.chat?.mcpPerms || {}).length;
+  pill("mcptools", "mcp",
+    "mcp tools" + (nOver ? " · " + nOver + " set" : ""),
+    nOver ? " on" : "",
+    "Per-tool MCP permissions for THIS chat - overrides loom.yaml modes "
+      + "and the MCP tab's defaults",
+    (e) => mcpToolsMenu(e.currentTarget, chatId));
+
+  // artifacts: the on/off cut + everything the model delivered
+  const artsOn = !cs.chat?.artifactsOff;
+  const dis = new Set(cs.chat?.artifactsDismissed || []);
+  const nArts = (cs.chat?.artifacts || [])
+    .filter((a) => !dis.has(a.name)).length;
+  setHotkey(pill("arts", "box",
+    "artifacts" + (!artsOn ? " · off" : nArts ? " · " + nArts : ""),
+    !artsOn ? " off-warn" : nArts ? " on" : "",
+    "Files the model delivered, and the /artifacts on/off cut  (Ctrl+[)",
+    (e) => artifactsMenu(e.currentTarget, chatId)), "Ctrl+[");
+
+  // env signals: only when an environment is loaded
+  if (cs.chat?.env) {
+    const nHid = (cs.chat?.envHidden || []).length;
+    pill("envsig", "key",
+      "env signals" + (nHid ? " · " + nHid + " hidden" : ""),
+      nHid ? " on" : "",
+      "Per-variable exposure of the '" + cs.chat.env
+        + "' environment - hidden variables still load, the model just "
+        + "isn't told about them",
+      (e) => envSignalsMenu(e.currentTarget, chatId));
+  }
+
+  bar.append(el("span", { class: "spacer" }));
+
+  // the mirror terminal: a shell in this chat's exact container setup,
+  // popped out into its own window; it restarts to follow setup changes
+  const termBtn = el("button", {
+    class: "perm-pill ttrav-btn", "data-role": "cterm",
+    title: "Open a terminal window in this chat's EXACT container setup "
+      + "- same image, mounts, network and environment, the chat's own "
+      + "/home/loom - to inspect the environment the way the model sees "
+      + "it. The shell restarts to match whenever the chat's setup "
+      + "changes.",
+  },
+    el("span", { class: "ttrav-lbl", html: icon("terminal", 13) }),
+    el("span", { text: "terminal" }));
+  termBtn.addEventListener("click", async () => {
+    const r = await Api.call("chat_term_popout", chatId);
+    if (!r.ok) toast(r.error, "err");
+  });
+  bar.append(termBtn);
+}
+
+/* the panel behind the time-travel button: the master signals toggle,
+ * the offset slider, and the editable value */
+function timeTravelMenu(anchor, chatId) {
+  popupMenu(anchor, (menu) => {
+    menu.classList.add("ttrav-panel");
+    const paint = () => {
+      menu.replaceChildren();
+      const cs = chatState(chatId);
+      const off = Number(cs.chat?.timeTravelMs || 0);
+      const sigs = !cs.chat?.timeSignalsOff;
+
+      // master switch: signals OFF hides EVERY datetime from the model
+      const tog = el("button", {
+        class: "btn btn-sm" + (sigs ? " btn-acc" : " btn-danger"),
+        text: sigs ? "on" : "off",
+        title: sigs
+          ? "Click to hide every datetime signal from the model - no "
+            + "session stamp, no message time brackets"
+          : "Click to expose datetime signals to the model again",
+      });
+      tog.addEventListener("click", async () => {
+        const r = await Api.call("chat_set_time_signals", chatId, !sigs);
+        if (!r.ok) { toast(r.error, "err"); return; }
+        if (r.data.timeSignals) delete cs.chat.timeSignalsOff;
+        else cs.chat.timeSignalsOff = true;
+        renderChatToolsbar(chatId);
+        paint();
+      });
+      menu.append(el("div", { class: "ttrav-row" },
+        el("span", { class: "ttrav-name", text: "datetime signals" }),
+        el("span", { class: "spacer" }), tog));
+
+      const val = el("span", { class: "ttrav-val", text: fmtTTOffset(off),
+        title: "Double-click to type an offset like +1y 2d 5m 3s" });
+      const slider = el("input", { type: "range", class: "ttrav-slider",
+        min: String(-TT_SLIDER_N), max: String(TT_SLIDER_N), step: "1",
+        value: String(ttSliderFromOffset(off)),
+        title: "Drag to shift reported time - fine steps near the "
+          + "middle, years at the ends; release to arm" });
+      if (!sigs) { slider.disabled = true; val.classList.add("dim"); }
+      slider.addEventListener("input", () => {
+        val.textContent = fmtTTOffset(ttOffsetFromSlider(Number(slider.value)));
+      });
+      slider.addEventListener("change", () =>
+        setTimeTravel(chatId, ttOffsetFromSlider(Number(slider.value)))
+          .then(paint));
+      if (sigs) {
+        val.addEventListener("dblclick", () => editTTValue(chatId, val, paint));
+      }
+      const row = el("div", { class: "ttrav-row" }, slider, val);
+      if (off && sigs) {
+        row.append(el("button", { class: "msg-act ttrav-clear", text: "×",
+          title: "Clear time travel",
+          onclick: () => setTimeTravel(chatId, 0).then(paint) }));
+      }
+      menu.append(row);
+
+      menu.append(el("div", { class: "ttrav-note",
+        text: !sigs
+          ? "no datetime signals reach the model"
+          : off ? "new messages report: " + ttStamp(off)
+                : "new messages report real time" }));
+    };
+    paint();
+  });
+}
+
+/* ---------- network: the tools-bar popout ---------- */
+function networkMenu(anchor, chatId) {
+  popupMenu(anchor, (menu, close) => {
+    menu.classList.add("ttrav-panel");
+    const cs = chatState(chatId);
+    const cur = netMode(cs.chat?.network);
+    const opt = (mode, label, desc) => {
+      const row = el("div", {
+        class: "ctx-item" + (mode === cur ? " sel" : "") },
+        el("span", { class: "netopt-lbl", text: label }),
+        el("span", { class: "netopt-desc", text: desc }));
+      row.addEventListener("click", async () => {
+        const r = await Api.call("chat_set_network", chatId, mode);
+        if (!r.ok) { toast(r.error, "err"); return; }
+        cs.chat.network = r.data.network;
+        renderChatToolsbar(chatId);
+        refreshChatSilently(chatId);   // the prompt's network note changed
+        close();
+      });
+      menu.append(row);
+    };
+    menu.append(el("div", { class: "ttrav-name",
+      text: "container network" }));
+    opt("none", "no network",
+      "--network=none; the container's own loopback still works");
+    opt("loopback", "loopback only",
+      "host 127.0.0.1 services at 10.0.2.2; no internet (podman)");
+    opt("on", "network on", "the engine's default network");
+  });
+}
+
+/* ---------- MCP tools: per-chat permission overrides ---------- */
+function mcpToolsMenu(anchor, chatId) {
+  popupMenu(anchor, (menu) => {
+    menu.classList.add("ttrav-panel");
+    menu.append(el("div", { class: "ttrav-name", text: "mcp tools - this chat" }),
+      el("div", { class: "ttrav-note", text: "loading…" }));
+    Api.call("mcp_status").then((r) => {
+      menu.querySelector(".ttrav-note")?.remove();
+      if (!r.ok) {
+        menu.append(el("div", { class: "ttrav-note", text: r.error }));
+        return;
+      }
+      const cs = chatState(chatId);
+      const rows = (r.data.servers || [])
+        .flatMap((s) => s.tools || []);
+      if (!rows.length) {
+        menu.append(el("div", { class: "ttrav-note",
+          text: "no MCP tools running - enable servers in the MCP "
+            + "Servers tab" }));
+        return;
+      }
+      menu.append(el("div", { class: "ttrav-note",
+        text: "an override here beats loom.yaml modes and the MCP tab's "
+          + "defaults - 'default' hands the decision back" }));
+      for (const t of rows) {
+        const sel = el("select", { class: "term-sel mcp-perm-sel" });
+        sel.append(el("option", { value: "",
+          text: "default (" + t.perm + ")" }));
+        for (const lv of ["allow", "ask", "deny", "disabled"]) {
+          sel.append(el("option", { value: lv, text: lv }));
+        }
+        sel.value = (cs.chat?.mcpPerms || {})[t.fullName] || "";
+        sel.addEventListener("change", async () => {
+          const res = await Api.call("chat_set_mcp_perm", chatId,
+            t.fullName, sel.value);
+          if (!res.ok) { toast(res.error, "err"); return; }
+          if (Object.keys(res.data.mcpPerms).length) {
+            cs.chat.mcpPerms = res.data.mcpPerms;
+          } else {
+            delete cs.chat.mcpPerms;
+          }
+          renderChatToolsbar(chatId);
+          refreshChatSilently(chatId);   // tool specs move
+        });
+        menu.append(el("div", { class: "ttrav-row" },
+          el("span", { class: "mcp-fn", text: t.fullName,
+            title: t.description || "" }),
+          el("span", { class: "spacer" }), sel));
+      }
+    });
+  });
+}
+
+/* ---------- artifacts: the on/off cut + delivered files ---------- */
+function artifactsMenu(anchor, chatId) {
+  popupMenu(anchor, (menu) => {
+    menu.classList.add("ttrav-panel");
+    const paint = () => {
+      menu.replaceChildren();
+      const cs = chatState(chatId);
+      const on = !cs.chat?.artifactsOff;
+      const tog = el("button", {
+        class: "btn btn-sm" + (on ? " btn-acc" : " btn-danger"),
+        text: on ? "on" : "off",
+        title: on
+          ? "Click to disable /artifacts for this chat - not mounted, "
+            + "refused by tools, no new deliveries"
+          : "Click to enable /artifacts again",
+      });
+      tog.addEventListener("click", async () => {
+        const r = await Api.call("chat_set_artifacts", chatId, !on);
+        if (!r.ok) { toast(r.error, "err"); return; }
+        if (r.data.artifacts) delete cs.chat.artifactsOff;
+        else cs.chat.artifactsOff = true;
+        renderChatToolsbar(chatId);
+        refreshChatSilently(chatId);
+        paint();
+      });
+      menu.append(el("div", { class: "ttrav-row" },
+        el("span", { class: "ttrav-name", text: "artifacts" }),
+        el("span", { class: "spacer" }), tog));
+      const dismissed = new Set(cs.chat?.artifactsDismissed || []);
+      const arts = (cs.chat?.artifacts || [])
+        .filter((a) => !dismissed.has(a.name));
+      if (!arts.length) {
+        menu.append(el("div", { class: "ttrav-note",
+          text: on ? "nothing delivered yet" : "deliveries are disabled" }));
+        return;
+      }
+      for (const a of arts) {
+        const isImg = !a.dir && /\.(png|jpe?g|webp|gif|bmp)$/i.test(a.name);
+        const open = el("span", { class: "mcp-fn", text: a.name,
+          title: (a.dir ? "folder - saves as a zip" : "file") + " · "
+            + fmtBytes(a.bytes) + " · click to open" });
+        open.addEventListener("click",
+          () => Api.call("artifact_open", chatId, a.name));
+        menu.append(el("div", { class: "ttrav-row" },
+          el("span", { html: icon(a.dir ? "box" : isImg ? "image" : "file", 12) }),
+          open, el("span", { class: "spacer" }),
+          el("button", { class: "btn btn-sm", text: a.dir ? "zip" : "save",
+            title: a.dir ? "Save this folder as a zip…" : "Save this file…",
+            onclick: async () => {
+              const res = await Api.call("artifact_save", chatId, a.name);
+              if (!res.ok) { toast(res.error, "err"); return; }
+              if (res.data.saved) toast("Saved " + res.data.saved, "ok");
+            } }),
+          el("button", { class: "msg-act ttrav-clear", text: "×",
+            title: "Dismiss - the file and its timeline entry stay",
+            onclick: async () => {
+              const res = await Api.call("artifact_dismiss", chatId, a.name);
+              if (!res.ok) { toast(res.error, "err"); return; }
+              cs.chat.artifactsDismissed = res.data.dismissed;
+              renderChatToolsbar(chatId);
+              paint();
+            } })));
+      }
+    };
+    paint();
+  });
+}
+
+/* ---------- env signals: per-variable exposure ---------- */
+function envSignalsMenu(anchor, chatId) {
+  popupMenu(anchor, (menu) => {
+    menu.classList.add("ttrav-panel");
+    const cs = chatState(chatId);
+    const envName = cs.chat?.env || "";
+    menu.append(
+      el("div", { class: "ttrav-name", text: "env signals · " + envName }),
+      el("div", { class: "ttrav-note", text: "loading…" }));
+    Api.call("env_get", envName).then((r) => {
+      menu.querySelector(".ttrav-note")?.remove();
+      if (!r.ok) {
+        menu.append(el("div", { class: "ttrav-note", text: r.error }));
+        return;
+      }
+      menu.append(el("div", { class: "ttrav-note",
+        text: "unchecked variables still LOAD into shell containers - "
+          + "the model just isn't told they exist" }));
+      const hidden = new Set(cs.chat?.envHidden || []);
+      const vars = r.data.vars || [];
+      for (const v of vars) {
+        const ck = el("input", { type: "checkbox" });
+        ck.checked = !hidden.has(v.key);
+        ck.addEventListener("change", async () => {
+          if (ck.checked) hidden.delete(v.key);
+          else hidden.add(v.key);
+          const res = await Api.call("chat_set_env_hidden", chatId,
+            [...hidden]);
+          if (!res.ok) { toast(res.error, "err"); return; }
+          if (res.data.envHidden.length) {
+            cs.chat.envHidden = res.data.envHidden;
+          } else {
+            delete cs.chat.envHidden;
+          }
+          renderChatToolsbar(chatId);
+          refreshChatSilently(chatId);   // the env prompt line changed
+        });
+        menu.append(el("label", { class: "ttrav-row chk" }, ck,
+          el("span", { class: "mcp-fn",
+            text: v.key + (v.secret ? "  (secret)" : "") })));
+      }
+      if (!vars.length) {
+        menu.append(el("div", { class: "ttrav-note",
+          text: "this environment has no variables" }));
+      }
+    });
+  });
+}
+
+/* double-click the value: edit it as text, sign included */
+function editTTValue(chatId, val, rerender) {
+  const cs = chatState(chatId);
+  const input = el("input", { type: "text", class: "ttrav-edit",
+    value: cs.chat?.timeTravelMs ? fmtTTOffset(cs.chat.timeTravelMs) : "+",
+    title: "Units: y w d h m s (e.g. +1y 2d 5m 3s); 'off' or empty clears" });
+  val.replaceWith(input);
+  input.focus();
+  input.select();
+  let closed = false;
+  const done = (commit) => {
+    if (closed) return;
+    closed = true;
+    if (commit) {
+      const ms = parseTTOffset(input.value);
+      if (ms === null) {
+        toast("Could not read that - use e.g. +1y 2d 5m 3s", "warn");
+      } else if (Math.abs(ms) > TT_MAX_MS) {
+        toast("Keep time travel within ±10 years.", "warn");
+      } else {
+        setTimeTravel(chatId, ms).then(() => rerender());
+        return;
+      }
+    }
+    rerender();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); done(true); }
+    else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      done(false);
+    }
+  });
+  input.addEventListener("blur", () => done(false));
+}
+
+async function setTimeTravel(chatId, offsetMs) {
+  const r = await Api.call("chat_set_time_travel", chatId, offsetMs);
+  if (!r.ok) {
+    toast(r.error, "err");
+    renderChatToolsbar(chatId);
+    return;
+  }
+  const cs = chatState(chatId);
+  if (cs.chat) {
+    if (r.data.offsetMs) cs.chat.timeTravelMs = r.data.offsetMs;
+    else delete cs.chat.timeTravelMs;
+  }
+  renderChatToolsbar(chatId);
+  toast(r.data.offsetMs
+    ? "Time travel armed - new messages report " + fmtTTOffset(r.data.offsetMs)
+      + " (" + ttStamp(r.data.offsetMs) + " right now)."
+    : "Time travel cleared - new messages report real time.", "ok", 3000);
+}
+
+/* ---------- auto-continue (Ctrl+Shift+R) ----------
+ * A per-chat toggle: after every completed response the chat continues
+ * itself with no new input - the model just keeps generating. The bar
+ * above the composer is the always-on signal while it's armed. It
+ * disarms itself the moment anything interrupts: Esc/Stop, an error, or
+ * the loop giving up on empty responses. */
+function toggleAutoContinue(chatId) {
+  const cs = chatState(chatId);
+  cs.autoContinue = !cs.autoContinue;
+  renderAutoGen(chatId);
+  if (cs.autoContinue) {
+    toast("Auto-continue ON - the model keeps generating after each "
+      + "response. Ctrl+Shift+R (or the bar's button) turns it off.",
+      "ok", 3500);
+    // an idle chat starts right away - an empty one has the model
+    // OPEN the conversation
+    if (!cs.running && !cs.live && !cs.compacting && !cs.queue?.length) {
+      continueChat(chatId);
+    }
+  } else {
+    toast("Auto-continue off", "ok", 1800);
+  }
+}
+
+function renderAutoGen(chatId) {
+  const panel = chatPanel(chatId);
+  const host = panel?.querySelector('[data-role="autogen"]');
+  if (!host) return;
+  const cs = chatState(chatId);
+  host.replaceChildren();
+  host.classList.toggle("on", !!cs.autoContinue);
+  if (!cs.autoContinue) return;
+  const off = el("button", { class: "btn btn-sm", text: "Turn off",
+    title: "Stop auto-continuing  (Ctrl+Shift+R)" });
+  off.addEventListener("click", () => toggleAutoContinue(chatId));
+  host.append(
+    el("span", { class: "autogen-dot" }),
+    el("span", { class: "autogen-text",
+      text: "Auto-continue is ON - after each response the model keeps "
+        + "generating with no new input." }),
+    el("span", { class: "spacer" }),
+    off);
+}
+
+/* the done-event hook: keep going unless something called it off */
+function maybeAutoContinue(chatId, ev) {
+  const cs = chatState(chatId);
+  if (!cs.autoContinue) return;
+  if (ev.cancelled || ev.gaveUp) {
+    cs.autoContinue = false;
+    renderAutoGen(chatId);
+    toast("Auto-continue off - " + (ev.cancelled
+      ? "generation was stopped."
+      : "the model gave up on an empty response."), "warn", 3500);
+    return;
+  }
+  // a beat of delay: queued user messages flush first, and Esc still
+  // has a moment to land between turns
+  setTimeout(() => {
+    const s = chatState(chatId);
+    if (!s.autoContinue || s.running || s.live || s.compacting) return;
+    if (s.queue?.length) return;
+    continueChat(chatId, false);   // automatic: never steals the scroll
+  }, 500);
+}
+
+/* Ctrl+R, whatever the ending: the Retry/Continue banner's action when
+ * one is showing (user/tool ending, stopped response); on a chat whose
+ * last word is a FINISHED model answer, a bare "continue with no new
+ * input"; and on an EMPTY chat, the model produces the FIRST message -
+ * the loop runs on the system prompt alone and it opens the
+ * conversation. */
+function resumeChat(chatId) {
+  const cs = st.chats[chatId];
+  if (!cs?.chat || cs.running || cs.live || cs.compacting) return;
+  continueChat(chatId);
+}
+
+async function continueChat(chatId, armFollow = true) {
   const cs = chatState(chatId);
   if (cs.running) return;
   cs.error = null;
   const res = await Api.call("chat_continue", chatId);
   if (!res.ok) { toast(res.error, "err"); return; }
+  if (armFollow) {
+    // Ctrl+R / the Retry-Continue banner is the same intent as sending:
+    // "generate - I want to watch". Only AUTOMATIC continuations
+    // (auto-continue's loop) skip this, so they never hijack a reader.
+    cs.follow = true;
+    cs.followTail = false;
+    cs.atBottom = true;
+  }
   cs.running = true;
   cs.respT0 = performance.now();
   cs.churn = null;
@@ -2245,6 +3140,13 @@ function sendChatMessage(chatId) {
   const text = input.value.trim();
   const images = (cs.pendingImages || []).slice();
   if (!text && !images.length) return;
+  // SENDING RE-ARMS AUTO-SCROLL: pressing Enter is an explicit "I want
+  // to see this go out and the reply come in" - the one deterministic
+  // exception to "only scrolling changes the follow flag". The reply
+  // clamps at its start (read-from-the-beginning), not the raw tail.
+  cs.follow = true;
+  cs.followTail = false;
+  cs.atBottom = true;
   // the message leaves the input IMMEDIATELY and enters the visible queue
   input.value = "";
   panel._resizeInput?.();
@@ -2321,22 +3223,26 @@ function onChatEvent(ev) {
       cs.retryNote = null;
       cs.turnT0 = performance.now();   // the prefill clock
       cs.live = cs.live || { text: "", think: "" };
+      cs.followTail = false;   // each fresh reply re-clamps at its start
       renderSendButton(chatId);
       renderTabs();
       break;
     case "delta": {
       cs.live = cs.live || { text: "", think: "" };
       cs.live.text += ev.text;
-      // fast path: patch the live body in place when it's on screen
+      // fast path: patch the live body in place when it's on screen -
+      // always through liveVisibleText, so an echoed signal stamp never
+      // flashes up mid-stream
       const panel = chatPanel(chatId);
       const liveEl = panel?.querySelector('[data-role="live"]');
       if (liveEl && !selectionWithin(liveEl)) {
         const thread = panel.querySelector('[data-role="thread"]');
-        const stick = atBottom(thread);
-        liveEl.innerHTML = renderMarkdown(cs.live.text);
-        if (cs.live.text.length <= ENHANCE_LIVE_MAX) enhanceCodeBlocks(liveEl);
-        liveEl.append(el("span", { class: "cursor" }), liveCountEl(cs));
-        if (stick) thread.scrollTop = thread.scrollHeight;
+        const visText = liveVisibleText(cs.live.text);
+        liveEl.innerHTML = renderMarkdown(visText);
+        if (visText.length <= ENHANCE_LIVE_MAX) enhanceCodeBlocks(liveEl);
+        liveEl.append(el("span", { class: "cursor" }));
+        tickLiveCount(chatId);
+        if (chatFollows(cs)) followScroll(thread, cs);
         if (panel._updateJump) panel._updateJump();
       } else if (!liveEl) {
         queueThreadRedraw(chatId);
@@ -2354,12 +3260,11 @@ function onChatEvent(ev) {
       const tEl = panel?.querySelector('[data-role="live-think"]');
       if (tEl && tEl.firstChild && !selectionWithin(tEl)) {
         const thread = panel.querySelector('[data-role="thread"]');
-        const stick = atBottom(thread);
-        // update the TEXT NODE only - the cursor + count siblings live
-        // inside the thought while it streams and must survive deltas
+        // update the TEXT NODE only - the cursor sibling lives inside
+        // the thought while it streams and must survive deltas
         tEl.firstChild.nodeValue = cs.live.think;
         tickLiveCount(chatId);   // thinking counts toward liveness too
-        if (stick) thread.scrollTop = thread.scrollHeight;
+        if (chatFollows(cs)) followScroll(thread, cs);
         if (panel._updateJump) panel._updateJump();
       } else if (!tEl) {
         queueThreadRedraw(chatId);
@@ -2368,6 +3273,7 @@ function onChatEvent(ev) {
     }
     case "tool_begin":
       cs.tools[ev.callId] = { tool: ev.tool, state: "announced" };
+      cs.followTail = false;   // the NEXT turn's reply re-clamps too
       queueThreadRedraw(chatId);
       break;
     case "tool_call":
@@ -2497,8 +3403,15 @@ function onChatEvent(ev) {
       renderSendButton(chatId);
       renderTabs();
       attemptFlush(chatId, false);   // next queued message goes out
+      maybeAutoContinue(chatId, ev);
       break;
     case "error":
+      if (cs.autoContinue) {
+        // never hammer a failing provider - disarm loudly
+        cs.autoContinue = false;
+        renderAutoGen(chatId);
+        toast("Auto-continue off - the chat hit an error.", "warn", 3500);
+      }
       cs.churn = mkChurn(cs, "done") || cs.churn;
       cs.retryNote = null;
       cs.discarding = false;
@@ -2523,6 +3436,7 @@ async function refreshChatSilently(chatId) {
   const cs = chatState(chatId);
   cs.chat = res.data.chat;
   cs.running = res.data.running;
+  setMsgBase(cs);
   if (cs.lastStats) {
     const last = [...cs.chat.messages].reverse().find((m) => m.role === "assistant");
     if (last) Object.assign(last, cs.lastStats);
@@ -2530,6 +3444,7 @@ async function refreshChatSilently(chatId) {
   }
   renderCtxChip(chatId);
   renderAttachBar(chatId);   // artifacts ride on the chat doc
+  renderChatToolsbar(chatId);   // time travel rides on it too
   queueThreadRedraw(chatId);
   // an open diagnostics view (tab or popped-out window) follows along
   if (typeof refreshDiagView === "function") refreshDiagView(chatId);

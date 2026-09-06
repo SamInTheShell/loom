@@ -50,6 +50,86 @@
   font-size: var(--fs-xs); color: var(--fg-2); margin-bottom: 3px;
 }
 .msg-head .who { font-weight: 700; color: var(--fg-1); }
+
+/* per-entry hover actions: copy this entry / fork the chat here */
+.msg-actions {
+  display: flex; gap: 2px; margin-left: auto;
+  opacity: 0; transition: opacity .12s;
+}
+.msg:hover .msg-actions, .tool-card:hover .msg-actions { opacity: .85; }
+.msg-act {
+  background: none; border: none; padding: 2px 4px; cursor: pointer;
+  color: var(--fg-2); border-radius: var(--r-sm); line-height: 1;
+  font-size: var(--fs-xs); display: inline-flex; align-items: center;
+}
+.msg-act:hover { color: var(--fg-0); background: var(--bg-3); }
+.msg-act-del:hover { color: var(--err); }
+
+/* the chat tools bar: signal-manipulation tools across the top of every
+   chat - time travel first, the spacer keeps room for more */
+.chat-toolsbar {
+  flex: none; display: flex; align-items: center; gap: 14px;
+  padding: 4px 12px; border-bottom: 1px solid var(--bd-0);
+  background: var(--bg-1); font-size: var(--fs-xs);
+}
+.chat-toolsbar .spacer { flex: 1; }
+.ttrav-btn { display: inline-flex; align-items: center; gap: 6px; }
+.ttrav-btn.on { color: var(--acc); border-color: var(--acc); }
+.ttrav-btn.off-warn { color: var(--warn); border-color: var(--warn); }
+.ttrav-lbl { display: inline-flex; }
+.ttrav-name {
+  text-transform: uppercase; letter-spacing: .08em;
+  font-size: var(--fs-xs); user-select: none; color: var(--fg-2);
+}
+.ttrav-panel {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px; min-width: 280px;
+}
+.ttrav-row { display: flex; align-items: center; gap: 8px; }
+.ttrav-row .spacer { flex: 1; }
+.ttrav-note {
+  color: var(--fg-2); font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+}
+.ttrav-val.dim { opacity: .4; }
+.ttrav-slider { flex: 1; min-width: 150px; accent-color: var(--acc); }
+.ttrav-panel .ctx-item { display: flex; gap: 10px; align-items: baseline; }
+.ttrav-panel .ctx-item.sel { background: var(--acc-bg); }
+.netopt-lbl { font-weight: 600; min-width: 105px; }
+.netopt-desc { color: var(--fg-2); font-size: var(--fs-xs); }
+.ttrav-row.chk { cursor: pointer; }
+.ttrav-panel .mcp-fn { cursor: default; }
+.ttrav-panel .mcp-fn:hover { text-decoration: none; }
+.ttrav-panel .ttrav-row .mcp-fn[title*="click to open"] { cursor: pointer; }
+.ttrav-val {
+  font-family: var(--font-mono); cursor: pointer; user-select: none;
+  min-width: 24px;
+}
+.ttrav-now { font-family: var(--font-mono); color: var(--fg-2); }
+.ttrav-edit {
+  width: 150px; font-family: var(--font-mono); font-size: var(--fs-xs);
+  padding: 2px 6px; border-radius: var(--r-sm);
+  border: 1px solid var(--acc); background: var(--bg-2);
+  color: var(--fg-0); outline: none;
+}
+.ttrav-clear { font-size: var(--fs-md); line-height: 1; }
+
+/* auto-continue (Ctrl+Shift+R): the always-visible signal while armed */
+.autogen-bar { display: none; }
+.autogen-bar.on {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 6px; padding: 6px 10px;
+  background: var(--acc-bg); border: 1px solid var(--acc-dim);
+  border-radius: var(--r-md); font-size: var(--fs-sm); color: var(--fg-0);
+}
+.autogen-bar .spacer { flex: 1; }
+.autogen-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--acc);
+  animation: pulse 1.2s infinite; flex: none;
+}
+.think-entry { position: relative; }
+.think-entry > .msg-actions { position: absolute; top: 2px; right: 4px; }
+.tool-head .msg-actions { margin-left: auto; }
 .msg.user .msg-body {
   background: var(--acc-bg); border: 1px solid var(--acc-dim);
   border-radius: var(--r-lg); padding: 9px 13px;
@@ -311,6 +391,9 @@
 .ctx-chip { margin-left: 0; font-family: var(--font-mono); }
 .ctx-chip.warn { color: var(--warn); border-color: var(--warn); }
 .net-chip { margin-left: 0; }
+/* restricted / context-hungry states are the loud ones */
+.arts-chip.off { color: var(--warn); border-color: var(--warn); }
+.think-chip.off { color: var(--acc); border-color: var(--acc); }
 .net-chip.on { color: var(--warn); border-color: var(--warn); }
 /* loopback-only: opened a crack, not the door - accent, not warning */
 .net-chip.loop { color: var(--acc); border-color: var(--acc); }
@@ -438,9 +521,17 @@
 .wiz-filterrow { display: flex; gap: 6px; align-items: center; margin: 6px 0; }
 .wiz-filterrow input { flex: 1; }
 
-/* liveness counter riding the streaming cursor */
+/* liveness counter on its OWN static line below the stream - riding the
+ * cursor inline made it sprint around unreadably on fast models.
+ * margin-block ONLY: a `margin` shorthand would zero the inline margins
+ * and break out of the thread's centered column (.chat-thread > *).
+ * Content aligns with the model's turn, like .msg-stats. */
+.live-status {
+  margin-block: 0 6px; min-height: 1em;
+  padding-left: 2px; padding-right: 64px;
+}
 .live-count {
-  margin-left: 8px; color: var(--fg-2); font-size: var(--fs-xs);
+  color: var(--fg-2); font-size: var(--fs-xs);
   font-family: var(--font-mono); user-select: none;
 }
 

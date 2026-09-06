@@ -26,11 +26,124 @@ replaces the guessing.
   send with the honest error - the message stays queued.
 - **Retry / Continue** appears under the thread when the last word was
   yours or a reply stopped early - both resume the loop in place.
+  **Ctrl+R** resumes however the chat ended: it triggers the banner when
+  one is showing, and on a *finished* reply it asks the model to simply
+  keep going with no new input. On an **empty** chat it makes the model
+  produce the first message - the conversation opens from the system
+  prompt alone.
+- **Ctrl+Shift+R** toggles **auto-continue**: after every completed
+  response the chat continues itself, no new input needed. A pulsing
+  bar above the composer is the signal while it's armed - click its
+  button (or Ctrl+Shift+R again) to stop. It disarms itself if you stop
+  generation, the chat errors, or the model runs out of things to say;
+  messages you queue while it's armed still go out first.
+- **Auto-scroll is deterministic.** The thread follows the stream only
+  while you're "following", and only explicit actions change that:
+  scrolling away from the bottom holds your spot; scrolling back down,
+  the ⬇ jump button, or SENDING a message re-arms following. While you
+  hold a spot, nothing moves it - redraws put the entry you were
+  reading back exactly where it was, collapsing a thought above your
+  view compensates for the height change, and streaming just grows
+  below you.
+- **Following reads from the start.** A follower's view advances only
+  until the newest reply's beginning reaches the top of the panel, then
+  holds - come back to a long reply and it's pinned at its first line,
+  readable top to bottom, while the rest streams in below the fold (the
+  ⬇ button marks the extra). Scrolling to the very bottom or clicking ⬇
+  switches to tail-following for that reply; the next reply re-clamps
+  at its own start.
 - Closing a chat tab archives it (reopen from the Chat Archive tab); a
   streaming chat asks before cancelling. **Ctrl+N** opens a plain new
   chat from anywhere; **Ctrl+Shift+N** (from a chat tab) clones the current
   chat's setup - model, permission mode, attachments - into a fresh
   context window.
+
+## The tools bar - manipulating signals
+
+The strip across the top of every chat holds tools that manipulate the
+SIGNALS the model receives (more will land here over time).
+
+The **knowledge chip** cuts the knowledge base out of a chat entirely:
+the knowledge_search tool is not offered, /knowledge is refused by file
+tools and not mounted in shells, and the system prompt stops describing
+- or even mentioning - the base. Like every cut here it's per chat,
+persists, and rides into forks.
+
+**Network** (Ctrl+/) opens its three modes as a panel - no network /
+loopback only / network on. **MCP tools** overrides any running MCP
+tool's permission for THIS chat (allow / ask / deny / disabled);
+an override beats loom.yaml's per-mode entries and the MCP tab's
+defaults, and "default" hands the decision back. **Artifacts**
+(Ctrl+[) holds both the on/off cut and every file the model delivered
+- open, save, or dismiss them from the panel (the timeline entries in
+the chat keep their own buttons either way). **Env signals** (shown
+when an environment is loaded) exposes or hides each variable's NAME
+per chat - hidden variables still load into shell containers; the
+model just isn't told they exist.
+
+**Terminal** (right side of the bar) opens a separate window with a
+real shell in this chat's EXACT container setup - the same image, the
+same /mnt folder mounts, /knowledge and /artifacts (respecting their
+cuts), the chat's own /home/loom, the same network mode and
+environment. Use it to inspect the environment the way the model sees
+it: what's on disk, what the network reaches, which variables are set
+(env signals hidden from the model still load - the terminal shows the
+truth). The shell is a live mirror: change the chat's container,
+mounts, network, environment, or the knowledge/artifacts cuts and it
+restarts itself to match, keeping its scrollback. It shares the chat's
+home but not its processes - the model's shell commands still run in
+their own fresh containers. Closing the window kills the shell.
+
+Both sides of the conversation carry time signals on the wire: every
+user message begins with its UTC send time in [brackets], and every
+assistant reply with the time it was generated. The assistant's can be
+switched off with `chat.assistant_signals: false` in loom.yaml (also a
+checkbox in the Configuration tab's Chat defaults dialog). Signals live
+on the wire, never in the visible message - a model that imitates its
+own stamped history has the echoed stamp stripped from its reply - but
+nothing about them is hidden from you: hover the speaker's name ("you",
+or the agent's) to see exactly what that message reports to the model,
+including, under time travel, the real time next to the signalled one.
+The agent's hover also names the model behind it, since the header
+shows the agent's NAME - `chat.assistant_name` in loom.yaml, "loom" by
+default.
+
+**Time travel** shifts the time signal: normally every message carries
+its real UTC time in [brackets] on the wire, and with an offset armed
+each *new* message reports real-time + offset instead - forward or
+backward - to probe the model's signal awareness. The **time travel
+button** opens its panel: drag the slider (fine steps near the middle,
+years at the ends), or double-click the value and type an offset like
+`+1y 2d 5m 3s` (units `y w d h m s`, sign first). While armed the
+button shows the offset and **×** clears it. The panel's **datetime
+signals toggle** goes further: OFF hides every datetime from the model
+for this chat - no session-start stamp, no message brackets on either
+side. Real timestamps, the UI, and already-sent stamps are never
+touched, and both settings survive restarts and ride along into forks.
+
+## Copy, fork, delete - working the history
+
+Hover any user message, model reply, thought entry, or tool card for
+its action buttons (top right):
+
+- **Copy** grabs that entry's text - the message, the thought, or the
+  tool call with its result. (Code blocks inside rendered replies keep
+  their own per-block Copy button.)
+- **Fork** opens a NEW chat whose history is this one truncated right
+  after that entry - same provider, model, permission mode, container,
+  environment, network and attachments; everything after the fork point
+  stays here. If tool calls ran after that point in the original chat,
+  the fork carries an injected thought telling the model that files or
+  other external state may have changed and to re-check before acting.
+  Forking at one of your messages ends the new chat on it, so the Retry
+  banner is ready to regenerate a different reply.
+- **Delete** (right of fork, after a confirmation) removes the entry
+  from the history - the model no longer sees it. Deleting a reply that
+  called tools takes its results along; deleting a tool card takes that
+  call out of the calling turn, so the conversation the model sees
+  always stays well-formed. Deleting a **thought** removes just the
+  thinking - the reply it belongs to stays, unless the thought was all
+  there was of that turn. Not available while a reply is streaming.
 
 ## Tools and permissions
 
@@ -40,8 +153,15 @@ attached folders (`/mnt/<name>`), plus `shell`. What runs freely is the
 `always-ask` (changes and shell confirm), `allow-edits` (edits and
 sandboxed shell run without asking), `always-allow`, or your own defined
 under `permission-modes:` in loom.yaml (levels per tool: allow / ask /
-deny / disabled). Switching the mode also re-decides any tool call
-already waiting for permission.
+deny / disabled) - the Configuration tab's **Permission modes…** dialog
+edits the whole thing as a tools × modes matrix. Switching the mode
+also re-decides any tool call already waiting for permission.
+
+Stdio **MCP servers** defined under `mcp-servers:` in loom.yaml add
+their tools too, surfaced to the model as `mcp_<server>_<tool>` - the
+MCP Servers tab defines, enables, and sets per-tool default permissions
+(a `permission-modes:` entry with the full function name still wins per
+mode).
 
 The security boundary is the **container**, not the tool list:
 
@@ -51,8 +171,8 @@ The security boundary is the **container**, not the tool list:
   folders and the knowledge base (`/knowledge`) are mounted read-only
   at the kernel level, so the shell is safe read-only tooling; flip a
   pill to *write* deliberately when you want edits.
-- **Network is off by default - three modes.** The chip left of the
-  model selector cycles per chat; nothing in a library
+- **Network is off by default - three modes.** The tools bar's network
+  panel picks per chat (Ctrl+/); nothing in a library
   file can change it:
   - **no network** - `--network=none`. The container still has its own
     private loopback, so an in-container dev server + curl works.
@@ -90,9 +210,16 @@ Two pills left of the permission mode steer the shell's world:
 ## Artifacts
 
 `/artifacts` is the chat's read-write delivery folder. Anything the
-model leaves there arrives two ways at once: a pill in the attach bar,
-and a timestamped **delivery entry in the chat itself**, so you can
-always see when a file arrived and open or save it from the history.
+model leaves there arrives two ways at once: in the tools bar's
+**artifacts panel** (the button shows the count), and as a timestamped
+**delivery entry in the chat itself**, so you can always see when a
+file arrived and open or save it from the history.
+
+The same panel's **on/off toggle** (Ctrl+[ opens it) disables the
+whole mechanism per chat: /artifacts is not mounted in shells, the file tools
+refuse it, tool descriptions stop mentioning it, and no new deliveries
+land - already-delivered artifacts stay viewable. Like the network
+chip, it's a real boundary, not a polite request.
 
 - **Click a pill (or a delivery entry's name)** to open the artifact in
   its own window: text opens in the real markdown/code editor and
@@ -135,8 +262,10 @@ conversation is summarized with `prompts/compaction.md` and the summary
 replaces the older turns on the wire - the full history stays in the
 file and on screen (a collapsible "context compacted" card marks the
 seam). "Compact now" lives in the chip's hover card. Older thinking is
-dropped from the wire by default (`chat.thought_truncation`); only the
-latest turn's thoughts ride along.
+dropped from the wire by default; only the latest turn's thoughts ride
+along. That's the **thoughts chip**, per chat (Ctrl+]) - "latest
+thought" vs "all thoughts" - and `chat.thought_truncation` in loom.yaml
+only sets the default for NEW chats.
 
 ## Attachments
 

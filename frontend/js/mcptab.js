@@ -39,9 +39,10 @@ function renderMcpTab() {
     el("h2", { text: "MCP Servers" }),
     el("div", { style: "display:flex;gap:6px" },
       el("button", { class: "btn btn-sm btn-acc", text: "New MCP server…",
-        onclick: () => mcpWizard() }),
-      el("button", { class: "btn btn-sm", text: "Edit loom.yaml",
-        onclick: () => openLibraryFileAt(st.lib.configFile || "loom.yaml") }))));
+        onclick: () => mcpServerDialog() }),
+      el("button", { class: "btn btn-sm", html: icon("gear", 13) + " Edit loom.yaml",
+        title: "The Config tab - the whole file, validated on save",
+        onclick: () => openTab("config") }))));
   wrap.append(el("p", { class: "mods-hint",
     text: "Tool servers chats can call (Model Context Protocol, stdio). "
       + "Enabled servers autostart when this library reopens. Each tool's "
@@ -56,7 +57,7 @@ function renderMcpTab() {
       el("p", { text: "No MCP servers in loom.yaml yet." }),
       el("div", { style: "display:flex;gap:8px;justify-content:center" },
         el("button", { class: "btn btn-acc", text: "New MCP server…",
-          onclick: () => mcpWizard() }))));
+          onclick: () => mcpServerDialog() }))));
   }
   for (const s of ms.servers || []) wrap.append(mcpServerCard(s));
 
@@ -98,6 +99,10 @@ function mcpServerCard(s) {
       el("span", { text: s.running ? "running · " + s.tools.length + " tools"
         : "stopped" })));
   const actions = el("div", { class: "srv-actions" });
+  actions.append(el("button", { class: "btn btn-sm", text: "Edit…",
+    title: "Change this server's entry in loom.yaml"
+      + (s.running ? " (it restarts on the new definition)" : ""),
+    onclick: () => mcpServerDialog(s) }));
   if (s.running) {
     actions.append(
       el("button", { class: "btn btn-sm", text: "Refresh tools",
@@ -114,6 +119,9 @@ function mcpServerCard(s) {
     actions.append(el("button", { class: "btn btn-sm btn-acc", text: "Enable",
       onclick: () => mcpToggle(s.name, true) }));
   }
+  actions.append(el("button", { class: "btn btn-sm btn-danger", text: "Remove",
+    title: "Remove this server from loom.yaml",
+    onclick: () => removeMcpServerPrompt(s) }));
   row.append(actions);
   card.append(row);
   card.append(el("div", { class: "srv-meta", title: s.command, text: s.command }));
@@ -158,17 +166,25 @@ async function mcpToggle(name, on) {
   toast((on ? "Enabled " : "Disabled ") + name, "ok", 1500);
 }
 
-/* ---- the setup wizard: name + command + env → loom.yaml entry ---- */
-function mcpWizard() {
+/* ---- the setup dialog: name + command + env → loom.yaml entry.
+ * With `existing` (a status row) it rewrites that entry in place; a
+ * running server restarts on the new definition. ---- */
+function mcpServerDialog(existing) {
   const body = el("div", { class: "wiz-body" });
-  modal("New MCP server", [body], [{ label: "Cancel" }], { id: "mcp-wizard" });
-  const nameIn = el("input", { type: "text",
+  modal(existing ? "Edit MCP server · " + existing.name : "New MCP server",
+    [body], [{ label: "Cancel" }], { id: "mcp-wizard" });
+  const nameIn = el("input", { type: "text", value: existing?.name || "",
     placeholder: "name - letters/digits/-/_ (part of tool function names)" });
-  const cmdIn = el("input", { type: "text",
+  const cmdIn = el("input", { type: "text", value: existing?.command || "",
     placeholder: "command, e.g. npx -y @modelcontextprotocol/server-filesystem /tmp" });
   const envIn = el("textarea", { class: "mcp-env",
     placeholder: "environment (optional) - one KEY=value per line", rows: "3" });
-  const add = el("button", { class: "btn btn-acc", text: "Add to loom.yaml",
+  if (existing?.env) {
+    envIn.value = Object.entries(existing.env)
+      .map(([k, v]) => k + "=" + v).join("\n");
+  }
+  const save = el("button", { class: "btn btn-acc",
+    text: (existing ? "Save" : "Add") + " to loom.yaml",
     onclick: async () => {
       const env = {};
       for (const ln of envIn.value.split("\n")) {
@@ -178,14 +194,20 @@ function mcpWizard() {
         if (i < 1) { toast("env lines are KEY=value: " + s2, "err"); return; }
         env[s2.slice(0, i).trim()] = s2.slice(i + 1).trim();
       }
-      const r = await Api.call("mcp_add", nameIn.value.trim(),
-        cmdIn.value.trim(), env);
+      const r = existing
+        ? await Api.call("mcp_update", existing.name, nameIn.value.trim(),
+            cmdIn.value.trim(), env)
+        : await Api.call("mcp_add", nameIn.value.trim(),
+            cmdIn.value.trim(), env);
       if (!r.ok) { toast(r.error, "err"); return; }
       mcpState().servers = r.data.servers;
       closeTopModal();
       renderMcpTab();
       libReloadIfOpen(st.lib.configFile || "loom.yaml");
-      toast("Added - enable it to connect and see its tools.", "ok");
+      toast(existing
+        ? "Updated " + (nameIn.value.trim() || existing.name)
+          + (existing.running ? " - restarted on the new definition." : ".")
+        : "Added - enable it to connect and see its tools.", "ok");
     } });
   body.append(
     el("p", { class: "wiz-hint",
@@ -195,8 +217,22 @@ function mcpWizard() {
     el("div", { class: "ts-row" }, el("label", { text: "Name" }), nameIn),
     el("div", { class: "ts-row" }, el("label", { text: "Command" }), cmdIn),
     el("div", { class: "ts-row" }, el("label", { text: "Env" }), envIn),
-    el("div", { class: "wiz-nav" }, el("span", { class: "spacer" }), add));
+    el("div", { class: "wiz-nav" }, el("span", { class: "spacer" }), save));
   setTimeout(() => nameIn.focus(), 0);
+}
+
+function removeMcpServerPrompt(s) {
+  confirmModal("Remove MCP server",
+    "Remove " + s.name + " from loom.yaml?"
+    + (s.running ? " It is running - it will be stopped first." : ""),
+    "Remove", async () => {
+      const r = await Api.call("mcp_remove", s.name);
+      if (!r.ok) { toast(r.error, "err"); return; }
+      mcpState().servers = r.data.servers;
+      renderMcpTab();
+      libReloadIfOpen(st.lib.configFile || "loom.yaml");
+      toast("Removed " + s.name + " from loom.yaml", "ok");
+    }, true, "mcp-remove");
 }
 
 /* bus events: server started/stopped/died elsewhere (autostart, errors) */

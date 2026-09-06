@@ -48,10 +48,25 @@ button for servers started with `--api-key` - the key is stored in this
 machine's OS keyring (never in `loom.yaml`) and rides every request as
 `Authorization: Bearer`. **Add provider…** writes a new entry into
 `loom.yaml` non-destructively, with a **Test** button that probes
-(key included) before anything is written.
+(key included) before anything is written. Each card also carries
+**Edit…** (rewrites just that entry - a rename moves its keyring key
+along) and **Remove** (drops the entry and its key). Every write is
+validated first; the rest of the file, comments included, stays
+byte-for-byte. For the whole file at once, **Edit loom.yaml** opens
+the Configuration tab's validated editor.
 
 Providers are other people's processes - Loom never starts, stops, or
 supervises them, and quitting Loom leaves them exactly as they were.
+
+## Serving it all back out - the API Server tab
+
+The **API Server** tab (globe) aggregates every provider's models into
+one OpenAI-compatible API (`/v1/chat/completions`, `/v1/completions`,
+`/v1/embeddings`, `/v1/models`) for other tools on your machine or LAN.
+Interface and port persist in `loom.yaml`'s `api:` section; the on/off
+toggle deliberately does not - every Loom launch starts with it OFF.
+An optional key (stored in the OS keyring) gates every route except
+`/health`.
 
 ## Picking models in a chat
 

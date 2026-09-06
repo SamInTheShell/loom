@@ -19,6 +19,7 @@ TEMPLATES_DIR = FRONTEND_DIR / "templates"
 OUTPUT = FRONTEND_DIR / "index.html"
 DIAG_OUTPUT = FRONTEND_DIR / "diagwin.html"
 ART_OUTPUT = FRONTEND_DIR / "artwin.html"
+TERM_OUTPUT = FRONTEND_DIR / "termwin.html"
 
 # Order matters: plain script tags, no modules. Later files may use
 # globals defined by earlier ones.
@@ -49,6 +50,7 @@ APP_SCRIPTS = [
     "js/terminal.js",
     "js/apisrv.js",
     "js/mcptab.js",
+    "js/configtab.js",
     "js/archive.js",
     "js/alerts.js",
     "js/envstab.js",
@@ -90,6 +92,24 @@ ART_SCRIPTS = [
 ]
 
 
+# the chat-mirror terminal window: the terminal emulator over one chat's
+# exact container setup. termwin.js loads BEFORE terminal.js - it defines
+# the `st` global and the main-app stubs terminal.js touches at load time.
+TERMWIN_STYLES = [
+    "css/tokens.css",
+    "css/app.css",
+    "css/chat.css",
+    "css/term.css",
+]
+
+TERMWIN_SCRIPTS = [
+    "js/util.js",
+    "js/api.js",
+    "js/termwin.js",
+    "js/terminal.js",
+]
+
+
 def compose() -> Path:
     env = Environment(
         loader=FileSystemLoader(TEMPLATES_DIR),
@@ -113,6 +133,11 @@ def compose() -> Path:
         scripts=ART_SCRIPTS,
     )
     ART_OUTPUT.write_text(art, encoding="utf-8")
+    term = env.get_template("termwin.html.j2").render(
+        styles=TERMWIN_STYLES,
+        scripts=TERMWIN_SCRIPTS,
+    )
+    TERM_OUTPUT.write_text(term, encoding="utf-8")
     return OUTPUT
 
 

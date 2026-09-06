@@ -400,6 +400,64 @@ body.maximized #frame-border { display: none; }
 }
 
 /* =========================================================
+   config tab (the whole loom.yaml, validated on save)
+   ========================================================= */
+.tabpanel.cfgtab { display: flex; flex-direction: column; padding: 14px 18px; }
+.cfgtab .cfg-head { width: 100%; max-width: 980px; margin: 0 auto 8px; }
+.cfg-hint { width: 100%; max-width: 980px; margin: 0 auto 10px; }
+.cfg-filebar {
+  width: 100%; max-width: 980px; margin: 0 auto;
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border: 1px solid var(--bd-0); border-bottom: none;
+  border-radius: var(--r-md) var(--r-md) 0 0; background: var(--bg-1);
+}
+.cfg-filebar .spacer { flex: 1; }
+.cfg-note { color: var(--fg-2); font-size: var(--fs-xs); }
+.cfg-editor {
+  flex: 1; min-height: 0; width: 100%; max-width: 980px; margin: 0 auto;
+  display: flex; flex-direction: column;
+  border: 1px solid var(--bd-0);
+  border-radius: 0 0 var(--r-md) var(--r-md); overflow: hidden;
+}
+.modal input[type=number] {
+  padding: 7px 10px; border-radius: var(--r-md);
+  border: 1px solid var(--bd-1); background: var(--bg-2); color: var(--fg-0);
+  font: inherit; outline: none;
+}
+.cfg-num { max-width: 110px; }
+.modal.modal-wide { max-width: min(940px, 96vw); }
+
+/* the permission-modes matrix */
+.permx-scroll {
+  overflow: auto; max-height: 48vh;
+  border: 1px solid var(--bd-0); border-radius: var(--r-md);
+}
+.permx { border-collapse: collapse; width: 100%; }
+.permx th, .permx td {
+  padding: 4px 8px; text-align: left;
+  border-bottom: 1px solid var(--bd-0); white-space: nowrap;
+}
+.permx th {
+  position: sticky; top: 0; background: var(--bg-2); z-index: 1;
+  font-size: var(--fs-sm);
+}
+.permx-tool { font-family: var(--font-mono); font-size: var(--fs-xs); }
+.permx-sel { width: auto; padding: 2px 6px; font-size: var(--fs-xs); }
+.permx-del {
+  background: none; border: none; color: var(--fg-2);
+  cursor: pointer; margin-left: 4px; font-size: var(--fs-sm);
+}
+.permx-del:hover { color: var(--err); }
+.permx-foot { display: flex; gap: 6px; align-items: center; margin-top: 10px; }
+.permx-foot .spacer { flex: 1; }
+.modal input[type=text].permx-add { width: 220px; }
+
+/* container definitions editor */
+.cfg-defs { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.cfg-def-row { display: flex; gap: 6px; width: 100%; }
+.cfg-def-row input:first-child { max-width: 140px; }
+
+/* =========================================================
    archive tab
    ========================================================= */
 .arctab { flex: 1; overflow-y: auto; padding: 18px; }

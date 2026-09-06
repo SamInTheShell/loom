@@ -74,6 +74,26 @@ permission-modes:
       write_file: allow
       edit_file: allow
       shell: allow
+  deny:                # deny all tools
+    tools:
+      knowledge_search: deny
+      read_file: deny
+      list_dir: deny
+      grep: deny
+      find_files: deny
+      write_file: deny
+      edit_file: deny
+      shell: deny
+  disabled:            # disable all tools
+    tools:
+      knowledge_search: disabled
+      read_file: disabled
+      list_dir: disabled
+      grep: disabled
+      find_files: disabled
+      write_file: disabled
+      edit_file: disabled
+      shell: disabled
 
 # shell commands from chats and terminals run inside a container
 # (non-root user), never directly on the host.

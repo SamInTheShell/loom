@@ -34,6 +34,7 @@ from __future__ import annotations
 import base64
 import http.client
 import json
+import re
 import threading
 import time
 import traceback
@@ -210,12 +211,17 @@ READ_GATE_CHARS = 100_000
 READ_SLICE_MAX_LINES = 2000
 
 
-def perm_for(cfg: dict | None, name: str, mode: str = "") -> str:
-    """The effective level for one tool. mcp_* tools resolve in two
-    layers: an EXPLICIT entry in the active permission mode (loom.yaml)
-    wins; otherwise the default chosen in the MCP Servers tab applies
+def perm_for(cfg: dict | None, name: str, mode: str = "",
+             chat_perms: dict | None = None) -> str:
+    """The effective level for one tool. mcp_* tools resolve in three
+    layers: the CHAT's own per-tool override (the tools bar's MCP panel)
+    wins; then an explicit entry in the active permission mode
+    (loom.yaml); then the default chosen in the MCP Servers tab
     (libconfig's blanket unknown-tool 'ask' never sees mcp_* names)."""
     if name.startswith("mcp_"):
+        got = (chat_perms or {}).get(name)
+        if got in libconfig.PERM_LEVELS:
+            return got
         modes = (cfg or {}).get("permissionModes") or {}
         m = mode or ((cfg or {}).get("chat") or {}).get("permission_mode") \
             or libconfig.DEFAULT_MODE
@@ -229,12 +235,16 @@ def perm_for(cfg: dict | None, name: str, mode: str = "") -> str:
 
 
 def tool_specs(cfg: dict | None = None, mode: str = "",
-               network=None) -> list[dict]:
+               network=None, artifacts: bool = True,
+               knowledge: bool = True,
+               mcp_perms: dict | None = None) -> list[dict]:
     """The tools offered this turn - built-ins plus every tool of every
     RUNNING MCP server. A tool at level `disabled` in the active
     permission mode is not offered at all. Every chat has the
-    write tools and shell: /artifacts is always writable, and view-mode
-    mounts are enforced read-only by the container itself.
+    write tools and shell: /artifacts is writable (unless the chat's
+    artifacts chip disabled it - `artifacts` False drops it from every
+    description), and view-mode mounts are enforced read-only by the
+    container itself.
 
     `network` (when known: none / loopback / on, legacy bools accepted)
     is spelled out in the shell tool's own description - the model reads
@@ -242,7 +252,7 @@ def tool_specs(cfg: dict | None = None, mode: str = "",
     troubleshooting phantom connectivity is exactly the time waste that
     line prevents."""
     def level(name):
-        return perm_for(cfg, name, mode)
+        return perm_for(cfg, name, mode, mcp_perms)
 
     specs: list[dict] = []
 
@@ -255,29 +265,35 @@ def tool_specs(cfg: dict | None = None, mode: str = "",
                                                   "properties": params,
                                                   "required": required}}})
 
-    add("knowledge_search",
-        "Search the library's markdown knowledge base. Returns matching "
-        "files and lines with paths like /knowledge/foo.md.",
-        {"query": {"type": "string"}}, ["query"])
+    if knowledge:
+        add("knowledge_search",
+            "Search the library's markdown knowledge base. Returns "
+            "matching files and lines with paths like /knowledge/foo.md.",
+            {"query": {"type": "string"}}, ["query"])
+    kb_and = " and the knowledge base" if knowledge else ""
+    kb_scope = "'/knowledge', or " if knowledge else ""
     add("grep",
         "Search file CONTENTS (case-insensitive substring, ranked) across "
-        "the attached folders and the knowledge base. Returns "
+        "the attached folders" + kb_and + ". Returns "
         "path:line: text hits. Scope with `path`: '/' (everything), "
-        "'/knowledge', or '/mnt/<folder>[/sub]'.",
+        + kb_scope + "'/mnt/<folder>[/sub]'.",
         {"query": {"type": "string"},
          "path": {"type": "string", "description": "scope, default '/'"}},
         ["query"])
     add("find_files",
         "Fuzzy-find FILES by name/path (subsequence match, like Ctrl+P) "
-        "across the attached folders and the knowledge base. Scope with "
+        "across the attached folders" + kb_and + ". Scope with "
         "`path` like grep.",
         {"query": {"type": "string"},
          "path": {"type": "string", "description": "scope, default '/'"}},
         ["query"])
     add("read_file",
-        "Read a text file. Paths: /knowledge/<...> for the knowledge base, "
-        "/mnt/<folder>/<...> for attached folders, /artifacts/<...> for "
-        "this chat's artifact folder. Files over ~25k tokens "
+        "Read a text file. Paths: "
+        + ("/knowledge/<...> for the knowledge base, " if knowledge else "")
+        + "/mnt/<folder>/<...> for attached folders"
+        + (", /artifacts/<...> for this chat's artifact folder"
+           if artifacts else "")
+        + ". Files over ~25k tokens "
         "refuse a whole-file read - pass offset (1-based line) and limit "
         "(line count) to read a slice; grep first to find the right spot.",
         {"path": {"type": "string"},
@@ -290,8 +306,9 @@ def tool_specs(cfg: dict | None = None, mode: str = "",
     add("edit_file",
         "Edit a text file by exact string replacement: old_string must "
         "match the file contents exactly and be UNIQUE (or set "
-        "replace_all true). Works inside write-mode attached folders and "
-        "/artifacts. Prefer this over write_file for existing files.",
+        "replace_all true). Works inside write-mode attached folders"
+        + (" and /artifacts" if artifacts else "")
+        + ". Prefer this over write_file for existing files.",
         {"path": {"type": "string"},
          "old_string": {"type": "string"},
          "new_string": {"type": "string"},
@@ -299,9 +316,10 @@ def tool_specs(cfg: dict | None = None, mode: str = "",
         ["path", "old_string", "new_string"])
     add("write_file",
         "Create or overwrite a text file inside a write-mode attached "
-        "folder (/mnt/<folder>/<...>) or /artifacts. Files and folders "
-        "you place in /artifacts are delivered to the user as chat "
-        "attachments.",
+        "folder (/mnt/<folder>/<...>)"
+        + (" or /artifacts. Files and folders you place in /artifacts "
+           "are delivered to the user as chat attachments." if artifacts
+           else "."),
         {"path": {"type": "string"}, "content": {"type": "string"}},
         ["path", "content"])
     # nmode, NOT mode - `mode` is the permission mode the level() closure
@@ -334,10 +352,14 @@ def tool_specs(cfg: dict | None = None, mode: str = "",
     add("shell",
         "Run a bash command inside the sandbox container (unprivileged "
         "user). " + net_line
-        + "Attached folders are under /mnt (view mode mounts read-only), "
-        "the knowledge base is at /knowledge (read-only), and /artifacts "
-        "is read-write - anything left there is delivered to the user. "
-        "ALWAYS set `timeout` to fit the command - a hung command runs "
+        + "Attached folders are under /mnt (view mode mounts read-only)"
+        + (", the knowledge base is at /knowledge (read-only)"
+           if knowledge else "")
+        + (", and /artifacts is read-write - anything left there is "
+           "delivered to the user. " if artifacts else
+           ". This chat's /artifacts delivery folder is DISABLED - it is "
+           "not mounted; do not write there. ")
+        + "ALWAYS set `timeout` to fit the command - a hung command runs "
         "until the timeout kills it.",
         {"command": {"type": "string"},
          "timeout": {"type": "integer",
@@ -404,9 +426,17 @@ def _resolve_path(root: Path, chat: dict, path: str) -> tuple[str, Path, str]:
     if p.startswith("/knowledge"):        # the container spelling
         p = p.lstrip("/") or "knowledge"
     if p.startswith("knowledge/") or p == "knowledge":
+        if chat.get("knowledgeOff"):
+            raise chats.ChatError(
+                "the knowledge base is disabled for this chat - ask the "
+                "user to flip the knowledge chip if it is needed")
         host = library.safe_join(root, p)
         return ("knowledge", host, "view")
     if p == "/artifacts" or p.startswith("/artifacts/"):
+        if chat.get("artifactsOff"):
+            raise chats.ChatError(
+                "artifacts are disabled for this chat - ask the user to "
+                "flip the artifacts chip if a file should be delivered")
         base = chats.artifacts_dir(root, str(chat["id"]), create=True)
         rel = p[len("/artifacts/"):] if len(p) > len("/artifacts") else ""
         host = (base / rel).resolve() if rel else base
@@ -433,8 +463,12 @@ def _search_scopes(root: Path, chat: dict, path: str) -> list[tuple[str, Path]]:
     '/' = knowledge + every mount, else one resolved directory."""
     p = str(path or "/").strip() or "/"
     if p == "/":
-        scopes = [("/knowledge/", root / "knowledge"),
-                  ("/artifacts/", chats.artifacts_dir(root, str(chat["id"])))]
+        scopes = []
+        if not chat.get("knowledgeOff"):
+            scopes.append(("/knowledge/", root / "knowledge"))
+        if not chat.get("artifactsOff"):
+            scopes.append(("/artifacts/",
+                           chats.artifacts_dir(root, str(chat["id"]))))
         for n, hp in _mount_map(chat).items():
             scopes.append((f"/mnt/{n}/", hp))
         return [(d, h) for d, h in scopes if h.is_dir()]
@@ -501,6 +535,9 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
         return f"replaced {n if args.get('replace_all') else 1} occurrence(s)"
 
     if name == "knowledge_search":
+        if chat.get("knowledgeOff"):
+            raise chats.ChatError(
+                "the knowledge base is disabled for this chat")
         hits = search.search(root, str(args.get("query") or ""),
                              subdir="knowledge", limit=30)
         if not hits:
@@ -520,9 +557,13 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
         kind, host, _mode = _resolve_path(root, chat, str(args.get("path") or "/"))
         if kind == "root":
             mounts = _mount_map(chat)
-            out = ["/knowledge/  (library knowledge base, read-only)",
-                   "/artifacts/  (read-write - files here are delivered "
-                   "to the user)"]
+            out = []
+            if not chat.get("knowledgeOff"):
+                out.append("/knowledge/  (library knowledge base, "
+                           "read-only)")
+            if not chat.get("artifactsOff"):
+                out.append("/artifacts/  (read-write - files here are "
+                           "delivered to the user)")
             for n, p in mounts.items():
                 mode = _folder_mode(chat, p)
                 out.append(f"/mnt/{n}/  ({'read-write' if mode == 'write' else 'read-only'})")
@@ -604,8 +645,10 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
             timeout=timeout_s,
             cancel=cancel, on_output=on_output,
             network=net,
-            knowledge=root / "knowledge",
-            artifacts=chats.artifacts_dir(root, str(chat["id"]), create=True),
+            knowledge=None if chat.get("knowledgeOff")
+            else root / "knowledge",
+            artifacts=None if chat.get("artifactsOff")
+            else chats.artifacts_dir(root, str(chat["id"]), create=True),
             extra_env=extra_env)
         # the shell has THREE honest outcomes, and the card must show the
         # right one: ok (exit 0) / failed (nonzero exit, timeout) /
@@ -695,6 +738,8 @@ def _sync_artifacts(root: Path, chat: dict, ev=None) -> list[str]:
     timeline shows when each delivery happened, and the message keeps its
     own open/save affordances even after the pill is dismissed. A fresh
     delivery un-dismisses its pill (a regenerated file is news again)."""
+    if chat.get("artifactsOff"):
+        return []   # the chip disabled deliveries for this chat
     recs = _artifact_records(root, str(chat["id"]))
     old = {a.get("name"): a for a in chat.get("artifacts") or []}
     fresh = [r["name"] for r in recs
@@ -742,6 +787,26 @@ def _active_slice(chat: dict) -> tuple[dict | None, list[dict]]:
     return None, msgs
 
 
+def _truncate_thoughts(cfg: dict, chat: dict) -> bool:
+    """Per-chat thought truncation; loom.yaml's chat.thought_truncation
+    is only the default stamped onto NEW chats (and the fallback for
+    chats from before the per-chat setting existed)."""
+    v = chat.get("thoughtTruncation")
+    if v is None:
+        v = (cfg.get("chat") or {}).get("thought_truncation", True)
+    return bool(v)
+
+
+_ECHOED_STAMP_RE = re.compile(r"^\s*\[\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\]\s*")
+
+
+def _strip_echoed_stamp(text: str) -> str:
+    """A model that sees its own history stamped `[.. UTC]` imitates the
+    prefix in fresh replies. The signal belongs to Loom, not the visible
+    message - drop the echo; the wire re-adds the authoritative stamp."""
+    return _ECHOED_STAMP_RE.sub("", text, count=1)
+
+
 def _utc_stamp(ms=None) -> str:
     import datetime
     dt = datetime.datetime.now(datetime.timezone.utc) if ms is None \
@@ -781,27 +846,43 @@ def _wire_messages(root: Path, cfg: dict, chat: dict) -> list[dict]:
     # the first changed token - a live clock here forced a FULL reprocess
     # of the whole context every turn. The session stamp never changes;
     # "now" comes from the newest user message's bracket stamp instead.
-    ctx = ["", "## Environment",
-           f"Session started {_utc_stamp(chat.get('createdTs'))}. All "
-           "timestamps are UTC; every user message begins with its send "
-           "time in [brackets] - the newest one is the current time."]
+    # the time-travel panel's master switch: signals OFF means the model
+    # receives NO datetime signal anywhere - no session stamp, no
+    # message brackets on either side
+    sig_off = bool(chat.get("timeSignalsOff"))
+    asst_sig = not sig_off and bool(
+        (cfg.get("chat") or {}).get("assistant_signals", True))
+    ctx = ["", "## Environment"]
+    if not sig_off:
+        ctx.append(
+            f"Session started {_utc_stamp(chat.get('createdTs'))}. All "
+            "timestamps are UTC; "
+            + ("every message begins with its UTC time in [brackets] - a "
+               "user message's send time, or the time your own reply was "
+               "generated" if asst_sig else
+               "every user message begins with its send time in [brackets]")
+            + " - the newest one is the current time.")
     # the knowledge base signal is AUTO-DETAILED: what it is, how access
-    # works, and a live map of its contents
-    kmap = _knowledge_map(root)
-    ctx.append("")
-    ctx.append("## Knowledge base")
-    ctx.append("This library ships a curated knowledge base: practices and "
-               "reference material meant to be consulted, not guessed at. "
-               "Before answering anything it may cover, call "
-               "knowledge_search with a few keywords; hits come back as "
-               "/knowledge/<path>[:line] - read the matching file with "
-               "read_file. Folder READMEs map their contents; read them "
-               "first when they match.")
-    if kmap:
-        ctx.append("It currently contains:")
-        ctx += kmap
-    else:
-        ctx.append("It is currently empty - say so rather than citing it.")
+    # works, and a live map of its contents - unless the chat's
+    # knowledge chip cut the whole thing off
+    kb_off = bool(chat.get("knowledgeOff"))
+    if not kb_off:
+        kmap = _knowledge_map(root)
+        ctx.append("")
+        ctx.append("## Knowledge base")
+        ctx.append("This library ships a curated knowledge base: practices "
+                   "and reference material meant to be consulted, not "
+                   "guessed at. Before answering anything it may cover, "
+                   "call knowledge_search with a few keywords; hits come "
+                   "back as /knowledge/<path>[:line] - read the matching "
+                   "file with read_file. Folder READMEs map their contents; "
+                   "read them first when they match.")
+        if kmap:
+            ctx.append("It currently contains:")
+            ctx += kmap
+        else:
+            ctx.append("It is currently empty - say so rather than "
+                       "citing it.")
     ctx.append("")
     if mounts:
         ctx.append("Attached folders (also visible in shell commands):")
@@ -842,32 +923,41 @@ def _wire_messages(root: Path, cfg: dict, chat: dict) -> list[dict]:
                     "full access reaches the internet). Servers started "
                     "inside the container ARE reachable from the "
                     "container's own localhost.")
-    ctx.append(net_text + " The knowledge base is mounted read-only at "
-               "/knowledge; view-mode folders are mounted read-only - the "
+    ctx.append(net_text
+               + ("" if kb_off else " The knowledge base is mounted "
+                  "read-only at /knowledge;")
+               + " view-mode folders are mounted read-only - the "
                "shell is safe for traversing and inspecting them.")
     if chat.get("env"):
         try:
             resolved, missing = envs.resolve(root, str(chat["env"]))
         except envs.EnvError:
             resolved, missing = {}, []
-        if resolved or missing:
+        # per-variable SIGNAL hiding (the tools bar's env panel): hidden
+        # variables still load into containers - the model just isn't
+        # told their names
+        hidden = set(chat.get("envHidden") or [])
+        shown = sorted(n for n in resolved if n not in hidden)
+        miss_shown = [n for n in missing if n not in hidden]
+        if shown or miss_shown:
             line = (f"The environment '{chat['env']}' is loaded into shell "
                     "containers.")
-            if resolved:
+            if shown:
                 line += (" Set (values hidden here): "
-                         + ", ".join(sorted(resolved)) + ".")
-            if missing:
+                         + ", ".join(shown) + ".")
+            if miss_shown:
                 line += (" MISSING on this machine - secret stubs with no "
                          "local value, so these are UNSET: "
-                         + ", ".join(missing) + ".")
+                         + ", ".join(miss_shown) + ".")
             ctx.append(line)
-    ctx.append("")
-    ctx.append("## Artifacts")
-    ctx.append("/artifacts is this chat's read-write delivery folder "
-               "(shell and file tools). Anything you place there is handed "
-               "to the user as a chat attachment - folders become zip "
-               "downloads. The user's uploaded files for this chat are "
-               "under /artifacts/uploads/.")
+    if not chat.get("artifactsOff"):
+        ctx.append("")
+        ctx.append("## Artifacts")
+        ctx.append("/artifacts is this chat's read-write delivery folder "
+                   "(shell and file tools). Anything you place there is "
+                   "handed to the user as a chat attachment - folders "
+                   "become zip downloads. The user's uploaded files for "
+                   "this chat are under /artifacts/uploads/.")
     out = [{"role": "system", "content": sysp + "\n".join(ctx)}]
     compact, live = _active_slice(chat)
     if compact is not None:
@@ -876,16 +966,19 @@ def _wire_messages(root: Path, cfg: dict, chat: dict) -> list[dict]:
                     "compacted]\n" + str(compact.get("content") or "")})
     # thought truncation (default on): only the LAST assistant turn carries
     # its thinking back into the context; older thoughts are dropped
-    truncate = bool((cfg.get("chat") or {}).get("thought_truncation", True))
+    truncate = _truncate_thoughts(cfg, chat)
     last_asst = max((i for i, m in enumerate(live)
                      if m.get("role") == "assistant"), default=-1)
     for i, m in enumerate(live):
         role = m.get("role")
         if role == "user":
             content = _user_content(m)
-            # timestamp signal: every user message carries its UTC send time
-            if m.get("ts"):
-                stamp = f"[{_utc_stamp(m['ts'])}] "
+            # timestamp signal: every user message carries its UTC send
+            # time - or its time-travel SIGNAL time (signalTs), stamped at
+            # send when the chat's time-travel offset was armed
+            sig = m.get("signalTs") or m.get("ts")
+            if sig and not sig_off:
+                stamp = f"[{_utc_stamp(sig)}] "
                 if isinstance(content, str):
                     content = stamp + content
                 elif isinstance(content, list):
@@ -899,6 +992,13 @@ def _wire_messages(root: Path, cfg: dict, chat: dict) -> list[dict]:
             out.append({"role": "user", "content": content})
         elif role == "assistant":
             content = m.get("content") or ""
+            # datetime signal (chat.assistant_signals): the reply carries
+            # the time it was generated - the SIGNAL time when time
+            # travel was armed. Prefixes the visible text; the think
+            # block stays first, the way models produce it.
+            sig = m.get("signalTs") or m.get("ts")
+            if asst_sig and sig:
+                content = f"[{_utc_stamp(sig)}] " + content
             think = m.get("thinking")
             if think and (not truncate or i == last_asst):
                 content = f"<think>\n{think}\n</think>\n{content}"
@@ -1101,7 +1201,7 @@ def context_breakdown(root: Path, cfg: dict, chat: dict) -> dict:
     plus the last turn's REAL token count and the compaction settings."""
     ch = cfg.get("chat") or {}
     compact, live = _active_slice(chat)
-    truncate = bool(ch.get("thought_truncation", True))
+    truncate = _truncate_thoughts(cfg, chat)
     sys_text = _read_prompt(root, ch.get("system_prompt") or "prompts/system.md",
                             "You are a helpful assistant.")
     parts = {"system": _est(sys_text) + 60,
@@ -1124,7 +1224,10 @@ def context_breakdown(root: Path, cfg: dict, chat: dict) -> dict:
             parts["toolResults"] += _est(m.get("content")) + 4
     parts["toolSpecs"] = _est(json.dumps(
         tool_specs(cfg, str(chat.get("permMode") or ""),
-                   network=containers.net_mode(chat.get("network")))))
+                   network=containers.net_mode(chat.get("network")),
+                   artifacts=not chat.get("artifactsOff"),
+                   knowledge=not chat.get("knowledgeOff"),
+                   mcp_perms=chat.get("mcpPerms"))))
     # hard guarantee for the UI: every part is an int, never null
     parts = {k: int(v or 0) for k, v in parts.items()}
     est_total = sum(parts.values())
@@ -1561,7 +1664,9 @@ def _refresh_user_fields(root: Path, chat: dict) -> None:
     except chats.ChatError:
         return
     for k in ("model", "permMode", "network", "folders", "container",
-              "env", "title", "archived", "provider", "artifactsDismissed"):
+              "env", "title", "archived", "provider", "artifactsDismissed",
+              "timeTravelMs", "artifactsOff", "thoughtTruncation",
+              "timeSignalsOff", "knowledgeOff", "mcpPerms", "envHidden"):
         if k in disk:
             chat[k] = disk[k]
         else:
@@ -1578,7 +1683,10 @@ def _turn(root: Path, cfg: dict, chat: dict, ep: dict,
         "messages": _wire_messages(root, cfg, chat),
         "stream": True,
         "tools": tool_specs(cfg, str(chat.get("permMode") or ""),
-                            network=containers.net_mode(chat.get("network"))),
+                            network=containers.net_mode(chat.get("network")),
+                            artifacts=not chat.get("artifactsOff"),
+                            knowledge=not chat.get("knowledgeOff"),
+                            mcp_perms=chat.get("mcpPerms")),
         # llama.cpp-style extensions (ninfer speaks them too):
         # per-chunk timings → LIVE tok/s; prompt_progress chunks → a real
         # prompt-processing progress bar instead of a silent stall
@@ -1691,10 +1799,14 @@ def _turn(root: Path, cfg: dict, chat: dict, ep: dict,
         ev("stats", timings=timings, usage=usage,
            ttftMs=int((ttft or 0) * 1000))
 
-    text = "".join(content)
+    text = _strip_echoed_stamp("".join(content))
     think = "".join(reasoning)
     msg = {"role": "assistant", "content": text,
            "ts": int(time.time() * 1000)}
+    _tt = int(chat.get("timeTravelMs") or 0)
+    if _tt:
+        # time travel armed: the reply SIGNALS the shifted time too
+        msg["signalTs"] = msg["ts"] + _tt
     if cancel.is_set() or stream_err:
         msg["stopped"] = True    # abrupt end - the UI offers Continue
     if think:
@@ -1744,7 +1856,8 @@ def _run_tool(root: Path, cfg: dict, chat: dict, call: dict,
             args = {}
     except ValueError:
         args = {"_raw": call["args"]}
-    perm = perm_for(cfg, name, str(chat.get("permMode") or ""))
+    perm = perm_for(cfg, name, str(chat.get("permMode") or ""),
+                    chat.get("mcpPerms"))
     ev("tool_call", callId=call_id, tool=name, args=args, perm=perm)
 
     # three outcomes: ok / failed / cancelled. `ok` stays the boolean the

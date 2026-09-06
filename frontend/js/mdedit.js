@@ -395,6 +395,20 @@ class LoomEditor {
     r.setEnd(s.getRangeAt(0).endContainer, s.getRangeAt(0).endOffset);
     return { el: e, offset: r.toString().length };
   }
+  /* resolve an arbitrary selection endpoint into {el: line, offset} -
+   * the un-collapsed sibling of _caretInfo */
+  _pointOf(container, offset) {
+    const e = this._lineOf(container);
+    if (!e) return null;
+    try {
+      const r = document.createRange();
+      r.selectNodeContents(e);
+      r.setEnd(container, offset);
+      return { el: e, offset: r.toString().length };
+    } catch (err) {
+      return null;
+    }
+  }
   _setCaret(e, offset) {
     let left = Math.max(0, offset);
     const walker = document.createTreeWalker(e, NodeFilter.SHOW_TEXT);
@@ -998,34 +1012,50 @@ class LoomEditor {
     this.surface.addEventListener('input', () => { this._scheduleDiff(); this._scheduleDecorate(); });
     this.surface.addEventListener('blur', () => { this._diff(); this._scheduleDecorate(); });
 
-    // paste: always plain text, split into real line divs
+    // paste: always plain text, split into real line divs. The whole
+    // edit happens in OUR line model - execCommand('delete'/'insertText')
+    // is never involved, because Chromium's editing engine normalizes
+    // whitespace around the edit point (pasting over a word eats the
+    // space before it).
     this.surface.addEventListener('paste', (e) => {
       if (this.readOnly) return;
       e.preventDefault();
       const text = e.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n');
       const s = getSelection();
       if (!s || !s.rangeCount || !this.surface.contains(s.anchorNode)) return;
-      if (!s.isCollapsed) document.execCommand('delete');
-      if (!text.includes('\n')) {
+      const range = s.getRangeAt(0);
+      let a = this._pointOf(range.startContainer, range.startOffset);
+      let b = this._pointOf(range.endContainer, range.endOffset);
+      if (!a || !b) {
+        // an endpoint we can't map (surface-level selection) - the old
+        // best-effort path
+        if (!s.isCollapsed) document.execCommand('delete');
         document.execCommand('insertText', false, text);
-      } else {
-        const caret = this._caretInfo();
-        const e2 = caret ? caret.el : this.surface.lastElementChild;
-        if (!e2) return;
-        const full = e2.textContent;
-        const at = caret ? caret.offset : full.length;
-        const head = full.slice(0, at);
-        const tail = full.slice(at);
-        const lines = text.split('\n');
-        this._renderPlain(e2, head + lines[0]);
-        let after = e2;
-        for (let i = 1; i < lines.length; i++) {
-          const div = this._mkLine(lines[i] + (i === lines.length - 1 ? tail : ''));
-          after.after(div);
-          after = div;
-        }
-        this._setCaret(after, after.textContent.length - tail.length);
+        this._scheduleDiff();
+        this._scheduleDecorate();
+        return;
       }
+      const lines = [...this.surface.children];
+      let ai = lines.indexOf(a.el);
+      let bi = lines.indexOf(b.el);
+      if (ai > bi || (ai === bi && a.offset > b.offset)) {
+        [a, b] = [b, a];
+        [ai, bi] = [bi, ai];
+      }
+      const head = a.el.textContent.slice(0, a.offset);
+      const tail = b.el.textContent.slice(b.offset);
+      for (let i = bi; i > ai; i--) lines[i].remove();
+      const parts = text.split('\n');
+      this._renderPlain(a.el,
+        head + parts[0] + (parts.length === 1 ? tail : ''));
+      let after = a.el;
+      for (let i = 1; i < parts.length; i++) {
+        const div = this._mkLine(parts[i]
+          + (i === parts.length - 1 ? tail : ''));
+        after.after(div);
+        after = div;
+      }
+      this._setCaret(after, after.textContent.length - tail.length);
       this._scheduleDiff();
       this._scheduleDecorate();
     });

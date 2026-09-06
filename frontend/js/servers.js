@@ -78,7 +78,7 @@ function renderServersTab() {
       el("button", {
         class: "btn btn-sm btn-acc", text: "Add provider…",
         title: "Point Loom at a llama-server or ninfer HTTP API",
-        onclick: () => addProviderDialog(),
+        onclick: () => providerDialog(),
       }),
       el("button", {
         class: "btn btn-sm", html: icon("refresh", 13) + " Probe all",
@@ -96,8 +96,9 @@ function renderServersTab() {
         onclick: () => openTab("apisrv"),
       }),
       el("button", {
-        class: "btn btn-sm", text: "Edit loom.yaml",
-        onclick: () => openLibraryFileAt(st.lib.configFile || "loom.yaml"),
+        class: "btn btn-sm", html: icon("gear", 13) + " Edit loom.yaml",
+        title: "The Config tab - the whole file, validated on save",
+        onclick: () => openTab("config"),
       }))));
 
   if (st.config?.error) {
@@ -113,10 +114,10 @@ function renderServersTab() {
         + "directly or through an SSH tunnel (key auth only)." }),
       el("div", { style: "display:flex;gap:8px;justify-content:center" },
         el("button", { class: "btn btn-acc", text: "Add provider…",
-          onclick: () => addProviderDialog() }),
+          onclick: () => providerDialog() }),
         el("button", {
           class: "btn", text: "Open loom.yaml",
-          onclick: () => openLibraryFileAt(st.lib.configFile || "loom.yaml"),
+          onclick: () => openTab("config"),
         }))));
     return;
   }
@@ -156,13 +157,23 @@ function providerCard(p) {
         : state === "error" ? "unreachable" : "not probed" })),
     el("div", { class: "srv-actions" },
       el("button", {
+        class: "btn btn-sm", text: "Edit…",
+        title: "Change this provider's entry in loom.yaml",
+        onclick: () => providerDialog(p),
+      }),
+      el("button", {
         class: "btn btn-sm", html: icon("key", 12) + " Key",
         title: live.hasKey
           ? "An API key is stored for this provider - replace or clear it"
           : "Set the API key this provider's server expects (--api-key)",
         onclick: () => providerKeyDialog(p.name),
       }),
-      probeBtn));
+      probeBtn,
+      el("button", {
+        class: "btn btn-sm btn-danger", text: "Remove",
+        title: "Remove this provider from loom.yaml",
+        onclick: () => removeProviderPrompt(p),
+      })));
   card.append(row);
   card.append(el("div", { class: "srv-meta", text: p.url }));
   if (state === "error") {
@@ -188,20 +199,28 @@ function providerCard(p) {
   return card;
 }
 
-/* ---------- the Add-provider dialog ----------
+/* ---------- the Add/Edit provider dialog ----------
  * name / type / url / optional ssh destination; Test probes without
- * writing anything; Add appends to loom.yaml (validated first). */
-function addProviderDialog() {
-  const nameIn = el("input", { type: "text", placeholder: "workstation" });
+ * writing anything. Add appends to loom.yaml; with `existing` (a config
+ * entry) the dialog rewrites that entry in place - a rename moves the
+ * keyring key along. Both writes are validated before landing. */
+function providerDialog(existing) {
+  const nameIn = el("input", { type: "text", placeholder: "workstation",
+    value: existing?.name || "" });
   const typeSel = el("select", { class: "term-sel" },
     el("option", { value: "llama-cpp", text: "llama-cpp (llama-server)" }),
     el("option", { value: "ninfer", text: "ninfer" }));
+  if (existing?.type) typeSel.value = existing.type;
   const urlIn = el("input", { type: "text",
-    placeholder: "http://127.0.0.1:8080" });
+    placeholder: "http://127.0.0.1:8080", value: existing?.url || "" });
   const sshIn = el("input", { type: "text",
-    placeholder: "user@host or a ~/.ssh/config alias (optional)" });
+    placeholder: "user@host or a ~/.ssh/config alias (optional)",
+    value: existing?.ssh || "" });
+  const hasKey = !!(existing && st.providers[existing.name]?.hasKey);
   const keyIn = el("input", { type: "password", autocomplete: "new-password",
-    placeholder: "API key, if the server runs with --api-key (optional)" });
+    placeholder: hasKey
+      ? "a key is stored - leave empty to keep it, type to replace"
+      : "API key, if the server runs with --api-key (optional)" });
   const status = el("div", { class: "srv-detail", text: "" });
 
   const testBtn = el("button", { class: "btn btn-sm", text: "Test" });
@@ -221,7 +240,7 @@ function addProviderDialog() {
     }
   });
 
-  modal("Add provider",
+  modal(existing ? "Edit provider · " + existing.name : "Add provider",
     [el("p", { class: "wiz-hint",
        text: "A provider is a running llama-server or ninfer API. With an "
          + "ssh destination the URL is resolved FROM that host and all "
@@ -238,7 +257,7 @@ function addProviderDialog() {
     [
       { label: "Cancel" },
       {
-        label: "Add to loom.yaml", cls: "btn-acc",
+        label: (existing ? "Save" : "Add") + " to loom.yaml", cls: "btn-acc",
         fn: () => {
           const name = nameIn.value.trim();
           const url = urlIn.value.trim();
@@ -246,10 +265,14 @@ function addProviderDialog() {
             toast("A provider needs a name and a URL.", "warn");
             return false;   // keep the dialog open
           }
-          Api.call("provider_add", name, typeSel.value, url,
-            sshIn.value.trim(), keyIn.value.trim()).then((r) => {
+          const call = existing
+            ? Api.call("provider_update", existing.name, name, typeSel.value,
+                url, sshIn.value.trim(), keyIn.value.trim())
+            : Api.call("provider_add", name, typeSel.value, url,
+                sshIn.value.trim(), keyIn.value.trim());
+          call.then((r) => {
             if (!r.ok) { toast(r.error, "err"); return; }
-            toast("Added " + name + " to loom.yaml"
+            toast((existing ? "Updated " : "Added ") + name + " in loom.yaml"
               + (keyIn.value.trim() ? " (key in the keyring)" : ""), "ok");
             refreshServersTab();
             libReloadIfOpen(st.lib.configFile || "loom.yaml");
@@ -258,4 +281,18 @@ function addProviderDialog() {
       },
     ], { id: "add-provider" });
   setTimeout(() => nameIn.focus(), 0);
+}
+
+function removeProviderPrompt(p) {
+  confirmModal("Remove provider",
+    "Remove " + p.name + " from loom.yaml? Its API key (if any) is "
+    + "deleted from the keyring. The inference server itself is not "
+    + "Loom's - it keeps running.",
+    "Remove", async () => {
+      const r = await Api.call("provider_remove", p.name);
+      if (!r.ok) { toast(r.error, "err"); return; }
+      toast("Removed " + p.name + " from loom.yaml", "ok");
+      refreshServersTab();
+      libReloadIfOpen(st.lib.configFile || "loom.yaml");
+    }, true, "prov-remove");
 }

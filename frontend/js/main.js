@@ -18,6 +18,7 @@ async function boot() {
   $("#btn-servers").innerHTML = icon("servers");
   $("#btn-mcp").innerHTML = icon("mcp");
   $("#btn-api").innerHTML = icon("globe");
+  $("#btn-config").innerHTML = icon("gear");
   $("#btn-archive").innerHTML = icon("archive");
   $("#btn-envs").innerHTML = icon("key");
   $("#btn-switchlib").innerHTML = icon("swap");
@@ -41,6 +42,7 @@ async function boot() {
   $("#btn-servers").addEventListener("click", () => openTab("servers"));
   $("#btn-mcp").addEventListener("click", () => openTab("mcpsrv"));
   $("#btn-api").addEventListener("click", () => openTab("apisrv"));
+  $("#btn-config").addEventListener("click", () => openTab("config"));
   $("#btn-archive").addEventListener("click", () => openTab("archive"));
   $("#btn-envs").addEventListener("click", () => openTab("envs"));
   // no Ctrl-reveal chips on the nav buttons - their hover tooltips
@@ -216,6 +218,7 @@ onLMEvent((ev) => {
       st.config = ev.config;
       if (st.activeTab === "servers") refreshServersTab();
       refreshChatModelSelectors();   // loom.yaml edits reach open chats too
+      configReloadIfOpen();          // the Config tab's raw buffer too
       break;
     case "toast":
       toast(ev.msg, ev.level === "ok" ? "ok" : ev.level === "err" ? "err" : "warn");
@@ -262,6 +265,11 @@ async function switchLibraryFlow() {
     if (st.lib.editor) { st.lib.editor.destroy(); st.lib.editor = null; }
     st.lib.open = null;
     st.lib.dirty = false;
+    if (st.cfgTab) {
+      st.cfgTab.editor?.destroy();
+      st.cfgTab.editor = null;
+      st.cfgTab.dirty = false;
+    }
     const d = await Api.get("recents_get");
     st.recents = d.recents;
     showPicker();
@@ -283,6 +291,12 @@ async function switchLibraryFlow() {
   if (st.lib.dirty) {
     consequences.push(el("p", {
       text: `Unsaved changes to "${st.lib.open}" will be discarded.`,
+    }));
+  }
+  if (st.cfgTab?.dirty) {
+    consequences.push(el("p", {
+      text: "Unsaved Config tab changes to "
+        + (st.cfgTab.file || "loom.yaml") + " will be discarded.",
     }));
   }
   if (!consequences.length) { back(); return; }   // nothing at stake
@@ -340,9 +354,14 @@ function confirmQuitModal(chats, terminals) {
  * Ctrl+PgUp/PgDn        cycle tabs (also Ctrl+Tab)
  * Ctrl+Shift+PgUp/PgDn  move the active tab left/right
  * Ctrl+I        focus the message input
- * Ctrl+R        the chat's Retry / Continue banner (when showing)
+ * Ctrl+R        resume the chat: the Retry/Continue banner's action, or
+ *               on a finished response, continue with no new input
+ * Ctrl+Shift+R  toggle auto-continue: the chat keeps generating after
+ *               every response until toggled off / stopped / an error
  * Ctrl+. / Ctrl+, / Ctrl+; / Ctrl+'   the active chat's model /
  *               permission / environment / container menus
+ * Ctrl+/ / Ctrl+[ / Ctrl+]   the active chat's network / artifacts /
+ *               thought-truncation toggles
  * PgUp/PgDn     in the message input: scroll the chat thread
  * Ctrl+F        library: focus search    Ctrl+\   library: tree ↔ editor
  * Esc           close menu/dialog, else stop the active chat's generation
@@ -415,8 +434,10 @@ document.addEventListener("keydown", (e) => {
       return;
     }
     // Ctrl+. , ; '  - the active chat's model / permission / environment /
-    // container menus (one adjacent key cluster)
-    const MENU_KEYS = { ".": "model", ",": "perm", ";": "env", "'": "cont" };
+    // container menus; Ctrl+/ [ ]  - the network / artifacts / thoughts
+    // toggles (one adjacent key cluster)
+    const MENU_KEYS = { ".": "model", ",": "perm", ";": "env", "'": "cont",
+                        "/": "net", "[": "arts", "]": "thoughts" };
     if (MENU_KEYS[e.key] && !e.shiftKey && !inTerm && !inEditor) {
       const active = tabById(st.activeTab);
       if (active?.type === "chat") {
@@ -431,12 +452,14 @@ document.addEventListener("keydown", (e) => {
       if (k === "e") { e.preventDefault(); openTab("servers"); return; }
       if (k === "h") { e.preventDefault(); openTab("archive"); return; }
       if (k === "i") { e.preventDefault(); focusMessageInput(); return; }
-      // Ctrl+R - the Retry/Continue banner, whenever it is showing
+      // Ctrl+R - resume the chat however it ended: the Retry/Continue
+      // banner's action when one shows, and on a finished response a
+      // bare "continue generating with no new input"
       if (k === "r") {
         const active = tabById(st.activeTab);
         if (active?.type === "chat") {
           e.preventDefault();   // never let the webview reload instead
-          panelFor(active.id)?.querySelector('[data-role="resume"]')?.click();
+          resumeChat(active.chatId);
         }
         return;
       }
@@ -448,6 +471,14 @@ document.addEventListener("keydown", (e) => {
         st.lib.ui?.searchIn?.focus();
         return;
       }
+    }
+    // Ctrl+Shift+R - toggle the active chat's auto-continue (and never
+    // let the webview hard-reload instead)
+    if (e.shiftKey && k === "r" && !inTerm) {
+      e.preventDefault();
+      const active = tabById(st.activeTab);
+      if (active?.type === "chat") toggleAutoContinue(active.chatId);
+      return;
     }
     if (e.shiftKey && k === "a") { e.preventDefault(); openAlertsTab(); return; }
     // Ctrl+Shift+E - the Environments tab
@@ -485,6 +516,10 @@ document.addEventListener("keydown", (e) => {
         e.preventDefault();
         saveLibFile();
       }
+      if (st.activeTab === "config" && st.cfgTab?.dirty) {
+        e.preventDefault();
+        saveConfigTab();
+      }
       return;
     }
   }
@@ -497,7 +532,8 @@ document.addEventListener("keydown", (e) => {
       const active = tabById(st.activeTab);
       const acs = active?.type === "chat" ? st.chats[active.chatId] : null;
       if (acs && (acs.running || acs.compacting)
-          && !(e.target.closest && e.target.closest(".term-emu"))) {
+          && !(e.target.closest
+               && e.target.closest(".term-emu, .ttrav-edit"))) {
         e.preventDefault();
         stopChatGeneration(active.chatId);
       }

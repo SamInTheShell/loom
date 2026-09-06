@@ -204,6 +204,7 @@ async function enterLibrary(data) {
       if (v.atBottom !== false) cs.restoreScroll = Infinity;
       else if (Number.isFinite(Number(v.scroll))) cs.restoreScroll = Number(v.scroll);
       cs.atBottom = v.atBottom !== false;
+      cs.follow = cs.atBottom;   // bottom-ness IS the stored intent
     };
     // terminal tab configs (shells don't survive a restart - the tab
     // reopens on its setup form, pre-filled)

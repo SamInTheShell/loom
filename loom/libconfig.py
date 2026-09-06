@@ -91,13 +91,21 @@ def load(root: Path) -> dict:
     if p is None:
         raise ConfigError("the library has no loom.yaml (or loom.yml)")
     try:
-        raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as e:
-        raise ConfigError(f"{p.name} does not parse: {e}")
+        text = p.read_text(encoding="utf-8")
     except OSError as e:
         raise ConfigError(f"cannot read {p.name}: {e}")
+    return parse_text(text, p.name)
+
+
+def parse_text(text: str, name: str = "loom.yaml") -> dict:
+    """Parse and validate loom.yaml CONTENT (the whole file). Config
+    writers run candidates through this before anything lands on disk."""
+    try:
+        raw = yaml.safe_load(text) or {}
+    except yaml.YAMLError as e:
+        raise ConfigError(f"{name} does not parse: {e}")
     if not isinstance(raw, dict):
-        raise ConfigError(f"{p.name} must be a mapping at the top level")
+        raise ConfigError(f"{name} must be a mapping at the top level")
     if raw.get("models") and not raw.get("providers"):
         raise ConfigError(
             "this loom.yaml uses the old `models:` scheme - Loom no "
@@ -106,7 +114,7 @@ def load(root: Path) -> dict:
             "HTTP API (see documentation/models-servers.md)")
 
     out = {
-        "configFile": p.name,
+        "configFile": name,
         "providers": _providers(raw.get("providers")),
         "chat": _chat(raw.get("chat")),
         "permissionModes": _permission_modes(
@@ -192,6 +200,13 @@ def _chat(sec) -> dict:
         # older thoughts are dropped from the wire; the LAST turn's
         # thinking is kept (set false to keep every thought)
         "thought_truncation": bool(sec.get("thought_truncation", True)),
+        # assistant replies carry their own datetime signal in [brackets]
+        # on the wire (set false to strip every assistant time signal)
+        "assistant_signals": bool(sec.get("assistant_signals", True)),
+        # the agent's display name in the chat UI (the word whose hover
+        # reveals each reply's signals)
+        "assistant_name": str(sec.get("assistant_name")
+                              or "loom").strip() or "loom",
         "compaction": {"auto": bool(comp.get("auto", True)),
                        "threshold": threshold},
     }

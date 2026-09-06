@@ -65,10 +65,32 @@ def _set_winsize(fd: int, cols: int, rows: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
+def _extra_mounts(knowledge: Path | None,
+                  artifacts: Path | None) -> list[str]:
+    """The chat-view mounts: /knowledge read-only, /artifacts read-write
+    (same layout containers.run_shell gives the model's shell)."""
+    vol: list[str] = []
+    if knowledge is not None and knowledge.is_dir():
+        vol += ["-v", f"{knowledge.resolve()}:/knowledge:ro"]
+    if artifacts is not None:
+        artifacts.mkdir(parents=True, exist_ok=True)
+        vol += ["-v", f"{artifacts.resolve()}:/artifacts:rw"]
+    return vol
+
+
+def alive(tab_id: str) -> bool:
+    with _LOCK:
+        sess = _SESS.get(str(tab_id))
+    return bool(sess and sess["proc"].poll() is None)
+
+
 def open_session(push, root: Path, tab_id: str, container: str,
                  folders: list[dict] | None = None, network="none",
                  cols: int = 120, rows: int = 32,
-                 env_name: str = "") -> None:
+                 env_name: str = "",
+                 knowledge: Path | None = None,
+                 artifacts: Path | None = None,
+                 home: Path | None = None) -> None:
     """Build/pull the image if needed and start the interactive shell.
     Blocking (image builds take a while) - call on a worker thread;
     progress and errors arrive as term events."""
@@ -99,9 +121,15 @@ def open_session(push, root: Path, tab_id: str, container: str,
 
     try:
         vol, notes = containers.mounts_for(folders or [])
+        vol += _extra_mounts(knowledge, artifacts)
+        if knowledge is not None and knowledge.is_dir():
+            notes.append("/knowledge (read-only) = " + str(knowledge))
+        if artifacts is not None:
+            notes.append("/artifacts (read-write) = " + str(artifacts))
         for n in notes:
             _emit(push, sid, "line", text="[loom] mounted " + n)
-        home = containers.chat_home("term-" + sid)
+        if home is None:
+            home = containers.chat_home("term-" + sid)
         name = _cname(sid)
         try:
             subprocess.run([engine, "rm", "-f", name], capture_output=True,

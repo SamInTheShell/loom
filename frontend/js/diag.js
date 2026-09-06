@@ -21,7 +21,8 @@ const DIAG_KINDS = {
   assistant: { label: "model", color: "--ok" },
   think: { label: "thoughts", color: null, fallback: "#a78bfa" },
   tool: { label: "tools", color: "--warn" },
-  compact: { label: "compaction", color: "--fg-2" },
+  // bright blood red - compaction must jump out of the ledger
+  compact: { label: "compaction", color: null, fallback: "#e8112d" },
 };
 
 const DIAG_METRICS = {
@@ -194,8 +195,13 @@ function buildDiagView(panel, chatId, data, prev) {
   // keeps following; an explicit selection elsewhere stays put.
   const follow = !prev || prev.sel < 0
     || prev.sel >= (prev.rows?.length || 0) - 1;
-  const oldTableScroll = prev
-    ? (panel.querySelector(".diag-table")?.scrollTop || 0) : 0;
+  const oldTable = prev ? panel.querySelector(".diag-table") : null;
+  const oldTableScroll = oldTable ? oldTable.scrollTop : 0;
+  // scroll-to-bottom happens on OPEN, and on refresh only when the user
+  // was already AT the bottom - a mid-scroll reader is never yanked back
+  const wasAtBottom = !oldTable || !oldTable.clientHeight
+    || oldTable.scrollTop + oldTable.clientHeight
+       >= oldTable.scrollHeight - 40;
   const hadFocus = prev && panel.contains(document.activeElement);
   prev?._abort?.abort();   // the old build's window-level listeners
   const ac = new AbortController();
@@ -573,9 +579,12 @@ function buildDiagView(panel, chatId, data, prev) {
       return;
     }
     // live refresh: follow the tail, or hold the user's exact spot -
-    // and never flash, steal focus, or yank the scroll position
+    // and never flash, steal focus, or yank the scroll position. The
+    // selection may follow the tail while the SCROLL stays put: only a
+    // reader already at the bottom gets carried to the new bottom.
     if (follow) {
-      select(rows.length - 1, "keys", true);
+      select(rows.length - 1, wasAtBottom ? "keys" : "table", true);
+      if (!wasAtBottom) table.scrollTop = oldTableScroll;
     } else {
       select(Math.min(prev.sel, rows.length - 1), "table", true);
       table.scrollTop = oldTableScroll;

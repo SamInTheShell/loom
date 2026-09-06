@@ -30,9 +30,9 @@ from pathlib import Path
 
 import webview
 
-from loom import (apiserver, chat, chats, compose, containers, envs,
-                  libconfig, library, mcp, providers, search, store,
-                  terminals)
+from loom import (apiserver, chat, chats, chatterm, compose, configedit,
+                  containers, envs, libconfig, library, mcp, providers,
+                  search, store, terminals)
 from loom.compose import OUTPUT as FRONTEND_INDEX
 
 DEFAULT_DEVTOOLS_PANEL = "console"
@@ -835,6 +835,133 @@ class JsApi:
         except libconfig.ConfigError as e:
             return {"error": str(e)}
 
+    # ------------- config editing (the Config tab + section forms) -------------
+    def _config_text_update(self, mutate):
+        """The shared spine of every structured config writer: read
+        loom.yaml, run mutate(text) → new text, validate the WHOLE result,
+        write atomically, push the config event. Returns the parsed cfg."""
+        root = self._need_root()
+        p = library.config_path(root)
+        if p is None:
+            raise libconfig.ConfigError("the library has no loom.yaml")
+        try:
+            new_text = mutate(p.read_text(encoding="utf-8"))
+        except ValueError as e:
+            raise libconfig.ConfigError(str(e))
+        try:
+            cfg = libconfig.parse_text(new_text, p.name)
+        except libconfig.ConfigError as e:
+            raise libconfig.ConfigError(f"{e} - nothing was written")
+        library.write_file(root, p.name, new_text)
+        self._bus.push({"type": "config", "config": cfg})
+        return cfg
+
+    def config_read(self):
+        """loom.yaml's raw text + mtime for the Config tab's editor."""
+        def do():
+            root = self._need_root()
+            p = library.config_path(root)
+            if p is None:
+                raise libconfig.ConfigError("the library has no loom.yaml")
+            return library.read_file(root, p.name)
+        return _api_call(do)()
+
+    def config_write(self, text, base_mtime=None):
+        """Save the Config tab's buffer: the WHOLE candidate must validate
+        or nothing is written. `base_mtime` (from config_read) catches the
+        file changing under a dirty buffer. On success the runtime
+        converges - providers re-probe, a running API server rebinds if
+        its address changed, MCP servers dropped from config stop."""
+        def do():
+            root = self._need_root()
+            p = library.config_path(root)
+            if p is None:
+                raise libconfig.ConfigError("the library has no loom.yaml")
+            if base_mtime is not None:
+                if int(base_mtime) != int(p.stat().st_mtime * 1000):
+                    raise libconfig.ConfigError(
+                        f"{p.name} changed on disk since the editor loaded "
+                        "it - nothing was written. Reload the editor, then "
+                        "re-apply your changes.")
+            body = str(text or "")
+            if body and not body.endswith("\n"):
+                body += "\n"
+            try:
+                cfg = libconfig.parse_text(body, p.name)
+            except libconfig.ConfigError as e:
+                raise libconfig.ConfigError(f"{e} - nothing was written")
+            out = library.write_file(root, p.name, body)
+            self._bus.push({"type": "config", "config": cfg})
+            self._reapply_runtime(cfg)
+            return {"configFile": p.name, "mtime": out["mtime"]}
+        return _api_call(do)()
+
+    def _reapply_runtime(self, cfg):
+        """Converge live state after a full-config save."""
+        threading.Thread(target=lambda: providers.refresh(cfg),
+                         daemon=True, name="prov-refresh-cfg").start()
+        if apiserver.is_running():
+            api = cfg.get("api") or dict(libconfig.DEFAULT_API)
+            got = apiserver.status()
+            if (got.get("interface"), got.get("port")) != \
+                    (api.get("interface"), api.get("port")):
+                apiserver.stop()
+                try:
+                    apiserver.start(api["interface"], api["port"],
+                                    self._api_providers, self._api_key())
+                except apiserver.ApiError as e:
+                    self._toast("err", f"API server: {e}")
+                self._bus.push({"type": "apisrv", **apiserver.status(),
+                                "hasKey": bool(self._api_key())})
+        names = {s["name"] for s in cfg.get("mcpServers") or []}
+        stopped = False
+        for n in list(mcp.running() or {}):
+            if n not in names:
+                mcp.stop_server(n)
+                stopped = True
+        if stopped:
+            self._bus.push({"type": "mcp", "kind": "config"})
+
+    def chat_config_set(self, chat_cfg):
+        """Persist the Chat-defaults dialog into loom.yaml's `chat:` block
+        (values matching the defaults are omitted; an all-default block
+        is removed entirely)."""
+        def do():
+            c = chat_cfg if isinstance(chat_cfg, dict) else {}
+            self._config_text_update(
+                lambda text: configedit.replace_section(
+                    text, ("chat",), configedit.chat_lines(c)))
+            return {}
+        return _api_call(do)()
+
+    def permission_modes_set(self, modes):
+        """Persist the permission-modes dialog: full effective
+        {mode: {tool: level}} maps in, minimal per-mode diffs out. The
+        legacy `permissions:` section is removed in the same write - the
+        diff already carries whatever it contributed."""
+        def do():
+            m = modes if isinstance(modes, dict) else {}
+
+            def mutate(text):
+                text = configedit.replace_section(text, ("permissions",), [])
+                return configedit.replace_section(
+                    text, ("permission-modes", "permission_modes"),
+                    configedit.permission_mode_lines(m))
+            self._config_text_update(mutate)
+            return {}
+        return _api_call(do)()
+
+    def containers_config_set(self, containers_cfg):
+        """Persist the Containers dialog into loom.yaml's `containers:`
+        block (defaults omitted)."""
+        def do():
+            c = containers_cfg if isinstance(containers_cfg, dict) else {}
+            self._config_text_update(
+                lambda text: configedit.replace_section(
+                    text, ("containers",), configedit.container_lines(c)))
+            return {}
+        return _api_call(do)()
+
     def session_save(self, session):
         """The frontend pushes its UI session (tabs, active tab, open file,
         tree expansion, panel width) whenever it changes - reopening the
@@ -1025,6 +1152,55 @@ class JsApi:
             return {"configFile": p.name}
         return _api_call(do)()
 
+    def provider_update(self, name, new_name, ptype, url, ssh="", key=""):
+        """Rewrite one provider's loom.yaml entry (the card's Edit dialog),
+        validating the whole result before writing. A rename moves the
+        provider's keyring key along; a non-empty `key` replaces the
+        stored one."""
+        def do():
+            old = str(name or "").strip()
+            new = str(new_name or "").strip() or old
+            cfg = self._config_text_update(
+                lambda text: configedit.replace_list_item(
+                    text, ("providers",), old,
+                    providers.entry_lines(
+                        new, str(ptype or "llama-cpp").strip(),
+                        str(url or "").strip(), str(ssh or "").strip())))
+            k = str(key or "").strip()
+            try:
+                if k:
+                    envs._kr_set(self._provider_key_name(new), k)
+                    if new != old:
+                        envs._kr_del(self._provider_key_name(old))
+                elif new != old:
+                    moved = envs._kr_get(self._provider_key_name(old)) or ""
+                    if moved:
+                        envs._kr_set(self._provider_key_name(new), moved)
+                        envs._kr_del(self._provider_key_name(old))
+            except Exception:
+                pass   # the entry is saved; the keyring move is best-effort
+            threading.Thread(target=lambda: providers.refresh(cfg),
+                             daemon=True, name="prov-refresh-edit").start()
+            return {"provider": new}
+        return _api_call(do)()
+
+    def provider_remove(self, name):
+        """Delete one provider from loom.yaml (and its keyring key). The
+        refresh prunes it from the live registry."""
+        def do():
+            n = str(name or "").strip()
+            cfg = self._config_text_update(
+                lambda text: configedit.remove_list_item(
+                    text, ("providers",), n))
+            try:
+                envs._kr_del(self._provider_key_name(n))
+            except Exception:
+                pass
+            threading.Thread(target=lambda: providers.refresh(cfg),
+                             daemon=True, name="prov-refresh-del").start()
+            return {"removed": n}
+        return _api_call(do)()
+
     def provider_models(self, name):
         """The cached model list for one provider ([{id, ctx}]) - the
         model menu's data. Empty + never probed → probe now (blocking,
@@ -1074,6 +1250,13 @@ class JsApi:
                 model = str(t.get("model") or "").strip()
                 provider = str(t.get("provider") or "").strip()
             c = chats.new_chat(self._need_root(), model, provider)
+            # loom.yaml's thought_truncation is the DEFAULT for new
+            # chats - stamped here so later config edits leave existing
+            # chats alone (the chat's own chip governs from now on)
+            if not cfg.get("error"):
+                c["thoughtTruncation"] = bool(
+                    (cfg.get("chat") or {}).get("thought_truncation", True))
+                chats.save_chat(self._need_root(), c)
             pm = str(t.get("permMode") or "").strip()
             if pm and (cfg.get("error") or pm in (cfg.get("permissionModes") or {})):
                 c["permMode"] = pm
@@ -1095,6 +1278,43 @@ class JsApi:
             c.setdefault("context", None)
             c["totalMessages"] = 0
             return {"chat": c}
+        return _api_call(do)()
+
+    def chat_fork(self, chat_id, upto_index):
+        """Fork a chat at a message: a NEW chat whose history is the
+        source truncated after `upto_index` (an ABSOLUTE index - the
+        frontend only holds a window). Setup carries over; if tool calls
+        ran after the fork point, a state-check thought is injected so
+        the model re-verifies before acting on stale observations."""
+        def do():
+            root = self._need_root()
+            c, tool_note = chats.fork_chat(root, str(chat_id),
+                                           int(upto_index))
+            cfg = self._config_or_error()
+            try:
+                if not cfg.get("error"):
+                    c["context"] = chat.context_breakdown(root, cfg, c)
+            except Exception:
+                pass
+            c.setdefault("context", None)
+            c["totalMessages"] = len(c.get("messages") or [])
+            return {"chat": c, "toolNote": tool_note}
+        return _api_call(do)()
+
+    def chat_delete_message(self, chat_id, index, part="message"):
+        """Remove one message from the history (the hover bar's delete;
+        `index` is absolute). An assistant's tool results leave with it;
+        a tool result leaves the calling turn's tool_calls;
+        part="thinking" removes just the thought. Refused while a
+        response is streaming."""
+        def do():
+            cid = str(chat_id)
+            if chat.is_running(cid):
+                raise chats.ChatError(
+                    "wait for the response to finish first")
+            n = chats.delete_message(self._need_root(), cid, int(index),
+                                     str(part or "message"))
+            return {"deleted": n}
         return _api_call(do)()
 
     def chat_get(self, chat_id, tail=None):
@@ -1394,6 +1614,17 @@ class JsApi:
                 chat.join_worker(cid)   # its final save must not
                                         # resurrect the file we remove
             chats.delete_chat(self._need_root(), cid)
+            # a mirror terminal has nothing left to mirror
+            win = pop_child_window(f"cterm:{cid}", self._bus)
+            def drop():
+                if win is not None:
+                    try:
+                        win.destroy()
+                    except Exception:
+                        pass
+                chatterm.close_for_chat(cid)
+            threading.Thread(target=drop, daemon=True,
+                             name=f"cterm-drop-{cid}").start()
             return {}
         return _api_call(do)()
 
@@ -1434,6 +1665,7 @@ class JsApi:
                     raise chats.ChatError(f"no container named {name!r}")
             c["container"] = name
             chats.save_chat(root, c)
+            chatterm.sync_async(self._bus.push, root, c["id"])
             return {"container": name}
         return _api_call(do)()
 
@@ -1448,6 +1680,7 @@ class JsApi:
                 raise chats.ChatError(f"no environment named {name!r}")
             c["env"] = name
             chats.save_chat(root, c)
+            chatterm.sync_async(self._bus.push, root, c["id"])
             return {"env": name}
         return _api_call(do)()
 
@@ -1501,6 +1734,130 @@ class JsApi:
                 raise chats.ChatError(str(e))
         return _api_call(do)()
 
+    def chat_set_artifacts(self, chat_id, on):
+        """The artifacts chip: enable/disable the chat's /artifacts
+        delivery folder. Off = not mounted in shells, refused by file
+        tools, absent from tool descriptions, no new delivery pills -
+        already-delivered artifacts stay viewable."""
+        def do():
+            c = chats.load_chat(self._need_root(), str(chat_id))
+            if on:
+                c.pop("artifactsOff", None)
+            else:
+                c["artifactsOff"] = True
+            chats.save_chat(self._need_root(), c)
+            chatterm.sync_async(self._bus.push, self._need_root(), c["id"])
+            return {"artifacts": not c.get("artifactsOff")}
+        return _api_call(do)()
+
+    def chat_set_thought_truncation(self, chat_id, truncate):
+        """The thoughts chip: per-chat thought truncation. True = only
+        the latest turn's thinking rides the wire (the default);
+        False = every stored thought does. loom.yaml's
+        chat.thought_truncation only seeds NEW chats."""
+        def do():
+            c = chats.load_chat(self._need_root(), str(chat_id))
+            c["thoughtTruncation"] = bool(truncate)
+            chats.save_chat(self._need_root(), c)
+            return {"thoughtTruncation": c["thoughtTruncation"]}
+        return _api_call(do)()
+
+    def chat_set_mcp_perm(self, chat_id, tool, level):
+        """Per-CHAT permission override for one MCP tool (the tools
+        bar's MCP panel). Wins over loom.yaml's per-mode entries and the
+        MCP Servers tab's defaults; empty level clears the override."""
+        def do():
+            t = str(tool or "").strip()
+            lv = str(level or "").strip().lower()
+            if not t.startswith("mcp_"):
+                raise chats.ChatError("that is not an MCP tool")
+            if lv and lv not in libconfig.PERM_LEVELS:
+                raise chats.ChatError(
+                    "the level must be one of "
+                    + ", ".join(libconfig.PERM_LEVELS) + " (or empty)")
+            c = chats.load_chat(self._need_root(), str(chat_id))
+            perms = dict(c.get("mcpPerms") or {})
+            if lv:
+                perms[t] = lv
+            else:
+                perms.pop(t, None)
+            if perms:
+                c["mcpPerms"] = perms
+            else:
+                c.pop("mcpPerms", None)
+            chats.save_chat(self._need_root(), c)
+            return {"mcpPerms": perms}
+        return _api_call(do)()
+
+    def chat_set_env_hidden(self, chat_id, names):
+        """Per-chat env SIGNAL hiding (the tools bar's env panel): the
+        named variables still load into shell containers - the model is
+        just never told they exist."""
+        def do():
+            clean = sorted({str(n).strip() for n in names
+                            if isinstance(names, list) and str(n).strip()}) \
+                if isinstance(names, list) else []
+            c = chats.load_chat(self._need_root(), str(chat_id))
+            if clean:
+                c["envHidden"] = clean
+            else:
+                c.pop("envHidden", None)
+            chats.save_chat(self._need_root(), c)
+            return {"envHidden": clean}
+        return _api_call(do)()
+
+    def chat_set_knowledge(self, chat_id, on):
+        """The tools bar's knowledge chip: OFF cuts the knowledge base
+        out of the chat entirely - the knowledge_search tool vanishes,
+        /knowledge is refused by file tools and not mounted in shells,
+        and the system prompt stops describing (or even mentioning) the
+        base and its contents."""
+        def do():
+            c = chats.load_chat(self._need_root(), str(chat_id))
+            if on:
+                c.pop("knowledgeOff", None)
+            else:
+                c["knowledgeOff"] = True
+            chats.save_chat(self._need_root(), c)
+            chatterm.sync_async(self._bus.push, self._need_root(), c["id"])
+            return {"knowledge": not c.get("knowledgeOff")}
+        return _api_call(do)()
+
+    def chat_set_time_signals(self, chat_id, on):
+        """The time-travel panel's master toggle. Signals OFF = the model
+        receives no datetime signal at all: no session-start stamp, no
+        [brackets] on user or assistant messages. Time travel offsets
+        stay armed and recorded; they just have nothing to show."""
+        def do():
+            c = chats.load_chat(self._need_root(), str(chat_id))
+            if on:
+                c.pop("timeSignalsOff", None)
+            else:
+                c["timeSignalsOff"] = True
+            chats.save_chat(self._need_root(), c)
+            return {"timeSignals": not c.get("timeSignalsOff")}
+        return _api_call(do)()
+
+    def chat_set_time_travel(self, chat_id, offset_ms):
+        """Arm (or, with 0, clear) the chat's TIME TRAVEL offset: every
+        user message sent from now on is signalled to the model as
+        real-time + offset - a probe of the model's signal awareness.
+        Already-sent messages keep the stamps they reported."""
+        def do():
+            off = int(offset_ms or 0)
+            limit = 3650 * 24 * 3600 * 1000   # ±10 years is plenty
+            if not (-limit <= off <= limit):
+                raise chats.ChatError(
+                    "the time-travel offset must be within ±10 years")
+            c = chats.load_chat(self._need_root(), str(chat_id))
+            if off:
+                c["timeTravelMs"] = off
+            else:
+                c.pop("timeTravelMs", None)
+            chats.save_chat(self._need_root(), c)
+            return {"offsetMs": off}
+        return _api_call(do)()
+
     def chat_set_network(self, chat_id, mode):
         """Per-chat container network mode: none / loopback / on
         (legacy booleans accepted). Off by default; a USER decision only
@@ -1509,6 +1866,7 @@ class JsApi:
             c = chats.load_chat(self._need_root(), str(chat_id))
             c["network"] = containers.net_mode(mode)
             chats.save_chat(self._need_root(), c)
+            chatterm.sync_async(self._bus.push, self._need_root(), c["id"])
             return {"network": c["network"]}
         return _api_call(do)()
 
@@ -1518,6 +1876,7 @@ class JsApi:
             clean = self._clean_folders(folders)
             c["folders"] = clean
             chats.save_chat(self._need_root(), c)
+            chatterm.sync_async(self._bus.push, self._need_root(), c["id"])
             return {"folders": clean}
         return _api_call(do)()
 
@@ -1597,6 +1956,11 @@ class JsApi:
             c = chats.load_chat(root, cid)
             msg = {"role": "user", "content": str(text or ""),
                    "ts": __import__("time").time_ns() // 1_000_000}
+            off = int(c.get("timeTravelMs") or 0)
+            if off:
+                # time travel armed: the model is SIGNALLED this shifted
+                # time; the real ts stays the record (and the UI's)
+                msg["signalTs"] = msg["ts"] + off
             imgs = []
             for p in images if isinstance(images, list) else []:
                 if str(p).strip():
@@ -1801,16 +2165,16 @@ class JsApi:
         return _api_call(do)()
 
     def chat_continue(self, chat_id):
-        """Run the loop on the chat AS IS - no new user message. Backs the
-        Retry button (last message is the user's) and the Continue button
-        (the model stopped abruptly)."""
+        """Run the loop on the chat AS IS - no new user message. Backs
+        the Retry button (last message is the user's), the Continue
+        button (the model stopped abruptly), and Ctrl+R on any ending -
+        including an EMPTY chat, where the model opens the conversation
+        from the system prompt alone."""
         def do():
             cid = str(chat_id)
             if chat.is_running(cid) and not chat.wait_if_cancelling(cid):
                 raise chats.ChatError("a response is already streaming")
-            c = chats.load_chat(self._need_root(), cid)
-            if not c.get("messages"):
-                raise chats.ChatError("nothing to continue yet")
+            chats.load_chat(self._need_root(), cid)   # must exist
             chat.send(self._need_root(), cid, self._bus.push)
             return {}
         return _api_call(do)()
@@ -1886,6 +2250,78 @@ class JsApi:
             threading.Thread(target=lambda: terminals.cleanup(str(tab_id)),
                              daemon=True, name="term-cleanup").start()
             return {}
+        return _api_call(do)()
+
+    # -------- the chat-mirror terminal: a shell in the chat's exact
+    # container setup, popped out into its own window --------
+    def chat_term_popout(self, chat_id):
+        """Open (or focus) a separate window with a terminal running in
+        this chat's exact container view (image, /mnt mounts, the
+        /knowledge and /artifacts cuts, the chat's /home/loom, network,
+        environment). The shell dies with the window - and restarts
+        itself whenever the chat's setup changes."""
+        def do():
+            root = self._need_root()
+            cid = str(chat_id)
+            c = chats.load_chat(root, cid)   # bad ids fail HERE, visibly
+            key = f"cterm:{cid}"
+            existing = child_window(key)
+            if existing is not None:
+                _qt_focus(existing)
+                return {"focused": True}
+            win = webview.create_window(
+                "Terminal · " + (c.get("title") or "Chat"),
+                url=compose.TERM_OUTPUT.as_uri() + "#chat=" + cid,
+                js_api=self,
+                width=1000, height=680, min_size=(640, 400))
+            register_child_window(key, win, self._bus)
+
+            def on_closed():
+                # the mirror shell has no life outside its window; kill
+                # off-thread - closed fires inside Qt's loop
+                threading.Thread(
+                    target=lambda: chatterm.close_for_chat(cid),
+                    daemon=True, name=f"cterm-close-{cid}").start()
+            win.events.closed += on_closed
+            return {}
+        return _api_call(do)()
+
+    def chat_term_open(self, chat_id, cols, rows):
+        """The child window's session start/restart. The setup always
+        comes fresh off the chat document - never from the page."""
+        def do():
+            root = self._need_root()
+            cid = str(chat_id)
+            chats.load_chat(root, cid)   # validate before the thread
+            threading.Thread(
+                target=lambda: chatterm.open_for_chat(
+                    self._bus.push, root, cid,
+                    int(cols or 120), int(rows or 32)),
+                daemon=True, name=f"cterm-open-{cid}").start()
+            return {"sid": chatterm.sid_for(cid)}
+        return _api_call(do)()
+
+    def chat_term_info(self, chat_id):
+        """The chat's container view, for the child window's read-only
+        header - what the mirror shell is (or would be) running."""
+        def do():
+            root = self._need_root()
+            c = chats.load_chat(root, str(chat_id))
+            name = str(c.get("container") or "")
+            if not name:
+                cfg = libconfig.load(root)
+                name = str((cfg.get("containers") or {}).get("default")
+                           or "sandbox")
+            return {"title": c.get("title") or "Chat",
+                    "sid": chatterm.sid_for(str(chat_id)),
+                    "container": name,
+                    "folders": [{"path": str(f.get("path") or ""),
+                                 "mode": str(f.get("mode") or "view")}
+                                for f in c.get("folders") or []],
+                    "network": containers.net_mode(c.get("network")),
+                    "env": str(c.get("env") or ""),
+                    "knowledge": not c.get("knowledgeOff"),
+                    "artifacts": not c.get("artifactsOff")}
         return _api_call(do)()
 
     # ---------------- switching libraries ----------------
@@ -1985,6 +2421,43 @@ class JsApi:
             library.write_file(root, p.name, new_text)
             self._bus.push({"type": "config", "config": self._config_or_error()})
             return {"servers": mcp.status(self._mcp_cfg())}
+        return _api_call(do)()
+
+    def mcp_update(self, name, new_name, command, env):
+        """Rewrite one mcp-servers entry (the card's Edit dialog). A
+        running server restarts on the new definition - under the new
+        name if renamed."""
+        def do():
+            old = str(name or "").strip()
+            new = str(new_name or "").strip() or old
+            env_map = {str(k): str(v) for k, v in env.items()} \
+                if isinstance(env, dict) else {}
+            new_lines = mcp.entry_lines(new, str(command or ""), env_map)
+            cfg = self._config_text_update(
+                lambda text: configedit.replace_list_item(
+                    text, ("mcp-servers", "mcp_servers"), old, new_lines))
+            if old in (mcp.running() or {}):
+                mcp.stop_server(old)
+                store.set_mcp_running(str(self._need_root()), old, False)
+                rec = next((s for s in cfg.get("mcpServers") or []
+                            if s["name"] == new), None)
+                if rec is not None:
+                    mcp.start_server(rec)
+                    store.set_mcp_running(str(self._need_root()), new, True)
+            return {"servers": mcp.status(cfg.get("mcpServers") or [])}
+        return _api_call(do)()
+
+    def mcp_remove(self, name):
+        """Delete one mcp-servers entry; a running instance stops first."""
+        def do():
+            n = str(name or "").strip()
+            cfg = self._config_text_update(
+                lambda text: configedit.remove_list_item(
+                    text, ("mcp-servers", "mcp_servers"), n))
+            if n in (mcp.running() or {}):
+                mcp.stop_server(n)
+            store.set_mcp_running(str(self._need_root()), n, False)
+            return {"servers": mcp.status(cfg.get("mcpServers") or [])}
         return _api_call(do)()
 
     # ---------------- the OpenAI-compatible API server ----------------

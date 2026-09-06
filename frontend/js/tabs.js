@@ -16,6 +16,7 @@ const TAB_META = {
   archive: { icon: "archive", title: () => "Chat Archive" },
   apisrv: { icon: "globe", title: () => "API Server" },
   mcpsrv: { icon: "mcp", title: () => "MCP Servers" },
+  config: { icon: "gear", title: () => "Configuration" },
   alerts: { icon: "bell", title: () => "Alerts" },
   envs: { icon: "key", title: () => "Environments" },
   chat: {
@@ -128,6 +129,7 @@ function mountTab(tab, panel) {
   else if (tab.type === "archive") mountArchiveTab(panel);
   else if (tab.type === "apisrv") mountApiSrvTab(panel);
   else if (tab.type === "mcpsrv") mountMcpTab(panel);
+  else if (tab.type === "config") mountConfigTab(panel);
   else if (tab.type === "alerts") mountAlertsTab(panel);
   else if (tab.type === "envs") mountEnvsTab(panel);
   else if (tab.type === "chat") mountChatTab(panel, tab.chatId);
@@ -149,6 +151,14 @@ function activateTab(id) {
   if (tab?.type === "archive") refreshArchiveTab();
   if (tab?.type === "apisrv") refreshApiSrvTab();
   if (tab?.type === "mcpsrv") refreshMcpTab();
+  if (tab?.type === "config") {
+    refreshConfigTab();
+    // display:none dropped the editor's scroll - put it back
+    const cc = st.cfgTab;
+    if (cc?.editor) {
+      setTimeout(() => { cc.editor.scroller.scrollTop = cc.scrollPos || 0; }, 0);
+    }
+  }
   if (tab?.type === "alerts") {
     NotifLog.unseen = 0;
     renderNotifBadge();
@@ -207,6 +217,13 @@ function closeTab(id) {
       "Discard & close", () => { st.lib.dirty = false; removeTab(id); }, true);
     return;
   }
+  if (tab.type === "config" && st.cfgTab?.dirty) {
+    confirmModal("Unsaved changes",
+      "loom.yaml has unsaved changes in the Config tab. Discard them and "
+      + "close the tab?",
+      "Discard & close", () => { st.cfgTab.dirty = false; removeTab(id); }, true);
+    return;
+  }
   if (tab.type === "chat") {
     closeChatTab(tab.chatId);   // chat.js owns the archive/cancel gate
     return;
@@ -227,6 +244,11 @@ function removeTab(id) {
     st.lib.editor = null;
     st.lib.open = null;
     st.lib.dirty = false;
+  }
+  if (tab.type === "config" && st.cfgTab) {
+    st.cfgTab.editor?.destroy();
+    st.cfgTab.editor = null;
+    st.cfgTab.dirty = false;
   }
   if (tab.type === "diag") {
     // tear down the view's window-level listeners with its tab
@@ -313,7 +335,8 @@ function renderTabs() {
     const meta = TAB_META[tab.type];
     const live = (tab.type === "chat" && st.chats[tab.chatId]?.running)
       || (tab.type === "term" && st.terms[tab.chatId]?.running);
-    const dirty = tab.type === "library" && st.lib.dirty;
+    const dirty = (tab.type === "library" && st.lib.dirty)
+      || (tab.type === "config" && st.cfgTab?.dirty);
     const node = el("div", {
       class: "tab" + (tab.id === st.activeTab ? " active" : ""),
       title: meta.title(tab),

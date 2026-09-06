@@ -10,8 +10,9 @@ confirmation that lists them).
 ## Layout
 
 ```
-loom.yaml            configuration - models, chat defaults, permissions,
-                     containers (loom.yml works too)
+loom.yaml            configuration - providers, chat defaults, permission
+                     modes, containers, MCP servers, the API server
+                     (loom.yml works too)
 environments.yaml    env-var sets for shell containers: plain values +
                      secret STUBS only - secret values stay in your OS
                      keyring, never in the library
@@ -42,10 +43,23 @@ internals/           Loom's working data: chat transcripts and each
 ## loom.yaml is the steering wheel
 
 Everything configurable lives in it - providers, chat defaults,
-permission modes, container definitions. It re-parses on every save;
-the Providers tab and open chats pick changes up immediately. If it
-stops parsing, the Providers tab shows the exact error until it parses
-again.
+permission modes, container definitions, MCP servers, the API server.
+It re-parses on every save; the Providers tab and open chats pick
+changes up immediately. If it stops parsing, the Providers tab shows
+the exact error until it parses again.
+
+Two ways to edit it, both yours:
+
+- **By hand**, here in the Library tab - the file is user-owned, and
+  Loom's own edits never touch your comments or ordering.
+- **The Configuration tab** (gear in the top bar): the same file in a
+  validated editor - a save that would not parse is rejected with the
+  exact error and nothing lands on disk, and a good save applies live
+  (providers re-probe, a running API server rebinds if its address
+  changed). Its dialogs - **Chat defaults…**, **Permission modes…**,
+  **Containers…** - write minimal blocks and leave the rest of the
+  file byte-for-byte; anything matching Loom's defaults stays out of
+  the file entirely.
 
 ## Prompts are files, nothing more
 
