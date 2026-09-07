@@ -56,14 +56,17 @@ async function boot() {
   });
   $("#btn-switchlib").addEventListener("click", switchLibraryFlow);
 
+  let maximized = false;
   try {
     const d = await Api.get("app_state");
     st.theme = d.theme || "dark";
     st.recents = d.recents || [];
     st.frameless = !!d.frameless;
+    maximized = !!d.maximized;
   } catch (e) { /* toasted */ }
   applyTheme();
   setupFramelessChrome();
+  applyWinState(maximized);   // a page load must never guess this wrong
   installTooltips();
   installHotkeyReveal();
   // relative timestamps tick while the window sits open
@@ -224,6 +227,9 @@ onLMEvent((ev) => {
       toast(ev.msg, ev.level === "ok" ? "ok" : ev.level === "err" ? "err" : "warn");
       break;
     case "chat":
+      // stragglers from a just-closed library (the dying worker's final
+      // done/error) must not lazily recreate chat state on the picker
+      if (!st.library) break;
       onChatEvent(ev);
       break;
     case "term":

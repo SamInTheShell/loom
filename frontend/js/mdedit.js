@@ -242,6 +242,16 @@ class LoomEditor {
     this.wrapper = el('div', { class: 'md-wrapper' });
     this.surface = el('div', { class: 'md-surface' + (this.mode === 'code' ? ' md-codefile' : '') });
     this.surface.contentEditable = this.readOnly ? 'false' : 'true';
+    if (this.readOnly) {
+      // a read-only surface must still be a first-class text view:
+      // focusable (Ctrl+F, Ctrl+C, F3 need keydown to land somewhere)
+      // and explicitly selectable (contenteditable=false gets no
+      // selection affordances from the embedded webview on its own)
+      this.surface.tabIndex = 0;
+      this.surface.style.userSelect = 'text';
+      this.surface.style.webkitUserSelect = 'text';
+      this.surface.style.cursor = 'text';
+    }
     this.surface.spellcheck = this.mode === 'md';
     this.copyLayer = el('div', { class: 'md-copylayer' });
     this.wrapper.append(this.surface, this.copyLayer);
@@ -1007,6 +1017,22 @@ class LoomEditor {
   }
 
   _wire() {
+    // find must work wherever focus sits inside the editor (toolbar,
+    // a read-only surface, nowhere in particular) - the surface and
+    // findbar handlers preventDefault first when they consume the key
+    this.host.addEventListener('keydown', (e) => {
+      if (e.defaultPrevented) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openFind();
+      } else if (e.key === 'F3') {
+        e.preventDefault();
+        if (this._find.open) this._findStep(e.shiftKey ? -1 : 1);
+        else this.openFind();
+      }
+    });
     this.surface.addEventListener('compositionstart', () => { this._composing = true; });
     this.surface.addEventListener('compositionend', () => { this._composing = false; this._scheduleDecorate(); });
     this.surface.addEventListener('input', () => { this._scheduleDiff(); this._scheduleDecorate(); });

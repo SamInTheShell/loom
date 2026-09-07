@@ -482,12 +482,18 @@ def sane_geometry(geo: dict) -> dict:
     return out
 
 
-def _watch_geometry(window) -> None:
+def _watch_geometry(window, bus: "Bus") -> None:
     """Mirror the window's live geometry into _geom. pywebview's qt
     backend fires these from the Qt main thread, so reading the
     maximized flag directly is safe; a maximized window's oversize
     dimensions are NOT recorded - restoring should re-maximize on top
-    of the last normal size."""
+    of the last normal size.
+
+    The maximized flag is also PUSHED to the page whenever it changes:
+    the compositor can (un)maximize without the app's own toggle -
+    dragging a maximized window unmaximizes it in KWin, shortcuts and
+    edge-snaps exist too - and a page stuck on body.maximized loses its
+    rounded corners and hides every resize zone."""
     def is_max():
         try:
             from webview.platforms.qt import BrowserView
@@ -496,9 +502,17 @@ def _watch_geometry(window) -> None:
         except Exception:
             return False
 
+    pushed = {"max": None}
+
+    def sync_max(m):
+        _geom["maximized"] = m
+        if pushed["max"] != m:
+            pushed["max"] = m
+            bus.push({"type": "winstate", "maximized": m})
+
     def on_resized(w, h):
         m = is_max()
-        _geom["maximized"] = m
+        sync_max(m)
         if not m:
             _geom["width"], _geom["height"] = int(w), int(h)
 
@@ -509,9 +523,8 @@ def _watch_geometry(window) -> None:
     window.events.moved += on_moved
     # the flag also rides the dedicated events (resize can fire with the
     # maximized dimensions BEFORE the Qt state flips - these settle it)
-    window.events.maximized += lambda *a: _geom.__setitem__("maximized", True)
-    window.events.restored += lambda *a: _geom.__setitem__("maximized",
-                                                           is_max())
+    window.events.maximized += lambda *a: sync_max(True)
+    window.events.restored += lambda *a: sync_max(is_max())
 
 
 def save_geometry() -> None:
@@ -719,6 +732,9 @@ class JsApi:
             out = {"theme": st.get("theme") or "dark",
                    "recents": store.visible_recents(),
                    "frameless": bool(getattr(self, "_frameless", False)),
+                   # the page (re)builds body.maximized from this - a
+                   # stale class squares the corners and kills resizing
+                   "maximized": bool(_geom.get("maximized")),
                    "library": str(self._root) if self._root else None}
             if self._root is not None:
                 out["config"] = self._config_or_error()
@@ -2338,6 +2354,18 @@ class JsApi:
         """Leave the current library: cancel streaming chats, close its
         terminals and MCP servers. Providers stay up - not ours."""
         def do():
+            # cancel AND JOIN the workers BEFORE the lock releases:
+            # a dying worker's final save (the partial turn) must land
+            # while this process still owns the library - releasing
+            # first would let another instance grab the lock mid-write.
+            # The joins share one bounded budget so a wedged worker
+            # can't hold the switch hostage.
+            for cid in chat.running_chats():
+                chat.stop(cid)
+            deadline = time.monotonic() + 5.0
+            for cid in chat.running_chats():
+                chat.join_worker(cid, max(0.5,
+                                          deadline - time.monotonic()))
             library.release_lock(self._root)
             self._root = None
             _set_tray_tooltip("Loom")
@@ -2345,8 +2373,6 @@ class JsApi:
             apiserver.stop()   # the API routes THIS library's providers
             self._bus.push({"type": "apisrv", **apiserver.status()})
             mcp.shutdown()     # and the MCP servers are its config too
-            for cid in chat.running_chats():
-                chat.stop(cid)
             # terminals run the library's containers - they close with it
             threading.Thread(target=terminals.shutdown, daemon=True,
                              name="lib-close-terms").start()
@@ -2783,7 +2809,7 @@ def main():
 
     window.events.loaded += lambda: harden_webengine(window)
     window.events.closing += lambda: on_window_closing(window, bus)
-    _watch_geometry(window)
+    _watch_geometry(window, bus)
     if geo.get("maximized"):
         def restore_max():
             _qt_maximize(window)

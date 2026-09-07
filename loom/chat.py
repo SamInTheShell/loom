@@ -1628,11 +1628,15 @@ def _worker(root: Path, chat_id: str, cancel: threading.Event, push) -> None:
                 compact_ok = _maybe_autocompact(root, cfg, chat, ep,
                                                 cancel, ev)
         ev("done", cancelled=cancel.is_set(), gaveUp=gave_up)
-        # titling happens AFTER done, on its own thread - it must not block
-        # the chat becoming usable again
-        threading.Thread(target=_autotitle,
-                         args=(root, cfg, str(chat["id"]), ep, push),
-                         daemon=True, name=f"title-{chat_id}").start()
+        # titling happens AFTER done, on its own thread - it must not
+        # block the chat becoming usable again. Never for a CANCELLED
+        # end though: teardown paths (switch library, quit, forced
+        # close) join THIS worker and then believe the chat is quiet -
+        # a titler still writing behind their backs would break that.
+        if not cancel.is_set():
+            threading.Thread(target=_autotitle,
+                             args=(root, cfg, str(chat["id"]), ep, push),
+                             daemon=True, name=f"title-{chat_id}").start()
     except (chats.ChatError, libconfig.ConfigError, containers.ContainerError,
             providers.ProviderError) as e:
         ev("error", msg=str(e))
