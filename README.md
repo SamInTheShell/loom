@@ -16,7 +16,7 @@ What has been cooked up in this repo is a secure agent that you customize for yo
 This project is feature complete, future work will be focused on UI/workflow improvements and bug fixes.
 The goal is to make the app easy so that all that is necessary to get started is:
 ```
-git clone https://github.com/synthstation/loom.git
+git clone https://github.com/SamInTheShell/loom.git
 cd loom
 make install
 loom
