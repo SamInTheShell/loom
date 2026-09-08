@@ -13,7 +13,7 @@ Most noteable features:
 
 What has been cooked up in this repo is a secure agent that you customize for your use-cases.
 
-This project is feature complete, future work will be focused on UI/workflow improvements and bug fixes.
+This project is not yet feature complete, future work will be focused on UI/workflow improvements and bug fixes.
 The goal is to make the app easy so that all that is necessary to get started is:
 ```
 git clone https://github.com/SamInTheShell/loom.git
@@ -22,15 +22,10 @@ make install
 loom
 ```
 
-Right now you need to know the getting started flow is `download/scan for models -> create a new server of the model -> start the server -> chat with the model/server`.
-
-I use Arch Linux and AMD Radeon hardware, these are the things I have to install on the hosts where this app runs llama-cpp (local or remote over ssh).
-```
-pacman -S llama-cpp ggml-cpu ggml-vulkan iwd openssh socat python rsync
-pacman -S vulkan-radeon vulkan-icd-loader vulkan-tools
-```
 
 ## Screenshots
+
+These are outdated right now. Updates will be made in the future when this project reaches maturity and starts incrementing version numbers. As of now, it's not distributed and is subject to change.
 
 **Chat**
 
