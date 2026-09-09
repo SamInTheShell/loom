@@ -217,6 +217,19 @@ function chatDefaultsDialog() {
   const thrIn = el("input", { type: "number", class: "cfg-num",
     min: "0.2", max: "0.95", step: "0.05",
     value: String(c.compaction?.threshold ?? 0.8) });
+  const maxOutIn = el("input", { type: "number", class: "cfg-num",
+    min: "0", step: "1024", placeholder: "0",
+    title: "Per-reply output budget, sent as max_tokens. 0 = let the "
+      + "server decide - llama-server then generates unbounded, but "
+      + "ninfer-style servers apply THEIR default (8192) and silently "
+      + "cut long replies.",
+    value: c.max_output ? String(c.max_output) : "" });
+  const readGateIn = el("input", { type: "number", class: "cfg-num",
+    min: "0", step: "1024", placeholder: "32768",
+    title: "read_file refuses WHOLE files estimated past this many "
+      + "tokens - the model must read big files in offset/limit slices "
+      + "instead. 0 disables the gate.",
+    value: String(c.read_gate ?? 32768) });
 
   modal("Chat defaults",
     [el("p", { class: "wiz-hint",
@@ -237,7 +250,9 @@ function chatDefaultsDialog() {
        "Assistant time signals - replies carry their generation time"),
      el("label", { class: "chk" }, autoCk,
        "Compact automatically near the context limit"),
-     cfgRow("Threshold", thrIn)],
+     cfgRow("Threshold", thrIn),
+     cfgRow("Max output", maxOutIn),
+     cfgRow("Read gate", readGateIn)],
     [
       { label: "Cancel" },
       {
@@ -258,6 +273,9 @@ function chatDefaultsDialog() {
             thought_truncation: truncCk.checked,
             assistant_signals: sigCk.checked,
             assistant_name: nameIn.value.trim() || "loom",
+            max_output: Math.max(0, parseInt(maxOutIn.value, 10) || 0),
+            read_gate: readGateIn.value.trim() === ""
+              ? 32768 : Math.max(0, parseInt(readGateIn.value, 10) || 0),
             compaction: { auto: autoCk.checked, threshold: thr },
           }).then((r) => {
             if (!r.ok) { toast(r.error, "err"); return; }

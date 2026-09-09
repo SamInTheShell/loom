@@ -135,7 +135,7 @@ function renderApiSrvTab() {
   wrap.append(el("p", { class: "mods-hint",
     text: "With a key set, every route except /health requires "
       + "'Authorization: Bearer <key>' or 'x-api-key: <key>' - the same "
-      + "contract llama-server and ninfer use. The key lives in this "
+      + "contract llama-server uses. The key lives in this "
       + "machine's keyring, per library." }));
 
   /* ---- how to use it ---- */

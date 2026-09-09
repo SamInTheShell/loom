@@ -112,13 +112,15 @@ Finish with a short summary containing:
   surprising you found along the way.
 
 Generated deliverables that are files rather than prose (reports,
-patches, archives, images) go in `/artifacts`; the user receives them
-as chat attachments.
+patches, archives, images) are handed over with the deliver_artifact
+tool; the user receives them as chat attachments. Artifacts are
+outbound only - build the file in your home or a write-mode mount
+first, deliver the finished result.
 
 ## Writing documents
 
 Skip this section unless the deliverable is a document: a knowledge page,
-a guide, or a report for `/artifacts`. It does not apply to code, commit
+a guide, or a report delivered as an artifact. It does not apply to code, commit
 messages, or your Phase 6 summary.
 
 Give a document this shape:

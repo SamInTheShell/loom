@@ -84,7 +84,12 @@
 .ttrav-panel {
   display: flex; flex-direction: column; gap: 10px;
   padding: 12px; min-width: 280px;
+  /* long panels (many artifacts / MCP tools / env vars) SCROLL inside
+   * the popup's max-height; flex:none keeps rows at natural height -
+   * without it a column flexbox squishes them before overflowing */
+  overflow-y: auto;
 }
+.ttrav-panel > * { flex: none; }
 .ttrav-row { display: flex; align-items: center; gap: 8px; }
 .ttrav-row .spacer { flex: 1; }
 .ttrav-note {
@@ -95,10 +100,20 @@
 .ttrav-slider { flex: 1; min-width: 150px; accent-color: var(--acc); }
 .ttrav-panel .ctx-item { display: flex; gap: 10px; align-items: baseline; }
 .ttrav-panel .ctx-item.sel { background: var(--acc-bg); }
-.netopt-lbl { font-weight: 600; min-width: 105px; }
-.netopt-desc { color: var(--fg-2); font-size: var(--fs-xs); }
+.netopt-lbl { font-weight: 600; min-width: 105px; flex: none; }
+/* the description shrinks and WRAPS inside the popup (a flex item's
+ * default min-width:auto let long text push past the container) */
+.netopt-desc {
+  color: var(--fg-2); font-size: var(--fs-xs);
+  flex: 1 1 0; min-width: 0; overflow-wrap: anywhere;
+}
 .ttrav-row.chk { cursor: pointer; }
-.ttrav-panel .mcp-fn { cursor: default; }
+.ttrav-panel .mcp-fn {
+  cursor: default;
+  /* long tool/file/variable names ellipsize instead of overflowing */
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .ttrav-panel .mcp-fn:hover { text-decoration: none; }
 .ttrav-panel .ttrav-row .mcp-fn[title*="click to open"] { cursor: pointer; }
 .ttrav-val {

@@ -186,6 +186,18 @@ def chat_lines(c: dict) -> list[str]:
             body.append(f"  {key}: {yq(v)}")
     if c.get("thought_truncation") is False:
         body.append("  thought_truncation: false")
+    try:
+        mo = int(c.get("max_output") or 0)
+    except (TypeError, ValueError):
+        mo = 0
+    if mo > 0:
+        body.append(f"  max_output: {mo}")
+    try:
+        rg = int(c.get("read_gate", 32768))
+    except (TypeError, ValueError):
+        rg = 32768
+    if rg != 32768:
+        body.append(f"  read_gate: {rg}")
     if c.get("assistant_signals") is False:
         body.append("  assistant_signals: false")
     aname = str(c.get("assistant_name") or "").strip()

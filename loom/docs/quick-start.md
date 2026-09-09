@@ -5,14 +5,15 @@ click or an edit; nothing is assumed.
 
 ## 1. Run an inference server
 
-Loom talks to inference servers you run yourself. Either works:
+Loom talks to an inference server you run yourself, or a hosted
+vendor account:
 
 - **llama.cpp**: `llama-server -m your-model.gguf --port 8080 --jinja`
   (`--jinja` enables tool calling - Loom's agent features need it).
-- **ninfer**: `ninfer-serve --artifact your-model.ninfer --port 8080`.
-
-The server can be on this machine or any box you can ssh into with a
-key. See [inference tips](inference-tips.md) for flags worth knowing.
+  The server can be on this machine or any box you can ssh into with a
+  key.
+- **Hosted**: OpenAI, Anthropic, Gemini, Vertex AI, or Bedrock, with
+  your API key (new and lightly tested - feedback welcome). See [inference tips](inference-tips.md) for flags worth knowing.
 
 ## 2. Point Loom at it
 
@@ -49,9 +50,10 @@ The provider card now shows its models, each with its context window.
 2. Click the pill's **view** label to flip it to **write** when you
    want edits. All of it runs inside a container, never on your host,
    asking permission according to the mode in the shield pill.
-3. Anything the model saves to `/artifacts` comes back to you as an
-   attachment pill - files save directly, folders as zip downloads.
-   Your uploaded images land in `/artifacts/uploads` for it to process.
+3. Anything the model **delivers** (its deliver_artifact tool) comes
+   back to you as an attachment pill - files save directly, folders as
+   zip downloads. Your uploaded images land at `/uploads` (read-only)
+   for it to process.
 4. Tip: drag the **book (Library)** icon from the top bar into the
    message area to attach this whole library read-only - see
    [curating knowledge](curating-knowledge.md) for why that's useful.

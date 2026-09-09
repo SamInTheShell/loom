@@ -5,7 +5,7 @@ One session per chat (sid "chat-<id>"), hosted in a popped-out OS window
 (app.chat_term_popout). The setup is computed HERE from the chat
 document - the same fields chat.py's shell tool reads - never copied by
 the frontend, so it cannot drift: image, /mnt folder mounts, the
-/knowledge and /artifacts cuts, the chat's own /home/loom, network mode
+/knowledge cut and /uploads, the chat's own /home/loom, network mode
 and environment. envHidden never matters - hiding only trims the
 model's prompt, the variables still load into containers.
 
@@ -50,8 +50,7 @@ def setup_for(root: Path, chat: dict) -> dict:
         "env": str(chat.get("env") or ""),
         "knowledge": None if chat.get("knowledgeOff")
         else str(root / "knowledge"),
-        "artifacts": None if chat.get("artifactsOff")
-        else str(chats.artifacts_dir(root, cid, create=True)),
+        "uploads": str(chats.artifacts_dir(root, cid) / "uploads"),
         "home": str(containers.chat_home(cid)),
     }
 
@@ -68,7 +67,7 @@ def _open(push, root: Path, chat_id: str, setup: dict,
             setup["network"], cols, rows, env_name=setup["env"],
             knowledge=Path(setup["knowledge"]) if setup["knowledge"]
             else None,
-            artifacts=Path(setup["artifacts"]) if setup["artifacts"]
+            uploads=Path(setup["uploads"]) if setup["uploads"]
             else None,
             home=Path(setup["home"]))
 

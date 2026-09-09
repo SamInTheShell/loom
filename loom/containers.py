@@ -15,9 +15,11 @@ Distilled from CodeTree's containers.py to the essentials:
     to switch it on - library content must not widen a security boundary.
   * attached folders mount at /mnt/<name> (ro for view mode, rw for write
     mode); the library knowledge base mounts read-only at /knowledge and
-    the chat's artifact folder read-write at /artifacts; a per-chat home
-    persists at ~/.loom/homes/<chat-id> so state survives between
-    commands within a chat.
+    the user's uploads read-only at /uploads (artifacts are NOT mounted
+    anywhere - they are outbound deliverables, handed over via the
+    deliver_artifact tool); a per-chat home persists at
+    ~/.loom/homes/<chat-id> so state survives between commands within a
+    chat.
   * timeout / cancel: `<engine> rm -f <name>` - the unique per-exec name
     means we always kill exactly ours.
 """
@@ -248,24 +250,24 @@ def run_shell(engine: str, image: str, chat_id: str, command: str,
               cancel: threading.Event | None = None,
               on_output=None, network="none",
               knowledge: Path | None = None,
-              artifacts: Path | None = None,
+              uploads: Path | None = None,
               extra_env: dict | None = None) -> ExecResult:
     """Run one shell command in a fresh container. Streams combined
     stdout+stderr through on_output (capped); TERM on cancel/timeout via
     `<engine> rm -f` so nothing lingers.
 
-    knowledge mounts READ-ONLY at /knowledge; artifacts mounts READ-WRITE
-    at /artifacts (the chat's delivery folder). extra_env vars reach the
-    container via a 0600 --env-file, NEVER the argv - secrets must not
-    show in the host process list."""
+    knowledge mounts READ-ONLY at /knowledge; uploads (the user's
+    attached files) mounts READ-ONLY at /uploads. There is NO artifacts
+    mount - deliverables leave through the deliver_artifact tool, never
+    a folder. extra_env vars reach the container via a 0600 --env-file,
+    NEVER the argv - secrets must not show in the host process list."""
     timeout = max(1, min(int(timeout or EXEC_TIMEOUT_DEFAULT), EXEC_TIMEOUT_MAX))
     name = f"loom-exec-{uuid.uuid4().hex[:12]}"
     vol, _notes = mounts_for(folders or [])
     if knowledge is not None and knowledge.is_dir():
         vol += ["-v", f"{knowledge.resolve()}:/knowledge:ro"]
-    if artifacts is not None:
-        artifacts.mkdir(parents=True, exist_ok=True)
-        vol += ["-v", f"{artifacts.resolve()}:/artifacts:rw"]
+    if uploads is not None and uploads.is_dir():
+        vol += ["-v", f"{uploads.resolve()}:/uploads:ro"]
     env_file = None
     if extra_env:
         env_file = store.run_dir() / f"env-{uuid.uuid4().hex[:12]}"

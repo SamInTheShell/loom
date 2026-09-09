@@ -298,12 +298,12 @@ with tempfile.TemporaryDirectory() as d:
     check("always-allow allows shell",
           libconfig.permission_for(cfg, "shell", "always-allow") == "allow")
     (root / "loom.yaml").write_text(
-        "providers:\n- name: p1\n  type: ninfer\n"
+        "providers:\n- name: p1\n  vendor: llama-cpp\n"
         "  url: http://127.0.0.1:9999/\n  ssh: box\n"
         "chat:\n  provider: p1\n  model: qwen\n")
     cfg = libconfig.load(root)
     check("provider parsed",
-          cfg["providers"][0]["type"] == "ninfer"
+          cfg["providers"][0]["vendor"] == "llama-cpp"
           and cfg["providers"][0]["url"] == "http://127.0.0.1:9999"
           and cfg["providers"][0]["ssh"] == "box"
           and cfg["chat"]["provider"] == "p1"
@@ -315,8 +315,9 @@ with tempfile.TemporaryDirectory() as d:
 
     for bad in ("providers: {not: a list}\n",
                 "providers:\n- name: x\n  url: ftp://nope\n",
-                "providers:\n- name: x\n  type: vllm\n  url: http://h\n",
-                "providers:\n- name: x\n  type: ninfer\n  url: http://h\n"
+                "providers:\n- name: x\n  vendor: vllm\n  url: http://h\n",
+                "providers:\n- name: x\n  type: ninfer\n  url: http://h\n",
+                "providers:\n- name: x\n  vendor: llama-cpp\n  url: http://h\n"
                 "  ssh: '-oProxyCommand=evil'\n"):
         (root / "loom.yaml").write_text(bad)
         try:
@@ -394,16 +395,17 @@ with tempfile.TemporaryDirectory() as d:
 
     names_all = [t["function"]["name"]
                  for t in chatmod.tool_specs(cfg, "always-allow")]
-    check("shell + write tools always offered (/artifacts is rw)",
+    check("shell + write + deliver tools always offered",
           "shell" in names_all and "write_file" in names_all
-          and "edit_file" in names_all, str(names_all))
+          and "edit_file" in names_all
+          and "deliver_artifact" in names_all, str(names_all))
 
-    # /artifacts: the model's delivery folder - writable via file tools
+    # artifacts: delivered through the explicit tool, never a folder
     out = chatmod._exec_tool(root, cfg, {"id": "t1", "folders": []},
-                             "write_file",
-                             {"path": "/artifacts/notes.md", "content": "hi"},
+                             "deliver_artifact",
+                             {"name": "notes.md", "content": "hi"},
                              threading.Event())
-    check("write_file lands in /artifacts",
+    check("deliver_artifact lands the file",
           (chatsmod.artifacts_dir(root, "t1") / "notes.md").read_text() == "hi",
           out)
     recs = chatmod._artifact_records(root, "t1")
@@ -1079,10 +1081,10 @@ _t1 = providers.inject_provider(_base, "ws", "llama-cpp",
 import yaml as _y2
 _p1 = _y2.safe_load(_t1)
 check("inject_provider creates the block",
-      _p1["providers"][0] == {"name": "ws", "type": "llama-cpp",
+      _p1["providers"][0] == {"name": "ws", "vendor": "llama-cpp",
                               "url": "http://127.0.0.1:8080"}
       and _p1["chat"] == {"model": "x"}, _t1)
-_t2 = providers.inject_provider(_t1, "gpu", "ninfer",
+_t2 = providers.inject_provider(_t1, "gpu", "llama-cpp",
                                 "http://127.0.0.1:9090", "sam@gpu")
 _p2 = _y2.safe_load(_t2)
 check("inject_provider appends to the block",

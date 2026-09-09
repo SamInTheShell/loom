@@ -3,8 +3,9 @@
 Loom is a local-first workbench for working with language models -
 chats with tools, sandboxed terminals, and a knowledge base - all
 organized around one folder you own: **this library**. Inference runs
-wherever you run it: Loom talks to llama.cpp's `llama-server` and to
-`ninfer` over their HTTP APIs, directly or through an ssh tunnel.
+wherever you run it: Loom talks to llama.cpp's `llama-server` over
+its HTTP API (directly or through an ssh tunnel), and to hosted
+vendors - OpenAI, Anthropic, Gemini, Vertex AI, Bedrock.
 
 The UI has no web listeners, remote providers are reached over plain
 ssh (key auth only), and shell commands run inside containers as an
@@ -22,7 +23,7 @@ unprivileged user.
 - **[Terminals](terminals.md)** - real shells in containers, hotkeys,
   copy/paste.
 - **[Providers and models](models-servers.md)** - pointing Loom at
-  llama-server / ninfer APIs, ssh tunnels, pinning, reasoning effort.
+  llama-server or a hosted vendor, ssh tunnels, pinning, reasoning effort.
 - **[Curating knowledge](curating-knowledge.md)** - how to grow a
   knowledge base worth searching, including doing it together with a
   model.

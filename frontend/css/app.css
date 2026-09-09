@@ -461,6 +461,8 @@ body.maximized #frame-border { display: none; }
    archive tab
    ========================================================= */
 .arctab { flex: 1; overflow-y: auto; padding: 18px; }
+.srv-untested { color: var(--warn); }
+
 .arc-search {
   padding: 5px 10px; border-radius: var(--r-md);
   border: 1px solid var(--bd-1); background: var(--bg-2); color: var(--fg-0);

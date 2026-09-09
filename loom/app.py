@@ -12,7 +12,7 @@ incubator in CodeTree):
     worker threads and reports through Bus.push → evaluate_js - NEVER on a
     pywebview bridge thread (those are non-daemon and would block
     interpreter shutdown),
-  * Loom does NOT launch inference - providers (llama-server / ninfer) are
+  * Loom does NOT launch inference - providers (llama-server / vendors) are
     other people's processes reached over HTTP, possibly through an ssh
     tunnel (key auth only).
 """
@@ -1118,19 +1118,20 @@ class JsApi:
             return {"provider": providers.probe(rec)}
         return _api_call(do)()
 
-    def provider_test(self, url, ssh="", ptype="llama-cpp", key=""):
+    def provider_test(self, url, ssh="", vendor="llama-cpp", key=""):
         """The Add-provider dialog's Test button - an ad-hoc probe that
         never touches config, registry, or keyring. `key` rides along so
-        an --api-key server can be tested before anything is stored."""
+        a keyed API can be tested before anything is stored."""
         def do():
-            rec = {"name": "(test)", "type": str(ptype or "llama-cpp"),
+            rec = {"name": "(test)",
+                   "vendor": str(vendor or "llama-cpp"),
                    "url": str(url or "").rstrip("/"),
                    "ssh": str(ssh or "").strip(),
                    "key": str(key or "").strip()}
             return {"result": providers.probe(rec, register=False)}
         return _api_call(do)()
 
-    def provider_add(self, name, ptype, url, ssh="", key=""):
+    def provider_add(self, name, vendor, url, ssh="", key=""):
         """Append one provider entry to loom.yaml non-destructively,
         validating the result before writing. A given `key` lands in the
         OS keyring BEFORE the refresh probes, so an --api-key server
@@ -1151,7 +1152,7 @@ class JsApi:
                         f"cannot reach the OS keyring: {e}")
             new_text = providers.inject_provider(
                 p.read_text(encoding="utf-8"), str(name or "").strip(),
-                str(ptype or "llama-cpp").strip(), str(url or "").strip(),
+                str(vendor or "llama-cpp").strip(), str(url or "").strip(),
                 str(ssh or "").strip())
             try:
                 raw = _yaml.safe_load(new_text) or {}
@@ -1168,7 +1169,7 @@ class JsApi:
             return {"configFile": p.name}
         return _api_call(do)()
 
-    def provider_update(self, name, new_name, ptype, url, ssh="", key=""):
+    def provider_update(self, name, new_name, vendor, url, ssh="", key=""):
         """Rewrite one provider's loom.yaml entry (the card's Edit dialog),
         validating the whole result before writing. A rename moves the
         provider's keyring key along; a non-empty `key` replaces the
@@ -1180,7 +1181,7 @@ class JsApi:
                 lambda text: configedit.replace_list_item(
                     text, ("providers",), old,
                     providers.entry_lines(
-                        new, str(ptype or "llama-cpp").strip(),
+                        new, str(vendor or "llama-cpp").strip(),
                         str(url or "").strip(), str(ssh or "").strip())))
             k = str(key or "").strip()
             try:
@@ -1751,10 +1752,11 @@ class JsApi:
         return _api_call(do)()
 
     def chat_set_artifacts(self, chat_id, on):
-        """The artifacts chip: enable/disable the chat's /artifacts
-        delivery folder. Off = not mounted in shells, refused by file
-        tools, absent from tool descriptions, no new delivery pills -
-        already-delivered artifacts stay viewable."""
+        """The artifacts chip: enable/disable artifact DELIVERY for the
+        chat. Off = the deliver_artifact tool is not offered (and
+        refused if called anyway); already-delivered artifacts stay
+        viewable. Containers are untouched - artifacts were never a
+        mount."""
         def do():
             c = chats.load_chat(self._need_root(), str(chat_id))
             if on:
@@ -1762,7 +1764,6 @@ class JsApi:
             else:
                 c["artifactsOff"] = True
             chats.save_chat(self._need_root(), c)
-            chatterm.sync_async(self._bus.push, self._need_root(), c["id"])
             return {"artifacts": not c.get("artifactsOff")}
         return _api_call(do)()
 
@@ -1992,8 +1993,8 @@ class JsApi:
 
     @staticmethod
     def _stage_uploads(root, chat_id, paths):
-        """Copy the user's attachments into the chat's artifact folder
-        (/artifacts/uploads in the container) so shell/file tools can
+        """Copy the user's attachments into the chat's uploads dir
+        (/uploads in containers, read-only) so shell/file tools can
         reach them. Best-effort - a failed copy must not block the send."""
         import shutil as _sh
         import uuid as _uuid
@@ -2273,7 +2274,7 @@ class JsApi:
     def chat_term_popout(self, chat_id):
         """Open (or focus) a separate window with a terminal running in
         this chat's exact container view (image, /mnt mounts, the
-        /knowledge and /artifacts cuts, the chat's /home/loom, network,
+        /knowledge cut, /uploads, the chat's /home/loom, network,
         environment). The shell dies with the window - and restarts
         itself whenever the chat's setup changes."""
         def do():
@@ -2337,7 +2338,8 @@ class JsApi:
                     "network": containers.net_mode(c.get("network")),
                     "env": str(c.get("env") or ""),
                     "knowledge": not c.get("knowledgeOff"),
-                    "artifacts": not c.get("artifactsOff")}
+                    "uploads": (chats.artifacts_dir(root, str(chat_id))
+                                / "uploads").is_dir()}
         return _api_call(do)()
 
     # ---------------- switching libraries ----------------

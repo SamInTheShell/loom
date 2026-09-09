@@ -66,15 +66,15 @@ def _set_winsize(fd: int, cols: int, rows: int) -> None:
 
 
 def _extra_mounts(knowledge: Path | None,
-                  artifacts: Path | None) -> list[str]:
-    """The chat-view mounts: /knowledge read-only, /artifacts read-write
-    (same layout containers.run_shell gives the model's shell)."""
+                  uploads: Path | None) -> list[str]:
+    """The chat-view mounts: /knowledge and /uploads, both read-only
+    (same layout containers.run_shell gives the model's shell - there
+    is no artifacts mount anywhere)."""
     vol: list[str] = []
     if knowledge is not None and knowledge.is_dir():
         vol += ["-v", f"{knowledge.resolve()}:/knowledge:ro"]
-    if artifacts is not None:
-        artifacts.mkdir(parents=True, exist_ok=True)
-        vol += ["-v", f"{artifacts.resolve()}:/artifacts:rw"]
+    if uploads is not None and uploads.is_dir():
+        vol += ["-v", f"{uploads.resolve()}:/uploads:ro"]
     return vol
 
 
@@ -89,7 +89,7 @@ def open_session(push, root: Path, tab_id: str, container: str,
                  cols: int = 120, rows: int = 32,
                  env_name: str = "",
                  knowledge: Path | None = None,
-                 artifacts: Path | None = None,
+                 uploads: Path | None = None,
                  home: Path | None = None) -> None:
     """Build/pull the image if needed and start the interactive shell.
     Blocking (image builds take a while) - call on a worker thread;
@@ -121,11 +121,11 @@ def open_session(push, root: Path, tab_id: str, container: str,
 
     try:
         vol, notes = containers.mounts_for(folders or [])
-        vol += _extra_mounts(knowledge, artifacts)
+        vol += _extra_mounts(knowledge, uploads)
         if knowledge is not None and knowledge.is_dir():
             notes.append("/knowledge (read-only) = " + str(knowledge))
-        if artifacts is not None:
-            notes.append("/artifacts (read-write) = " + str(artifacts))
+        if uploads is not None and uploads.is_dir():
+            notes.append("/uploads (read-only) = " + str(uploads))
         for n in notes:
             _emit(push, sid, "line", text="[loom] mounted " + n)
         if home is None:

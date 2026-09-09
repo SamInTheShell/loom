@@ -1,24 +1,28 @@
 """Inference providers - the HTTP APIs Loom talks to.
 
-Loom does NOT launch or manage inference processes. A provider is a
-running llama.cpp `llama-server` or `ninfer-serve` instance, addressed by
-URL - reached directly, or through an ssh stdio tunnel (key auth only)
-when the config entry names an `ssh` destination. Models are pulled from
-the provider's own API (`GET /v1/models`); nothing about model files or
-server flags is Loom's business.
+Loom does NOT launch or manage inference processes. A provider is
+either a llama.cpp `llama-server` you run yourself (a MODERN build -
+one that reports `meta.n_ctx` on /v1/models; older builds are not
+supported), or a hosted vendor API. Local servers can be reached
+through an ssh stdio tunnel (key auth only) when the config entry
+names an `ssh` destination.
+
+Vendors: OpenAI, Anthropic, Google Gemini, Google Vertex AI and Amazon
+Bedrock. Gemini, Vertex and Bedrock are reached through their
+OpenAI-compatible endpoints, so llama-server and every vendor except
+Anthropic share one wire dialect; Anthropic's /v1/messages adapter
+lives in chat.py. Vendor support is NEW and lightly tested - the UI
+says so and asks for feedback.
 
 The in-memory registry mirrors what probing found (reachable? which
-models? what context window?) and pushes changes to the frontend through
-on_status(), the same shape the old server registry used:
-    {name, type, url, ssh, state: ok|error|unknown, detail, models, ts}
+models? what context window?) and pushes changes to the frontend
+through on_status():
+    {name, vendor, url, ssh, state: ok|error|unknown, detail, models, ts}
 
-Context windows:
-  * ninfer reports `max_model_len` on each `/v1/models` entry - that IS
-    the per-request ceiling.
-  * llama-server reports the loaded slot context in `GET /props`
-    (`default_generation_settings.n_ctx`) and the model's trained
-    context in the `/v1/models` meta (`n_ctx_train`); the served slot
-    context wins when present.
+Context windows: llama-server reports the usable per-slot context as
+`meta.n_ctx` on each /v1/models entry (`n_ctx_train` is the fallback).
+Hosted vendors don't report one - those models carry ctx 0 and the
+context estimator treats the window as unknown.
 """
 
 from __future__ import annotations
@@ -36,6 +40,80 @@ HTTP_TIMEOUT = 10
 
 class ProviderError(Exception):
     pass
+
+
+# --------------------------------------------------------------------------
+# vendors - the catalog every provider entry names. baseUrl "" means the
+# user must supply the URL (their own server / their region+project
+# endpoint). chatPath/modelsPath are relative to the entry's url;
+# modelsPath None = the vendor has no model listing (type the id).
+# extensions = llama.cpp-only request fields (timings_per_token,
+# return_progress, cache_prompt).
+
+VENDORS = {
+    "llama-cpp": {
+        "label": "llama-cpp (llama-server)",
+        "baseUrl": "",
+        "dialect": "openai",
+        "chatPath": "/v1/chat/completions",
+        "modelsPath": "/v1/models",
+        "extensions": True,
+    },
+    "openai": {
+        "label": "OpenAI",
+        "baseUrl": "https://api.openai.com/v1",
+        "dialect": "openai",
+        "chatPath": "/chat/completions",
+        "modelsPath": "/models",
+        "extensions": False,
+    },
+    "anthropic": {
+        "label": "Anthropic",
+        "baseUrl": "https://api.anthropic.com",
+        "dialect": "anthropic",
+        "chatPath": "/v1/messages",
+        "modelsPath": "/v1/models",
+        "extensions": False,
+    },
+    "gemini": {
+        "label": "Google Gemini",
+        "baseUrl":
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        "dialect": "openai",
+        "chatPath": "/chat/completions",
+        "modelsPath": "/models",
+        "extensions": False,
+    },
+    "vertex": {
+        "label": "Google Vertex AI",
+        "baseUrl": "",   # region/project specific - the user supplies it
+        "dialect": "openai",
+        "chatPath": "/chat/completions",
+        "modelsPath": None,
+        "extensions": False,
+    },
+    "bedrock": {
+        "label": "Amazon Bedrock",
+        "baseUrl":
+            "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+        "dialect": "openai",
+        "chatPath": "/chat/completions",
+        "modelsPath": "/models",
+        "extensions": False,
+    },
+}
+
+
+def vendor_key(prov: dict) -> str:
+    """The provider's vendor id; the legacy `type` key is honored so
+    pre-vendor configs and registry records keep working."""
+    v = str(prov.get("vendor") or prov.get("type")
+            or "llama-cpp").strip().lower()
+    return v if v in VENDORS else "llama-cpp"
+
+
+def vendor_of(prov: dict) -> dict:
+    return VENDORS[vendor_key(prov)]
 
 
 # user-facing lines collapse home dirs to ~ (works for remote paths too -
@@ -113,10 +191,10 @@ def model_ctx(name: str, model: str) -> int:
 # --------------------------------------------------------------------------
 # HTTP
 
-# provider API keys (a llama-server/ninfer started with --api-key) live
-# in the OS keyring, never in loom.yaml. The app installs a resolver
-# (name -> key); ad-hoc records (the Add dialog's Test) may carry the
-# key directly in prov["key"].
+# provider API keys (a vendor account key, or a llama-server started
+# with --api-key) live in the OS keyring, never in loom.yaml. The app
+# installs a resolver (name -> key); ad-hoc records (the Add dialog's
+# Test) may carry the key directly in prov["key"].
 _key_resolver = None
 
 
@@ -142,13 +220,18 @@ def request(prov: dict, method: str, path: str, body: bytes | None = None,
             headers: dict | None = None, timeout: float = HTTP_TIMEOUT,
             abort_box: dict | None = None):
     """One HTTP request to a provider (tunneled when it has `ssh`).
-    A stored provider key rides as `Authorization: Bearer` - the header
-    both llama-server and ninfer accept. Returns the raw response; the
-    caller owns close()."""
+    The stored key rides in the vendor's auth style: `x-api-key` (plus
+    the version header) for Anthropic, `Authorization: Bearer`
+    everywhere else. Returns the raw response; the caller owns
+    close()."""
     url = str(prov.get("url") or "").rstrip("/") + path
     hdrs = dict(headers or {})
     key = provider_key(prov)
-    if key:
+    if vendor_key(prov) == "anthropic":
+        if key:
+            hdrs.setdefault("x-api-key", key)
+        hdrs.setdefault("anthropic-version", "2023-06-01")
+    elif key:
         hdrs.setdefault("Authorization", f"Bearer {key}")
     return sshtunnel.request(method, url, hdrs or None, body, timeout,
                              str(prov.get("ssh") or ""), abort_box=abort_box)
@@ -175,10 +258,19 @@ def probe(prov: dict, register: bool = True) -> dict:
     unreachable is a STATE, not an exception (chat sends still raise,
     with fresher detail)."""
     name = str(prov.get("name") or "")
-    rec = {"name": name, "type": prov.get("type") or "llama-cpp",
+    rec = {"name": name, "vendor": vendor_key(prov),
            "url": prov.get("url") or "", "ssh": prov.get("ssh") or "",
            "state": "unknown", "detail": "", "models": [],
            "ts": int(time.time() * 1000)}
+    if vendor_of(prov)["modelsPath"] is None:
+        # no listing endpoint to probe (Vertex AI) - usable, on trust
+        rec["state"] = "ok"
+        rec["detail"] = "this vendor lists no models - type the model id"
+        if register:
+            with _lock:
+                _providers[name] = rec
+            _push_status()
+        return dict(rec)
     try:
         models = _fetch_models(prov)
         rec["state"] = "ok"
@@ -209,39 +301,30 @@ def probe(prov: dict, register: bool = True) -> dict:
 
 
 def _fetch_models(prov: dict) -> list[dict]:
-    """[{id, ctx}] from the provider's API."""
-    got = _get_json(prov, "/v1/models")
+    """[{id, ctx}] from the provider's model listing."""
+    got = _get_json(prov, vendor_of(prov)["modelsPath"])
     data = got.get("data") if isinstance(got, dict) else None
     if not isinstance(data, list):
-        raise ProviderError("the /v1/models answer has no `data` list - "
-                            "is this really a llama-server/ninfer API?")
+        raise ProviderError("the models answer has no `data` list - is "
+                            "the URL really this vendor's API?")
     out = []
     for m in data:
         if not isinstance(m, dict) or not m.get("id"):
             continue
         entry = {"id": str(m["id"]), "ctx": 0}
+        # llama-server (modern builds): meta.n_ctx is the usable
+        # per-slot context (what -c set, divided by --parallel);
+        # n_ctx_train is the fallback. max_model_len is the vLLM-style
+        # spelling other OpenAI-compatible servers (ninfer included)
+        # use for the same ceiling. Hosted vendors report nothing -
+        # their ctx stays 0 (unknown).
         meta = m.get("meta") if isinstance(m.get("meta"), dict) else {}
-        # ninfer: max_model_len is the per-request context ceiling.
-        # llama-server: meta.n_ctx is the usable per-slot context (what -c
-        # set, divided by --parallel); n_ctx_train is only the fallback.
-        for k in (m.get("max_model_len"), meta.get("n_ctx"),
-                  meta.get("n_ctx_train")):
+        for k in (meta.get("n_ctx"), meta.get("n_ctx_train"),
+                  m.get("max_model_len")):
             if k:
                 entry["ctx"] = int(k)
                 break
         out.append(entry)
-    if str(prov.get("type")) == "llama-cpp" and any(not e["ctx"] for e in out):
-        # older llama-server builds without meta.n_ctx: /props still
-        # carries the served slot context
-        try:
-            props = _get_json(prov, "/props")
-            n_ctx = (props.get("default_generation_settings") or {}).get("n_ctx")
-            if n_ctx:
-                for entry in out:
-                    entry["ctx"] = entry["ctx"] or int(n_ctx)
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-                ValueError):
-            pass   # /props is a nicety; chatting works without it
     return out
 
 
@@ -269,21 +352,21 @@ def refresh(cfg: dict) -> list[dict]:
 # loom.yaml `providers:` section - appended non-destructively (the Add
 # provider dialog); everything else in the file stays byte-for-byte
 
-def entry_lines(name: str, ptype: str, url: str, ssh: str) -> list[str]:
+def entry_lines(name: str, vendor: str, url: str, ssh: str) -> list[str]:
     def q(s: str) -> str:
         s = str(s)
         if re.search(r"[:#{}\[\],&*?|>'\"%@`!]", s) or s != s.strip():
             return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
         return s
     lines = [f"- name: {q(name)}",
-             f"  type: {q(ptype)}",
+             f"  vendor: {q(vendor)}",
              f"  url: {q(url)}"]
     if ssh:
         lines.append(f"  ssh: {q(ssh)}")
     return lines
 
 
-def inject_provider(text: str, name: str, ptype: str, url: str,
+def inject_provider(text: str, name: str, vendor: str, url: str,
                     ssh: str = "") -> str:
     """Append one provider entry to the `providers:` block of loom.yaml
     TEXT (creating the block at the end if absent). Handles the shipped
@@ -303,11 +386,11 @@ def inject_provider(text: str, name: str, ptype: str, url: str,
         if out and out[-1].strip():
             out.append("")
         return "\n".join(out + ["providers:"]
-                         + entry_lines(name, ptype, url, ssh)) + "\n"
+                         + entry_lines(name, vendor, url, ssh)) + "\n"
     if m.group("empty"):
         # `providers: []` → open the block; the entry replaces the []
         src[i] = re.sub(r"\[\s*\]\s*", "", src[i]).rstrip()
-        return "\n".join(src[:i + 1] + entry_lines(name, ptype, url, ssh)
+        return "\n".join(src[:i + 1] + entry_lines(name, vendor, url, ssh)
                          + src[i + 1:]) + "\n"
     # find the end of the block (its last non-comment line) and the
     # indentation its list items actually use
@@ -326,5 +409,5 @@ def inject_provider(text: str, name: str, ptype: str, url: str,
             if got:
                 indent = got.group(1)
         j += 1
-    new = [indent + ln for ln in entry_lines(name, ptype, url, ssh)]
+    new = [indent + ln for ln in entry_lines(name, vendor, url, ssh)]
     return "\n".join(src[:end] + new + src[end:]) + "\n"

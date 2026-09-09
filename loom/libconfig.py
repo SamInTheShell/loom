@@ -4,21 +4,21 @@ The file is user-owned and hand-edited (in the Library tab); this module
 never writes it. Parsing is deliberately forgiving about absent sections
 and strict about shape errors.
 
-Loom does NOT launch inference. It talks to inference servers you run
-yourself, over their HTTP APIs - llama.cpp's llama-server and ninfer -
-directly, or through an SSH tunnel (key auth only):
+Loom does NOT launch inference. A provider is a llama.cpp llama-server
+you run yourself (reached directly or through an SSH tunnel, key auth
+only) or a hosted vendor API:
 
     providers:
     - name: workstation          # how this endpoint shows up in the UI
-      type: llama-cpp            # llama-cpp | ninfer
-      url: http://127.0.0.1:8080 # the API's base URL
+      vendor: llama-cpp          # llama-cpp | openai | anthropic |
+                                 # gemini | vertex | bedrock
+      url: http://127.0.0.1:8080 # the API's base URL (hosted vendors
+                                 # have a default; Vertex needs yours)
       ssh: ""                    # optional ssh destination - the url is
                                  # then resolved FROM that host, and all
                                  # traffic rides an ssh stdio tunnel
-    - name: gpu-box
-      type: ninfer
-      url: http://127.0.0.1:11434
-      ssh: sam@gpu-box
+    - name: claude
+      vendor: anthropic          # key comes from the OS keyring
 
     chat:
       provider: workstation      # default provider for new chats
@@ -44,7 +44,7 @@ class ConfigError(Exception):
 PERM_LEVELS = ("allow", "ask", "deny", "disabled")
 
 READ_TOOLS = ("knowledge_search", "read_file", "list_dir", "grep", "find_files")
-EDIT_TOOLS = ("write_file", "edit_file")
+EDIT_TOOLS = ("write_file", "edit_file", "deliver_artifact")
 
 # Built-in permission MODES. A chat runs under exactly one mode; loom.yaml
 # `permission-modes` entries override/extend these per tool, and may define
@@ -80,7 +80,11 @@ DEFAULT_CONTAINERS = {
 }
 
 
-PROVIDER_TYPES = ("llama-cpp", "ninfer")
+# the canonical vendor catalog (labels, base URLs, dialects) lives in
+# providers.VENDORS; config validation only needs the names and which
+# vendors have a default URL the entry may omit
+PROVIDER_VENDORS = ("llama-cpp", "openai", "anthropic", "gemini",
+                    "vertex", "bedrock")
 
 
 def load(root: Path) -> dict:
@@ -147,14 +151,33 @@ def _providers(sec) -> list[dict]:
         if name in names:
             raise ConfigError(f"two providers share the name {name!r}")
         names.add(name)
-        ptype = str(m.get("type") or "llama-cpp").strip().lower()
-        if ptype not in PROVIDER_TYPES:
+        # `vendor:` names who serves the API; the legacy `type:` key is
+        # accepted as an alias so pre-vendor configs keep loading
+        vendor = str(m.get("vendor") or m.get("type")
+                     or "llama-cpp").strip().lower()
+        if vendor == "ninfer":
             raise ConfigError(
-                f"provider {name!r}: type must be one of "
-                + ", ".join(PROVIDER_TYPES) + f" - not {ptype!r}")
+                f"provider {name!r}: the ninfer vendor type was removed "
+                "- a ninfer endpoint speaks the same dialect, so change "
+                "this entry to `vendor: llama-cpp` and it keeps working "
+                "(tip: ninfer caps replies at 8192 tokens by default - "
+                "set chat.max_output, or start it with "
+                "--default-max-tokens)")
+        if vendor not in PROVIDER_VENDORS:
+            raise ConfigError(
+                f"provider {name!r}: vendor must be one of "
+                + ", ".join(PROVIDER_VENDORS) + f" - not {vendor!r}")
         url = str(m.get("url") or "").strip().rstrip("/")
         if not url:
-            raise ConfigError(f"provider {name!r} has no `url`")
+            # hosted vendors have a well-known endpoint the entry may omit
+            from loom.providers import VENDORS as _V
+            url = _V[vendor]["baseUrl"]
+        if not url:
+            raise ConfigError(
+                f"provider {name!r} has no `url`"
+                + (" (Vertex AI endpoints are region/project specific - "
+                   "the entry must carry one)" if vendor == "vertex"
+                   else ""))
         if not re.match(r"^https?://", url):
             raise ConfigError(
                 f"provider {name!r}: url must start with http:// or "
@@ -164,7 +187,7 @@ def _providers(sec) -> list[dict]:
             raise ConfigError(
                 f"provider {name!r}: ssh must be a destination "
                 "(user@host or a ~/.ssh/config alias), not flags")
-        out.append({"name": name, "type": ptype, "url": url, "ssh": ssh})
+        out.append({"name": name, "vendor": vendor, "url": url, "ssh": ssh})
     return out
 
 
@@ -207,9 +230,28 @@ def _chat(sec) -> dict:
         # reveals each reply's signals)
         "assistant_name": str(sec.get("assistant_name")
                               or "loom").strip() or "loom",
+        # per-turn output budget, sent as max_tokens. 0 = don't send:
+        # llama-server then generates unbounded, but ninfer-style
+        # servers apply THEIR default (ninfer: 8192) and silently cut
+        # long replies - set this when a server truncates big outputs
+        "max_output": _tok_field(sec, "max_output", 0),
+        # whole-file read_file gate: files estimated past this many
+        # tokens must be read in offset/limit slices (0 = no gate)
+        "read_gate": _tok_field(sec, "read_gate", 32768),
         "compaction": {"auto": bool(comp.get("auto", True)),
                        "threshold": threshold},
     }
+
+
+def _tok_field(sec, key: str, default: int) -> int:
+    try:
+        v = sec.get(key)
+        n = int(default if v is None else v or 0)
+    except (TypeError, ValueError):
+        raise ConfigError(f"chat.{key} must be a whole number of tokens")
+    if n < 0:
+        raise ConfigError(f"chat.{key} must be >= 0")
+    return n
 
 
 def _permission_modes(sec, legacy) -> dict:

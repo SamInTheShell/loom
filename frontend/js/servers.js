@@ -2,8 +2,8 @@
  * session compatibility): every provider from loom.yaml as a card with
  * live reachability, its model list (pulled from the provider's own
  * API), a probe button, and a button that jumps to loom.yaml. Loom does
- * NOT manage inference processes - a provider is a llama-server or
- * ninfer someone runs elsewhere; all we do is talk to it. */
+ * NOT manage inference processes - a provider is a llama-server
+ * someone runs, or a hosted vendor API; all we do is talk to it. */
 "use strict";
 
 function mountServersTab(panel) {
@@ -42,8 +42,9 @@ function providerKeyDialog(name) {
   };
   modal("API key · " + name,
     [el("p", { class: "wiz-hint",
-       text: "For a llama-server/ninfer started with --api-key. Sent as "
-         + "'Authorization: Bearer' on every request to this provider. "
+       text: "The provider's API key (a vendor account key, or a "
+         + "llama-server started with --api-key). Sent in the vendor's "
+         + "auth header on every request. "
          + "Stored in this machine's OS keyring, never in loom.yaml." }),
      keyIn],
     [
@@ -77,7 +78,7 @@ function renderServersTab() {
     el("div", { style: "display:flex;gap:6px" },
       el("button", {
         class: "btn btn-sm btn-acc", text: "Add provider…",
-        title: "Point Loom at a llama-server or ninfer HTTP API",
+        title: "Point Loom at a llama-server, or a hosted vendor (OpenAI, Anthropic, Gemini, Vertex AI, Bedrock)",
         onclick: () => providerDialog(),
       }),
       el("button", {
@@ -109,9 +110,9 @@ function renderServersTab() {
   if (!provs.length) {
     panel.append(el("div", { class: "srv-empty" },
       el("p", { text: "No providers configured yet." }),
-      el("p", { text: "Loom talks to inference servers you run yourself - "
-        + "llama.cpp's llama-server or ninfer - over their HTTP APIs, "
-        + "directly or through an SSH tunnel (key auth only)." }),
+      el("p", { text: "Loom talks to a llama-server you run yourself "
+        + "(directly or through an SSH tunnel, key auth only) - or to a "
+        + "hosted vendor: OpenAI, Anthropic, Gemini, Vertex AI, Bedrock." }),
       el("div", { style: "display:flex;gap:8px;justify-content:center" },
         el("button", { class: "btn btn-acc", text: "Add provider…",
           onclick: () => providerDialog() }),
@@ -150,7 +151,9 @@ function providerCard(p) {
     el("span", { class: "dot " + dot }),
     el("span", { class: "srv-name", text: p.name }),
     el("span", { class: "srv-host",
-      text: p.type + (p.ssh ? " · ssh " + p.ssh : "")
+      text: (PROVIDER_VENDORS.find((v) => v.id === p.vendor)?.label
+        || p.vendor || "llama-cpp")
+        + (p.ssh ? " · ssh " + p.ssh : "")
         + (live.hasKey ? " · key set" : "") }),
     el("span", { class: "srv-state" },
       el("span", { text: state === "ok" ? "reachable"
@@ -199,8 +202,32 @@ function providerCard(p) {
   return card;
 }
 
+/* the vendor catalog the dialog offers - mirrors providers.VENDORS on
+ * the backend. Hosted vendors prefill their endpoint and REQUIRE a
+ * key; llama-cpp is your own server (key optional, ssh available). */
+const PROVIDER_VENDORS = [
+  { id: "llama-cpp", label: "llama-cpp (llama-server)", url: "",
+    urlPh: "http://127.0.0.1:8080",
+    keyPh: "API key, if the server runs with --api-key (optional)" },
+  { id: "openai", label: "OpenAI", url: "https://api.openai.com/v1",
+    keyPh: "OpenAI API key (sk-…)" },
+  { id: "anthropic", label: "Anthropic", url: "https://api.anthropic.com",
+    keyPh: "Anthropic API key (sk-ant-…)" },
+  { id: "gemini", label: "Google Gemini",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai",
+    keyPh: "Google AI Studio API key" },
+  { id: "vertex", label: "Google Vertex AI", url: "",
+    urlPh: "https://<region>-aiplatform.googleapis.com/v1/projects/"
+      + "<project>/locations/<region>/endpoints/openapi",
+    keyPh: "OAuth access token (gcloud auth print-access-token - "
+      + "expires ~hourly)" },
+  { id: "bedrock", label: "Amazon Bedrock",
+    url: "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+    keyPh: "Bedrock API key (bearer token)" },
+];
+
 /* ---------- the Add/Edit provider dialog ----------
- * name / type / url / optional ssh destination; Test probes without
+ * name / vendor / url / optional ssh destination; Test probes without
  * writing anything. Add appends to loom.yaml; with `existing` (a config
  * entry) the dialog rewrites that entry in place - a rename moves the
  * keyring key along. Both writes are validated before landing. */
@@ -208,9 +235,10 @@ function providerDialog(existing) {
   const nameIn = el("input", { type: "text", placeholder: "workstation",
     value: existing?.name || "" });
   const typeSel = el("select", { class: "term-sel" },
-    el("option", { value: "llama-cpp", text: "llama-cpp (llama-server)" }),
-    el("option", { value: "ninfer", text: "ninfer" }));
-  if (existing?.type) typeSel.value = existing.type;
+    ...PROVIDER_VENDORS.map((v) =>
+      el("option", { value: v.id, text: v.label })));
+  typeSel.value = existing?.vendor || existing?.type || "llama-cpp";
+  if (!typeSel.value) typeSel.value = "llama-cpp";
   const urlIn = el("input", { type: "text",
     placeholder: "http://127.0.0.1:8080", value: existing?.url || "" });
   const sshIn = el("input", { type: "text",
@@ -222,6 +250,33 @@ function providerDialog(existing) {
       ? "a key is stored - leave empty to keep it, type to replace"
       : "API key, if the server runs with --api-key (optional)" });
   const status = el("div", { class: "srv-detail", text: "" });
+
+  // per-vendor shaping: prefill the endpoint, adjust the key hint,
+  // reserve ssh tunneling for your own servers - and be honest that
+  // the hosted-vendor paths are NEW and lightly tested
+  const sshRow = el("div", { class: "ts-row" },
+    el("label", { text: "SSH" }), sshIn);
+  const untestedNote = el("p", { class: "wiz-hint srv-untested",
+    text: "⚠ Hosted-vendor support (OpenAI / Anthropic / Gemini / "
+      + "Vertex AI / Bedrock) is new and UNTESTED against the live "
+      + "APIs - if anything misbehaves, please report it so we can "
+      + "improve it." });
+  const vendMeta = () => PROVIDER_VENDORS.find(
+    (v) => v.id === typeSel.value) || PROVIDER_VENDORS[0];
+  let lastDefault = vendMeta().url;
+  const applyVendor = () => {
+    const v = vendMeta();
+    // prefill the well-known endpoint, but never stomp a user-edited URL
+    if (!urlIn.value.trim() || urlIn.value.trim() === lastDefault) {
+      urlIn.value = v.url;
+    }
+    lastDefault = v.url;
+    urlIn.placeholder = v.urlPh || v.url || "https://…";
+    if (!hasKey) keyIn.placeholder = v.keyPh;
+    sshRow.classList.toggle("hidden", v.id !== "llama-cpp");
+    untestedNote.classList.toggle("hidden", v.id === "llama-cpp");
+  };
+  typeSel.addEventListener("change", applyVendor);
 
   const testBtn = el("button", { class: "btn btn-sm", text: "Test" });
   testBtn.addEventListener("click", async () => {
@@ -240,18 +295,22 @@ function providerDialog(existing) {
     }
   });
 
+  applyVendor();
   modal(existing ? "Edit provider · " + existing.name : "Add provider",
     [el("p", { class: "wiz-hint",
-       text: "A provider is a running llama-server or ninfer API. With an "
-         + "ssh destination the URL is resolved FROM that host and all "
-         + "traffic rides an ssh tunnel - SSH KEYS ONLY (a host that asks "
-         + "for a password fails; load a key into ssh-agent). An API key "
-         + "goes to this machine's OS keyring, never into loom.yaml." }),
+       text: "A provider is an inference API: a llama-server you run "
+         + "yourself, or a hosted vendor account. With an ssh "
+         + "destination the URL is resolved FROM that host and all "
+         + "traffic rides an ssh tunnel - SSH KEYS ONLY (a host that "
+         + "asks for a password fails; load a key into ssh-agent). An "
+         + "API key goes to this machine's OS keyring, never into "
+         + "loom.yaml." }),
      el("div", { class: "ts-row" }, el("label", { text: "Name" }), nameIn),
-     el("div", { class: "ts-row" }, el("label", { text: "Type" }), typeSel),
+     el("div", { class: "ts-row" }, el("label", { text: "Vendor" }), typeSel),
      el("div", { class: "ts-row" }, el("label", { text: "URL" }), urlIn),
-     el("div", { class: "ts-row" }, el("label", { text: "SSH" }), sshIn),
+     sshRow,
      el("div", { class: "ts-row" }, el("label", { text: "API key" }), keyIn),
+     untestedNote,
      el("div", { class: "ts-row" }, el("label", { text: "" }), testBtn),
      status],
     [

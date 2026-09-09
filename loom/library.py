@@ -98,14 +98,16 @@ DEFAULT_LOOM_YAML = """\
 # loom.yaml - this library's configuration. (loom.yml works too.)
 
 # Inference providers - the HTTP APIs Loom talks to. Loom does NOT
-# launch inference: run llama.cpp's `llama-server` or `ninfer-serve`
-# yourself and point an entry at it. Models are pulled live from each
-# provider's API (GET /v1/models).
+# launch inference: run llama.cpp's `llama-server` yourself and point
+# an entry at it, or use a hosted vendor (openai | anthropic | gemini |
+# vertex | bedrock - new, lightly tested).
 providers: []
 # Complete example - every field:
 # - name: workstation           # required - how chats refer to it
-#   type: llama-cpp             # llama-cpp | ninfer
-#   url: http://127.0.0.1:8080  # required - the API's base URL
+#   vendor: llama-cpp           # llama-cpp | openai | anthropic |
+#                               # gemini | vertex | bedrock
+#   url: http://127.0.0.1:8080  # the API's base URL (hosted vendors
+#                               # have a default; Vertex AI needs yours)
 #   ssh: ""                     # default "" = connect directly; else an
 #                               # ssh destination - the url is resolved
 #                               # FROM that host over an ssh stdio
@@ -143,6 +145,7 @@ permission-modes:
       find_files: allow
       write_file: ask
       edit_file: ask
+      deliver_artifact: ask
       shell: ask
   allow-edits:         # edits and sandboxed shell run without asking
     tools:
@@ -153,6 +156,7 @@ permission-modes:
       find_files: allow
       write_file: allow
       edit_file: allow
+      deliver_artifact: allow
       shell: allow
   always-allow:        # everything runs without asking
     tools:
@@ -163,6 +167,7 @@ permission-modes:
       find_files: allow
       write_file: allow
       edit_file: allow
+      deliver_artifact: allow
       shell: allow
   # read-only:         # example custom mode
   #   tools:

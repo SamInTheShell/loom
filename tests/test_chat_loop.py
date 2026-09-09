@@ -1,5 +1,5 @@
 """End-to-end chat loop test against a FAKE inference provider speaking
-SSE over plain HTTP (exactly how Loom reaches llama-server / ninfer now)
+SSE over plain HTTP (exactly how Loom reaches llama-server now)
 - exercises streaming deltas, live timings + prompt-progress forwarding,
 a tool call (knowledge_search, allowed by default), the second turn,
 stats injection, persistence, and the ask-gate deny path. No GUI, no
@@ -74,7 +74,7 @@ class FakeLlama(BaseHTTPRequestHandler):
             self.wfile.flush()
             return
 
-        # prompt-processing progress, llama.cpp/ninfer shape
+        # prompt-processing progress, llama.cpp shape
         sse({"choices": [{"delta": {}}],
              "prompt_progress": {"total": 7, "cache": 2, "processed": 7,
                                  "time_ms": 12}})
@@ -123,7 +123,7 @@ def start_fake(mode, tool_name="knowledge_search", tool_args=None):
 
 def point_config(root, server):
     (root / "loom.yaml").write_text(
-        "providers:\n- name: fakeprov\n  type: llama-cpp\n"
+        "providers:\n- name: fakeprov\n  vendor: llama-cpp\n"
         f"  url: http://127.0.0.1:{server.server_address[1]}\n"
         "chat:\n  model: fake\n"
         "permissions:\n  tools:\n    knowledge_search: allow\n"
@@ -331,10 +331,13 @@ with tempfile.TemporaryDirectory() as d:
     # ---------- a mode switch re-decides calls already waiting at the gate
     # (the plumbing chat_set_mode drives: pending_for → permission_for →
     # answer) ----------
+    work4 = root.parent / "work4"
+    work4.mkdir(exist_ok=True)
     server4 = start_fake("tools", "write_file",
-                         {"path": "/artifacts/x.txt", "content": "hey"})
+                         {"path": "/mnt/work4/x.txt", "content": "hey"})
     point_config(root, server4)
     c4 = chats.new_chat(root, "fake")
+    c4["folders"] = [{"path": str(work4), "mode": "write"}]
     c4["messages"].append({"role": "user", "content": "write it"})
     chats.save_chat(root, c4)
     waited4 = threading.Event()

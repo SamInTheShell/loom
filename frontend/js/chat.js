@@ -722,7 +722,8 @@ function refreshChatModelSelectors() {
  * kwarg / think prompt switch), then the level. */
 const REASONING_METHODS = [
   { id: "effort", name: "reasoning_effort",
-    sub: "graded - llama.cpp: any string · ninfer: off/low/medium/xhigh",
+    sub: "graded - the OpenAI-style request field (Anthropic providers "
+      + "map it to a thinking budget)",
     levels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"] },
   { id: "template", name: "enable_thinking",
     sub: "boolean template kwarg (Qwen3-style) · on/off",
@@ -817,8 +818,8 @@ function modelMenu(anchor, chatId) {
         el("div", { class: "popup-cta" },
           el("button", {
             class: "btn btn-sm btn-acc", text: "Add provider…",
-            title: "Point Loom at a llama-server or ninfer API",
-            onclick: () => { close(); openTab("servers"); setTimeout(() => addProviderDialog(), 50); },
+            title: "Point Loom at a llama-server or a hosted vendor API",
+            onclick: () => { close(); openTab("servers"); setTimeout(() => providerDialog(), 50); },
           })));
       return;
     }
@@ -833,7 +834,8 @@ function modelMenu(anchor, chatId) {
         el("span", { class: "pi-col" },
           el("span", { class: "pi-name", text: p.name }),
           el("span", { class: "pi-reason",
-            text: p.type + (p.ssh ? " · ssh " + p.ssh : "")
+            text: (p.vendor || "llama-cpp")
+              + (p.ssh ? " · ssh " + p.ssh : "")
               + (stt.state === "ok" ? " · " + (stt.models?.length || 0) + " model(s)"
                  : stt.state === "error" ? " · unreachable" : "") })),
         el("span", { class: "caret", text: "▸" }));
@@ -867,13 +869,36 @@ function modelMenu(anchor, chatId) {
       backRow(list, "Providers", () => { filter = ""; menu._filterIn.value = ""; view = { mode: "prov" }; render(); });
     }
     const stt = st.providers?.[provName];
+    // some vendors (Vertex AI) list no models at all - the id is typed
+    const typedRow = () => el("div", {
+      class: "popup-item",
+      onclick: () => {
+        close();
+        promptModal("Model id · " + provName,
+          "The exact id this provider serves (e.g. "
+          + "gemini-2.0-flash, claude-sonnet-4-5, gpt-4o).",
+          chatState(chatId).chat?.model || "", async (v) => {
+            const id = v.trim();
+            if (!id) return;
+            const cs2 = chatState(chatId);
+            cs2.chat.provider = provName;
+            cs2.chat.model = id;
+            const r = await Api.call("chat_set_model", chatId, provName, id);
+            if (!r.ok) { toast(r.error, "err"); return; }
+            refreshChatSilently(chatId);
+            renderModelButton(chatId);
+          }, "Use model");
+      },
+    },
+      el("span", { class: "pi-name", text: "✎ Type a model id…" }));
     const models = providerModels(provName).filter((mo) => matches(mo.id));
     if (!models.length) {
       list.append(el("div", { class: "popup-empty",
         text: !stt ? "Asking " + provName + " for its models…"
           : stt.state === "error" ? (stt.detail || "provider unreachable")
           : filter ? "No models match the filter."
-          : "The provider lists no models." }));
+          : (stt.detail || "The provider lists no models.") }));
+      if (stt && stt.state !== "error") list.append(typedRow());
       if (!stt) loadModels(provName);
       return;
     }
@@ -2666,7 +2691,7 @@ function renderChatToolsbar(chatId) {
   setHotkey(pill("arts", "box",
     "artifacts" + (!artsOn ? " · off" : nArts ? " · " + nArts : ""),
     !artsOn ? " off-warn" : nArts ? " on" : "",
-    "Files the model delivered, and the /artifacts on/off cut  (Ctrl+[)",
+    "Files the model delivered, and the delivery on/off cut  (Ctrl+[)",
     (e) => artifactsMenu(e.currentTarget, chatId)), "Ctrl+[");
 
   // env signals: only when an environment is loaded
@@ -2844,10 +2869,14 @@ function mcpToolsMenu(anchor, chatId) {
           renderChatToolsbar(chatId);
           refreshChatSilently(chatId);   // tool specs move
         });
-        menu.append(el("div", { class: "ttrav-row" },
+        // ctx-item = arrow-navigable; Enter lands focus on the select,
+        // whose own arrows then cycle the levels
+        const row = el("div", { class: "ctx-item ttrav-row",
+          onclick: (e) => { if (e.target !== sel) sel.focus(); } },
           el("span", { class: "mcp-fn", text: t.fullName,
             title: t.description || "" }),
-          el("span", { class: "spacer" }), sel));
+          el("span", { class: "spacer" }), sel);
+        menu.append(row);
       }
     });
   });
@@ -2865,9 +2894,9 @@ function artifactsMenu(anchor, chatId) {
         class: "btn btn-sm" + (on ? " btn-acc" : " btn-danger"),
         text: on ? "on" : "off",
         title: on
-          ? "Click to disable /artifacts for this chat - not mounted, "
-            + "refused by tools, no new deliveries"
-          : "Click to enable /artifacts again",
+          ? "Click to disable artifact delivery for this chat - the "
+            + "deliver_artifact tool goes away; no new deliveries"
+          : "Click to enable artifact delivery again",
       });
       tog.addEventListener("click", async () => {
         const r = await Api.call("chat_set_artifacts", chatId, !on);
@@ -2891,24 +2920,26 @@ function artifactsMenu(anchor, chatId) {
       }
       for (const a of arts) {
         const isImg = !a.dir && /\.(png|jpe?g|webp|gif|bmp)$/i.test(a.name);
-        const open = el("span", { class: "mcp-fn", text: a.name,
-          title: (a.dir ? "folder - saves as a zip" : "file") + " · "
-            + fmtBytes(a.bytes) + " · click to open" });
-        open.addEventListener("click",
-          () => Api.call("artifact_open", chatId, a.name));
-        menu.append(el("div", { class: "ttrav-row" },
+        // ctx-item = arrow-navigable; Enter (the row's click) opens it
+        menu.append(el("div", { class: "ctx-item ttrav-row",
+          onclick: () => Api.call("artifact_open", chatId, a.name) },
           el("span", { html: icon(a.dir ? "box" : isImg ? "image" : "file", 12) }),
-          open, el("span", { class: "spacer" }),
+          el("span", { class: "mcp-fn", text: a.name,
+            title: (a.dir ? "folder - saves as a zip" : "file") + " · "
+              + fmtBytes(a.bytes) + " · click to open" }),
+          el("span", { class: "spacer" }),
           el("button", { class: "btn btn-sm", text: a.dir ? "zip" : "save",
             title: a.dir ? "Save this folder as a zip…" : "Save this file…",
-            onclick: async () => {
+            onclick: async (e) => {
+              e.stopPropagation();
               const res = await Api.call("artifact_save", chatId, a.name);
               if (!res.ok) { toast(res.error, "err"); return; }
               if (res.data.saved) toast("Saved " + res.data.saved, "ok");
             } }),
           el("button", { class: "msg-act ttrav-clear", text: "×",
             title: "Dismiss - the file and its timeline entry stay",
-            onclick: async () => {
+            onclick: async (e) => {
+              e.stopPropagation();
               const res = await Api.call("artifact_dismiss", chatId, a.name);
               if (!res.ok) { toast(res.error, "err"); return; }
               cs.chat.artifactsDismissed = res.data.dismissed;
@@ -2958,7 +2989,9 @@ function envSignalsMenu(anchor, chatId) {
           renderChatToolsbar(chatId);
           refreshChatSilently(chatId);   // the env prompt line changed
         });
-        menu.append(el("label", { class: "ttrav-row chk" }, ck,
+        // ctx-item = arrow-navigable; Enter clicks the label, which
+        // toggles its checkbox
+        menu.append(el("label", { class: "ctx-item ttrav-row chk" }, ck,
           el("span", { class: "mcp-fn",
             text: v.key + (v.secret ? "  (secret)" : "") })));
       }
@@ -3208,6 +3241,17 @@ function queueThreadRedraw(chatId) {
   });
 }
 
+/* The retry banner announces a PENDING recovery ("the model stopped
+ * without answering - passing the turn back"). The instant the retried
+ * turn produces anything real - streamed text, thinking, a tool call -
+ * the recovery succeeded and the banner is a lie; drop it. Without
+ * this it sat on screen through whole tool runs. */
+function _clearRetryNote(chatId, cs) {
+  if (!cs.retryNote) return;
+  cs.retryNote = null;
+  queueThreadRedraw(chatId);
+}
+
 function onChatEvent(ev) {
   const chatId = ev.chatId;
   const cs = chatState(chatId);
@@ -3228,6 +3272,7 @@ function onChatEvent(ev) {
       renderTabs();
       break;
     case "delta": {
+      _clearRetryNote(chatId, cs);
       cs.live = cs.live || { text: "", think: "" };
       cs.live.text += ev.text;
       // fast path: patch the live body in place when it's on screen -
@@ -3252,6 +3297,7 @@ function onChatEvent(ev) {
       break;
     }
     case "think": {
+      _clearRetryNote(chatId, cs);
       cs.live = cs.live || { text: "", think: "" };
       cs.live.think += ev.text;
       // fast path mirrors delta: patch the live think block in place -
@@ -3272,11 +3318,13 @@ function onChatEvent(ev) {
       break;
     }
     case "tool_begin":
+      _clearRetryNote(chatId, cs);
       cs.tools[ev.callId] = { tool: ev.tool, state: "announced" };
       cs.followTail = false;   // the NEXT turn's reply re-clamps too
       queueThreadRedraw(chatId);
       break;
     case "tool_call":
+      _clearRetryNote(chatId, cs);
       cs.tools[ev.callId] = {
         tool: ev.tool, args: ev.args, perm: ev.perm, state: "announced",
       };
@@ -3305,6 +3353,11 @@ function onChatEvent(ev) {
       cs.liveTimings = null;
       cs.turnT0 = performance.now();       // its prefill clock restarts
       refreshChatSilently(chatId);
+      break;
+    case "notice":
+      // the worker flagged something the user must know (a truncated
+      // reply, unparsed tool-call markup) - visible, never silent
+      toast(ev.msg, "warn", 6500);
       break;
     case "retry":
       // the turn ended without an answer (a thought that halted, an
@@ -3338,7 +3391,7 @@ function onChatEvent(ev) {
       refreshArchiveTab();
       break;
     case "artifacts":
-      // the model left something in /artifacts - surface it immediately
+      // the model delivered an artifact - surface it immediately
       if (cs.chat) cs.chat.artifacts = ev.items || [];
       renderAttachBar(chatId);
       if (ev.fresh?.length) {
@@ -3347,6 +3400,7 @@ function onChatEvent(ev) {
       }
       break;
     case "compact_start":
+      _clearRetryNote(chatId, cs);   // something new took over the chat
       cs.compacting = true;
       cs.compactTok = 0;
       queueThreadRedraw(chatId);

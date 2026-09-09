@@ -170,6 +170,16 @@ function closeCtxTop() {
 /* ---------- menu keyboard: arrows walk, Enter picks, 1-9 jump ---------- */
 const MENU_ITEM_SEL = ".ctx-item, .popup-item";
 
+/* MENU_ITEM_SEL with a class suffix on EVERY alternative. Naive string
+ * concatenation binds the suffix to the last alternative only -
+ * ".ctx-item, .popup-item.sel" matches every bare .ctx-item, which
+ * broke arrow navigation in every .ctx-item menu (the cursor never
+ * seeded and always "started" at the first row). */
+function _menuSel(suffix) {
+  return MENU_ITEM_SEL.split(",")
+    .map((s) => s.trim() + suffix).join(", ");
+}
+
 function _menuItems(menu) {
   return [...menu.querySelectorAll(MENU_ITEM_SEL)];
 }
@@ -190,7 +200,7 @@ function _numberMenuItems(menu) {
 }
 
 function _menuKeyHandler(menu, close) {
-  const selected = () => menu.querySelector(MENU_ITEM_SEL + ".kbd-sel");
+  const selected = () => menu.querySelector(_menuSel(".kbd-sel"));
   const setSel = (item) => {
     selected()?.classList.remove("kbd-sel");
     if (item) {
@@ -206,7 +216,7 @@ function _menuKeyHandler(menu, close) {
     // model/mode row carries .sel) so arrows continue from it
     let i = items.indexOf(selected());
     if (i < 0) {
-      const anchor = items.indexOf(menu.querySelector(MENU_ITEM_SEL + ".sel"));
+      const anchor = items.indexOf(menu.querySelector(_menuSel(".sel")));
       if (anchor >= 0) i = anchor;
       else {
         setSel(items[delta > 0 ? 0 : items.length - 1]);
@@ -220,6 +230,13 @@ function _menuKeyHandler(menu, close) {
     const inField = e.target.closest
       && e.target.closest("input, textarea, [contenteditable='true']");
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      // vertical arrows belong to a focused VALUE control (selects
+      // cycle options, ranges/numbers step) - text fields keep menu
+      // navigation (the model menu's filter drives its list)
+      if (e.target.closest && e.target.closest(
+          "select, input[type='range'], input[type='number']")) {
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
       move(e.key === "ArrowDown" ? 1 : -1);
@@ -227,7 +244,7 @@ function _menuKeyHandler(menu, close) {
       // descend into a submenu: rows whose CLICK descends carry
       // data-submenu; rows whose click picks a value but still have a
       // deeper layer (a model's reasoning) register row._submenu instead
-      const cur = selected() || menu.querySelector(MENU_ITEM_SEL + ".sel");
+      const cur = selected() || menu.querySelector(_menuSel(".sel"));
       if (cur && typeof cur._submenu === "function") {
         e.preventDefault();
         e.stopPropagation();
@@ -285,8 +302,11 @@ function _armOverlay(menu, close) {
   // what makes the first arrow press move relative to the current value
   // instead of jumping to the top of the list.
   const seedCursor = () => {
-    if (menu.querySelector(MENU_ITEM_SEL + ".kbd-sel")) return;
-    menu.querySelector(MENU_ITEM_SEL + ".sel")?.classList.add("kbd-sel");
+    if (menu.querySelector(_menuSel(".kbd-sel"))) return;
+    // the current selection is the starting position; a menu with no
+    // selection reference starts at the top
+    const anchor = menu.querySelector(_menuSel(".sel")) || _menuItems(menu)[0];
+    anchor?.classList.add("kbd-sel");
   };
   // popup menus fill their lists asynchronously - number whatever appears
   const obs = new MutationObserver(() => { _numberMenuItems(menu); seedCursor(); });

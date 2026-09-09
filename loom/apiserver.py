@@ -19,9 +19,9 @@ model, that serves - drop-in clients that send "gpt-4o-mini" just work.
 
 AUTH: an optional API key. When set, every route except /health
 requires `Authorization: Bearer <key>` or `x-api-key: <key>` (the same
-contract llama-server and ninfer use, so the same client config works
-against all three). The key itself lives in the OS keyring, never in
-loom.yaml - the caller passes it to start().
+contract llama-server uses, so the same client config works). The key
+itself lives in the OS keyring, never in loom.yaml - the caller passes
+it to start().
 
 Responses stream: bytes are pumped from the provider connection to the
 client as they arrive (SSE included), one connection per request.
@@ -126,7 +126,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _authed(self) -> bool:
         """True when no key is set, or the request carries it. Bearer
-        and x-api-key both count (matches llama-server and ninfer);
+        and x-api-key both count (matches llama-server);
         constant-time comparison."""
         key = str(getattr(self.server, "loom_api_key", "") or "")
         if not key:
@@ -257,9 +257,22 @@ class _Handler(BaseHTTPRequestHandler):
             payload = dict(payload or {})
             payload["model"] = mid
             body = json.dumps(payload).encode("utf-8")
+        # this proxy speaks OpenAI end to end; an Anthropic provider
+        # would need the /v1/messages adapter, which lives in the chat
+        # loop, not here - refuse honestly instead of garbling
+        vend = providers.vendor_of(prov)
+        if vend["dialect"] != "openai":
+            self._err(501, f"model {name!r} is served by an Anthropic "
+                      "provider - the API server cannot proxy that "
+                      "dialect yet; use it from Loom's chats")
+            return
+        # hosted vendors mount the API under their base URL (which
+        # already ends in /v1 or equivalent) - strip our /v1 prefix
+        upstream = path if vend["chatPath"].startswith("/v1") \
+            else (path[3:] if path.startswith("/v1") else path)
         try:
             resp = providers.request(
-                prov, "POST", path, body,
+                prov, "POST", upstream, body,
                 {"Content-Type": "application/json"}, timeout=GEN_TIMEOUT)
         except urllib.error.HTTPError as e:
             data = e.read()

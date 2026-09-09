@@ -1,20 +1,29 @@
 # Providers and models
 
-Loom does **not** launch inference. You run an inference server
-yourself - llama.cpp's `llama-server` or `ninfer-serve` - wherever the
-hardware lives, and Loom talks to its HTTP API. Each such endpoint is a
-**provider** in `loom.yaml`; the models come from the provider's own
-API (`GET /v1/models`), so there is nothing to configure about model
-files, flags, or process management here.
+Loom does **not** launch inference. A **provider** in `loom.yaml` is
+either a llama.cpp `llama-server` you run yourself (a modern build -
+Loom reads the served context from `meta.n_ctx` on `/v1/models`), or a
+**hosted vendor**: OpenAI, Anthropic, Google Gemini, Google Vertex AI,
+or Amazon Bedrock. Gemini, Vertex and Bedrock are reached through
+their OpenAI-compatible endpoints; Anthropic gets a dedicated
+`/v1/messages` adapter. Hosted-vendor support is **new and untested
+against the live APIs** - please report anything that misbehaves so we
+can improve it. Models come from each provider's own listing where the
+vendor has one (Vertex doesn't - you type the model id).
 
 ## loom.yaml provider entries
 
 ```yaml
 providers:
 - name: workstation           # how chats refer to it
-  type: llama-cpp             # llama-cpp | ninfer
-  url: http://127.0.0.1:8080  # the API's base URL
+  vendor: llama-cpp           # llama-cpp | openai | anthropic |
+                              # gemini | vertex | bedrock
+  url: http://127.0.0.1:8080  # base URL (hosted vendors have a
+                              # default; Vertex AI needs yours)
   ssh: ""                     # optional ssh destination (see below)
+- name: claude
+  vendor: anthropic           # API key via the provider card's Key
+                              # button - the OS keyring, never here
 
 chat:
   provider: workstation       # default provider for new chats
@@ -23,8 +32,25 @@ chat:
 
 Start `llama-server` however you like (`llama-server -m model.gguf
 --port 8080 --jinja …`) - see [inference tips](inference-tips.md) for
-flags worth knowing. Tool calling needs `--jinja` on llama-server;
-ninfer speaks tools out of the box.
+flags worth knowing. Tool calling needs `--jinja` on llama-server.
+
+**Truncated long replies?** Some servers cap output per request unless
+the client asks for more (ninfer-style servers default to 8192 tokens),
+which cuts big replies - and big tool calls - mid-stream. Set
+`chat.max_output` in loom.yaml (or the Chat defaults dialog) and Loom
+sends it as `max_tokens` on every turn; 0 leaves the server's own
+default in charge. When a cut still happens: a truncated *answer* is
+marked stopped (Continue resumes it), and a truncated or unparseable
+*tool call* is **discarded and replaced with a failed tool result**
+naming the limit that caused it - the loop keeps going and the model
+retries with smaller pieces. Three broken calls in a row stop the loop
+honestly. Relatedly, `chat.read_gate` (default 32768 tokens) keeps the
+model from reading huge files whole - `read_file` refuses past the
+gate and the model reads offset/limit slices instead; 0 disables it.
+Hosted vendors speak tools out of the box; note that they don't report
+a context window, so the ctx chip shows an estimate against an unknown
+limit, and live tok/s + prompt-progress (llama.cpp extensions) don't
+apply.
 
 ## Over SSH
 

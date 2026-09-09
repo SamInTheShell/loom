@@ -1,15 +1,16 @@
 """The chat loop - streaming inference against a configured provider
-(llama.cpp's llama-server or ninfer, over HTTP, optionally through an ssh
-tunnel), with tools, loom.yaml-driven permissions, and container-backed
-shell.
+(a llama-server over HTTP - optionally through an ssh tunnel - or a
+hosted vendor API), with tools, loom.yaml-driven permissions, and
+container-backed shell.
 
 Message flow mirrors llama.cpp's web chat: one streaming POST to
 /v1/chat/completions per turn (SSE), deltas pushed to the page as they
 arrive. `timings_per_token` + `stream_options.include_usage` +
 `return_progress` are injected so token stats, LIVE tok/s, and prompt-
-processing progress are always present (both llama-server and ninfer
-speak these llama.cpp-style extensions; servers that don't simply omit
-the fields).
+processing progress are always present on llama-server; hosted
+vendors reject unknown fields, so the extensions only ride when the
+provider's vendor speaks them. Anthropic uses a different dialect
+entirely - see the /v1/messages adapter below.
 
 Agent loop: stream a turn → if the model called tools, resolve each
 against loom.yaml permissions (allow / ask / deny), run the allowed ones,
@@ -35,6 +36,7 @@ import base64
 import http.client
 import json
 import re
+import shutil
 import threading
 import time
 import traceback
@@ -205,10 +207,18 @@ GATE = _Gate()
 # --------------------------------------------------------------------------
 # tools
 
-# read_file refuses whole files past ~25k tokens (~4 chars/token) - the
-# model must read big files in offset/limit slices instead
-READ_GATE_CHARS = 100_000
+# read_file refuses whole files past the configured token gate
+# (chat.read_gate, default 32768; ~4 chars/token) - the model must read
+# big files in offset/limit slices instead of sucking them up whole
+READ_GATE_TOKENS_DEFAULT = 32768
 READ_SLICE_MAX_LINES = 2000
+
+
+def _read_gate_chars(cfg: dict) -> int:
+    """The whole-read gate in CHARS (0 = no gate)."""
+    tokens = int((cfg.get("chat") or {}).get(
+        "read_gate", READ_GATE_TOKENS_DEFAULT) or 0)
+    return tokens * 4
 
 
 def perm_for(cfg: dict | None, name: str, mode: str = "",
@@ -240,11 +250,11 @@ def tool_specs(cfg: dict | None = None, mode: str = "",
                mcp_perms: dict | None = None) -> list[dict]:
     """The tools offered this turn - built-ins plus every tool of every
     RUNNING MCP server. A tool at level `disabled` in the active
-    permission mode is not offered at all. Every chat has the
-    write tools and shell: /artifacts is writable (unless the chat's
-    artifacts chip disabled it - `artifacts` False drops it from every
-    description), and view-mode mounts are enforced read-only by the
-    container itself.
+    permission mode is not offered at all. Artifacts are OUTBOUND
+    deliverables only, handed over via deliver_artifact (dropped when
+    the chat's artifacts chip is off - `artifacts` False); there is no
+    artifacts folder or mount. View-mode mounts are enforced read-only
+    by the container itself.
 
     `network` (when known: none / loopback / on, legacy bools accepted)
     is spelled out in the shell tool's own description - the model reads
@@ -290,12 +300,11 @@ def tool_specs(cfg: dict | None = None, mode: str = "",
     add("read_file",
         "Read a text file. Paths: "
         + ("/knowledge/<...> for the knowledge base, " if knowledge else "")
-        + "/mnt/<folder>/<...> for attached folders"
-        + (", /artifacts/<...> for this chat's artifact folder"
-           if artifacts else "")
-        + ". Files over ~25k tokens "
-        "refuse a whole-file read - pass offset (1-based line) and limit "
-        "(line count) to read a slice; grep first to find the right spot.",
+        + "/mnt/<folder>/<...> for attached folders, /uploads/<...> for "
+        "files the user uploaded. Large files refuse a whole-file read "
+        "(the error names the gate) - pass offset (1-based line) and "
+        "limit (line count) to read a slice; grep first to find the "
+        "right spot.",
         {"path": {"type": "string"},
          "offset": {"type": "integer", "description": "1-based start line"},
          "limit": {"type": "integer", "description": "max lines to return"}},
@@ -306,9 +315,9 @@ def tool_specs(cfg: dict | None = None, mode: str = "",
     add("edit_file",
         "Edit a text file by exact string replacement: old_string must "
         "match the file contents exactly and be UNIQUE (or set "
-        "replace_all true). Works inside write-mode attached folders"
-        + (" and /artifacts" if artifacts else "")
-        + ". Prefer this over write_file for existing files.",
+        "replace_all true). Works inside write-mode attached folders "
+        "(/mnt/<folder>/<...>). Prefer this over write_file for "
+        "existing files.",
         {"path": {"type": "string"},
          "old_string": {"type": "string"},
          "new_string": {"type": "string"},
@@ -316,12 +325,29 @@ def tool_specs(cfg: dict | None = None, mode: str = "",
         ["path", "old_string", "new_string"])
     add("write_file",
         "Create or overwrite a text file inside a write-mode attached "
-        "folder (/mnt/<folder>/<...>)"
-        + (" or /artifacts. Files and folders you place in /artifacts "
-           "are delivered to the user as chat attachments." if artifacts
-           else "."),
+        "folder (/mnt/<folder>/<...>). This is for WORK, not delivery - "
+        "files for the user go through deliver_artifact.",
         {"path": {"type": "string"}, "content": {"type": "string"}},
         ["path", "content"])
+    if artifacts:
+        add("deliver_artifact",
+            "Deliver a FINISHED file or folder to the user as a "
+            "downloadable chat attachment (folders arrive as zip "
+            "downloads). This is the ONLY way to give the user files. "
+            "Artifacts are OUTBOUND deliverables only - not storage, "
+            "not a workspace; you cannot read or edit them back. Do "
+            "the work first (in /home/loom, which persists for this "
+            "chat, or a write-mode /mnt folder), then deliver the "
+            "result. Pass `path` (/home/loom/<...> or /mnt/<...>) to "
+            "deliver an existing file or folder, OR `name` + `content` "
+            "to deliver a text file directly.",
+            {"path": {"type": "string",
+                      "description": "existing file/folder to deliver"},
+             "name": {"type": "string",
+                      "description": "the delivered file's name"},
+             "content": {"type": "string",
+                         "description": "text content (with `name`)"}},
+            [])
     # nmode, NOT mode - `mode` is the permission mode the level() closure
     # reads; shadowing it silently re-enabled disabled tools once.
     # SIGNAL ONLY WHEN RESTRICTED: "online" is what every model assumes,
@@ -355,10 +381,13 @@ def tool_specs(cfg: dict | None = None, mode: str = "",
         + "Attached folders are under /mnt (view mode mounts read-only)"
         + (", the knowledge base is at /knowledge (read-only)"
            if knowledge else "")
-        + (", and /artifacts is read-write - anything left there is "
-           "delivered to the user. " if artifacts else
-           ". This chat's /artifacts delivery folder is DISABLED - it is "
-           "not mounted; do not write there. ")
+        + ", and the user's uploads are at /uploads (read-only). Your "
+        "home /home/loom persists across this chat's commands - work "
+        "there. There is NO artifacts folder: files for the user are "
+        + ("delivered only with the deliver_artifact tool. "
+           if artifacts else
+           "not deliverable in this chat (artifact delivery is "
+           "disabled). ")
         + "ALWAYS set `timeout` to fit the command - a hung command runs "
         "until the timeout kills it.",
         {"command": {"type": "string"},
@@ -433,16 +462,20 @@ def _resolve_path(root: Path, chat: dict, path: str) -> tuple[str, Path, str]:
         host = library.safe_join(root, p)
         return ("knowledge", host, "view")
     if p == "/artifacts" or p.startswith("/artifacts/"):
-        if chat.get("artifactsOff"):
-            raise chats.ChatError(
-                "artifacts are disabled for this chat - ask the user to "
-                "flip the artifacts chip if a file should be delivered")
-        base = chats.artifacts_dir(root, str(chat["id"]), create=True)
-        rel = p[len("/artifacts/"):] if len(p) > len("/artifacts") else ""
+        # there IS no artifacts folder anymore - artifacts are outbound
+        # deliverables, not a place. The refusal teaches the channel.
+        raise chats.ChatError(
+            "there is no /artifacts folder - artifacts are files you "
+            "DELIVER to the user with the deliver_artifact tool, not a "
+            "workspace. Work in /home/loom or a write-mode /mnt folder, "
+            "then deliver the finished file.")
+    if p == "/uploads" or p.startswith("/uploads/"):
+        base = _uploads_dir(root, str(chat["id"]))
+        rel = p[len("/uploads/"):] if len(p) > len("/uploads") else ""
         host = (base / rel).resolve() if rel else base
         if host != base and base not in host.parents:
-            raise chats.ChatError(f"path escapes /artifacts: {path}")
-        return ("artifact", host, "write")
+            raise chats.ChatError(f"path escapes /uploads: {path}")
+        return ("upload", host, "view")
     if p.startswith("/mnt/"):
         parts = p[5:].split("/", 1)
         mounts = _mount_map(chat)
@@ -454,8 +487,15 @@ def _resolve_path(root: Path, chat: dict, path: str) -> tuple[str, Path, str]:
             raise chats.ChatError(f"path escapes the attached folder: {path}")
         return ("mount", host, _folder_mode(chat, base))
     raise chats.ChatError(
-        f"unknown path {path!r} - use /knowledge/<...>, /mnt/<folder>/<...>, "
-        "or /artifacts/<...>")
+        f"unknown path {path!r} - use /knowledge/<...>, "
+        "/mnt/<folder>/<...>, or /uploads/<...>")
+
+
+def _uploads_dir(root: Path, chat_id: str) -> Path:
+    """The user's uploaded files for this chat (host side). Mounted
+    read-only at /uploads in containers; kept under the artifacts dir
+    on disk for compatibility, but NEVER part of the delivery list."""
+    return chats.artifacts_dir(root, chat_id) / "uploads"
 
 
 def _search_scopes(root: Path, chat: dict, path: str) -> list[tuple[str, Path]]:
@@ -466,9 +506,7 @@ def _search_scopes(root: Path, chat: dict, path: str) -> list[tuple[str, Path]]:
         scopes = []
         if not chat.get("knowledgeOff"):
             scopes.append(("/knowledge/", root / "knowledge"))
-        if not chat.get("artifactsOff"):
-            scopes.append(("/artifacts/",
-                           chats.artifacts_dir(root, str(chat["id"]))))
+        scopes.append(("/uploads/", _uploads_dir(root, str(chat["id"]))))
         for n, hp in _mount_map(chat).items():
             scopes.append((f"/mnt/{n}/", hp))
         return [(d, h) for d, h in scopes if h.is_dir()]
@@ -507,10 +545,10 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
 
     if name == "edit_file":
         kind, host, mode = _resolve_path(root, chat, str(args.get("path") or ""))
-        if kind not in ("mount", "artifact") or mode != "write":
+        if kind != "mount" or mode != "write":
             raise chats.ChatError(
                 "edit_file only works inside write-mode attached folders "
-                "or /artifacts")
+                "(/mnt/<folder>/<...>)")
         if not host.is_file():
             raise chats.ChatError(f"no such file: {args.get('path')}")
         data = host.read_bytes()
@@ -561,9 +599,9 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
             if not chat.get("knowledgeOff"):
                 out.append("/knowledge/  (library knowledge base, "
                            "read-only)")
-            if not chat.get("artifactsOff"):
-                out.append("/artifacts/  (read-write - files here are "
-                           "delivered to the user)")
+            if _uploads_dir(root, str(chat["id"])).is_dir():
+                out.append("/uploads/  (files the user uploaded, "
+                           "read-only)")
             for n, p in mounts.items():
                 mode = _folder_mode(chat, p)
                 out.append(f"/mnt/{n}/  ({'read-write' if mode == 'write' else 'read-only'})")
@@ -589,12 +627,14 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
         text = data.decode("utf-8", "replace")
         offset = args.get("offset")
         limit = args.get("limit")
+        gate = _read_gate_chars(cfg)
         if offset is None and limit is None:
-            if len(text) > READ_GATE_CHARS:
+            if gate and len(text) > gate:
                 lines_total = text.count("\n") + 1
                 raise chats.ChatError(
                     f"the file is ~{len(text) // 4} tokens ({lines_total} "
-                    "lines) - too large for a whole-file read. Pass offset "
+                    f"lines) - past the whole-file read gate of "
+                    f"~{gate // 4} tokens (chat.read_gate). Pass offset "
                     "(1-based line) and limit (line count) to read a "
                     "slice, and grep to find the right region first")
             return text
@@ -607,20 +647,29 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
         count = max(1, min(count, READ_SLICE_MAX_LINES))
         sel = lines[start - 1:start - 1 + count]
         body = "\n".join(sel)
-        if len(body) > READ_GATE_CHARS:
-            body = body[:READ_GATE_CHARS] + "\n[slice truncated - use a smaller limit]"
+        if gate and len(body) > gate:
+            body = body[:gate] + "\n[slice truncated - use a smaller limit]"
         return (f"[lines {start}-{start + len(sel) - 1} of {len(lines)}]\n"
                 + body)
 
     if name == "write_file":
         kind, host, mode = _resolve_path(root, chat, str(args.get("path") or ""))
-        if kind not in ("mount", "artifact") or mode != "write":
+        if kind != "mount" or mode != "write":
             raise chats.ChatError(
                 "write_file only works inside write-mode attached folders "
-                "or /artifacts")
+                "(/mnt/<folder>/<...>) - files FOR THE USER go through "
+                "deliver_artifact")
         host.parent.mkdir(parents=True, exist_ok=True)
         host.write_text(str(args.get("content") or ""), encoding="utf-8")
         return f"wrote {len(str(args.get('content') or ''))} bytes"
+
+    if name == "deliver_artifact":
+        if chat.get("artifactsOff"):
+            raise chats.ChatError(
+                "artifact delivery is disabled for this chat - ask the "
+                "user to flip the artifacts chip if a file should be "
+                "delivered")
+        return _deliver_artifact(root, chat, args)
 
     if name == "shell":
         engine, image = containers.ensure_image_named(
@@ -647,8 +696,7 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
             network=net,
             knowledge=None if chat.get("knowledgeOff")
             else root / "knowledge",
-            artifacts=None if chat.get("artifactsOff")
-            else chats.artifacts_dir(root, str(chat["id"]), create=True),
+            uploads=_uploads_dir(root, str(chat["id"])),
             extra_env=extra_env)
         # the shell has THREE honest outcomes, and the card must show the
         # right one: ok (exit 0) / failed (nonzero exit, timeout) /
@@ -684,6 +732,76 @@ def _exec_tool(root: Path, cfg: dict, chat: dict, name: str, args: dict,
         return out, status
 
     raise chats.ChatError(f"unknown tool: {name}")
+
+
+_DELIVER_MAX_BYTES = 1_000_000_000   # sanity cap on a single delivery
+
+
+def _deliver_artifact(root: Path, chat: dict, args: dict) -> str:
+    """The ONE delivery channel: copy a finished file/folder (or write
+    given text) into the chat's delivery dir. Outbound only - nothing
+    here is readable or editable by the model afterwards."""
+    base = chats.artifacts_dir(root, str(chat["id"]), create=True)
+    src_arg = str(args.get("path") or "").strip()
+    content = args.get("content")
+
+    def clean_name(n: str) -> str:
+        n = Path(str(n)).name.strip()
+        if not n or n.startswith(".") or n == "uploads":
+            raise chats.ChatError(f"not a deliverable name: {n!r}")
+        return n
+
+    if src_arg:
+        # deliver an existing file/folder from container-visible space
+        if src_arg.startswith("/home/loom"):
+            home = containers.chat_home(str(chat["id"]))
+            rel = src_arg[len("/home/loom"):].lstrip("/")
+            src = (home / rel).resolve() if rel else home
+            if src != home and home not in src.parents:
+                raise chats.ChatError(f"path escapes /home/loom: {src_arg}")
+        else:
+            kind, src, _mode = _resolve_path(root, chat, src_arg)
+            if kind not in ("mount", "upload"):
+                raise chats.ChatError(
+                    "deliver_artifact takes a source under /home/loom, "
+                    "/mnt/<folder>, or /uploads")
+        if not src.exists():
+            raise chats.ChatError(f"no such file or folder: {src_arg}")
+        name = clean_name(args.get("name") or src.name)
+        dst = base / name
+        if src.is_dir():
+            size = sum(f.stat().st_size for f in src.rglob("*")
+                       if f.is_file())
+            if size > _DELIVER_MAX_BYTES:
+                raise chats.ChatError("that folder is over 1 GB - too "
+                                      "large to deliver")
+            if dst.is_dir():
+                shutil.rmtree(dst)
+            elif dst.exists():
+                dst.unlink()
+            shutil.copytree(src, dst)
+            return (f"delivered folder {name} ({size} bytes) to the user "
+                    "- it arrives as a zip download")
+        size = src.stat().st_size
+        if size > _DELIVER_MAX_BYTES:
+            raise chats.ChatError("that file is over 1 GB - too large "
+                                  "to deliver")
+        if dst.is_dir():
+            shutil.rmtree(dst)
+        shutil.copy2(src, dst)
+        return f"delivered {name} ({size} bytes) to the user"
+
+    if content is not None:
+        name = clean_name(args.get("name") or "")
+        dst = base / name
+        if dst.is_dir():
+            shutil.rmtree(dst)
+        dst.write_text(str(content), encoding="utf-8")
+        return f"delivered {name} ({len(str(content))} bytes) to the user"
+
+    raise chats.ChatError(
+        "pass `path` (an existing file/folder under /home/loom or "
+        "/mnt), or `name` + `content` for a text file")
 
 
 # --------------------------------------------------------------------------
@@ -952,12 +1070,20 @@ def _wire_messages(root: Path, cfg: dict, chat: dict) -> list[dict]:
             ctx.append(line)
     if not chat.get("artifactsOff"):
         ctx.append("")
-        ctx.append("## Artifacts")
-        ctx.append("/artifacts is this chat's read-write delivery folder "
-                   "(shell and file tools). Anything you place there is "
-                   "handed to the user as a chat attachment - folders "
-                   "become zip downloads. The user's uploaded files for "
-                   "this chat are under /artifacts/uploads/.")
+        ctx.append("## Delivering files to the user")
+        ctx.append("The deliver_artifact tool hands the user a finished "
+                   "file or folder as a downloadable attachment (folders "
+                   "become zips). It is the ONLY delivery channel - "
+                   "there is no shared artifacts folder or mount. "
+                   "Deliverables are OUTBOUND ONLY: not storage, not a "
+                   "workspace, and you cannot read them back. Do the "
+                   "work in /home/loom (which persists for this chat) "
+                   "or a write-mode /mnt folder, then deliver the final "
+                   "result.")
+    if _uploads_dir(root, str(chat["id"])).is_dir():
+        ctx.append("")
+        ctx.append("The user's uploaded files for this chat are at "
+                   "/uploads (read-only).")
     out = [{"role": "system", "content": sysp + "\n".join(ctx)}]
     compact, live = _active_slice(chat)
     if compact is not None:
@@ -1079,6 +1205,186 @@ def _sse(resp):
             continue
 
 
+# --------------------------------------------------------------------------
+# the Anthropic dialect - every other vendor (llama-server included)
+# speaks OpenAI chat completions; Anthropic speaks /v1/messages. The
+# adapter is a pure translation at the wire: the request body converts
+# on the way out, the SSE events convert back into OpenAI-delta-shaped
+# chunks on the way in, and everything upstream (the turn loop, tool
+# plumbing, live UI) never knows the difference.
+
+_ANTHROPIC_MAX_TOKENS = 8192
+_ANTHROPIC_BUDGETS = {"low": 2048, "medium": 8192,
+                      "high": 16384, "xhigh": 24576}
+_DATA_URI_RE = re.compile(r"^data:([^;]+);base64,(.*)$", re.S)
+
+
+def _anthropic_body(body: dict) -> dict:
+    """OpenAI-shaped request → Anthropic /v1/messages request."""
+    out = {"model": body.get("model"), "stream": True,
+           "max_tokens": int(body.get("max_tokens")
+                             or _ANTHROPIC_MAX_TOKENS)}
+    sys_parts: list[str] = []
+    msgs: list[dict] = []
+    for m in body.get("messages") or []:
+        role = m.get("role")
+        if role == "system":
+            if isinstance(m.get("content"), str):
+                sys_parts.append(m["content"])
+            continue
+        if role == "tool":
+            # tool results are user-side content blocks
+            msgs.append({"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": str(m.get("tool_call_id") or ""),
+                "content": str(m.get("content") or "")}]})
+            continue
+        if role == "assistant":
+            blocks: list[dict] = []
+            c = m.get("content")
+            if isinstance(c, str) and c:
+                blocks.append({"type": "text", "text": c})
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except ValueError:
+                    args = {}
+                blocks.append({"type": "tool_use",
+                               "id": str(tc.get("id") or ""),
+                               "name": str(fn.get("name") or ""),
+                               "input": args if isinstance(args, dict)
+                               else {}})
+            if blocks:
+                msgs.append({"role": "assistant", "content": blocks})
+            continue
+        # user - plain text, or OpenAI-style parts (text + data-URI images)
+        c = m.get("content")
+        if isinstance(c, list):
+            blocks = []
+            for p in c:
+                if not isinstance(p, dict):
+                    continue
+                if p.get("type") == "text":
+                    blocks.append({"type": "text",
+                                   "text": str(p.get("text") or "")})
+                elif p.get("type") == "image_url":
+                    uri = str((p.get("image_url") or {}).get("url") or "")
+                    dm = _DATA_URI_RE.match(uri)
+                    if dm:
+                        blocks.append({"type": "image", "source": {
+                            "type": "base64", "media_type": dm.group(1),
+                            "data": dm.group(2)}})
+            msgs.append({"role": "user",
+                         "content": blocks or [{"type": "text",
+                                                "text": ""}]})
+        else:
+            msgs.append({"role": "user", "content": str(c or "")})
+    # Anthropic wants strict user/assistant alternation - consecutive
+    # same-role turns (several tool results, artifact notes) merge into
+    # one message of blocks
+    merged: list[dict] = []
+    for m in msgs:
+        if merged and merged[-1]["role"] == m["role"]:
+            a = merged[-1]
+            ac = a["content"] if isinstance(a["content"], list) \
+                else [{"type": "text", "text": a["content"]}]
+            bc = m["content"] if isinstance(m["content"], list) \
+                else [{"type": "text", "text": m["content"]}]
+            a["content"] = ac + bc
+        else:
+            merged.append(m)
+    if sys_parts:
+        out["system"] = "\n\n".join(sys_parts)
+    out["messages"] = merged
+    tools = []
+    for t in body.get("tools") or []:
+        fn = t.get("function") or {}
+        tools.append({"name": fn.get("name"),
+                      "description": fn.get("description") or "",
+                      "input_schema": fn.get("parameters")
+                      or {"type": "object"}})
+    if tools:
+        out["tools"] = tools
+    # the OpenAI reasoning_effort field → a thinking budget
+    eff = str(body.get("reasoning_effort") or "")
+    if eff and eff != "none":
+        budget = _ANTHROPIC_BUDGETS.get(eff, 8192)
+        out["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        # the thinking budget rides ON TOP of the answer's budget
+        out["max_tokens"] = budget + int(body.get("max_tokens")
+                                         or _ANTHROPIC_MAX_TOKENS)
+    return out
+
+
+def _anthropic_chunks(resp):
+    """Anthropic /v1/messages SSE → OpenAI-delta-shaped chunks."""
+    tool_idx = -1
+    blocks: dict[int, object] = {}   # block index -> type or tool slot
+    in_tok = 0
+    for raw in _sse(resp):
+        t = raw.get("type")
+        if t == "message_start":
+            in_tok = int(((raw.get("message") or {}).get("usage")
+                          or {}).get("input_tokens") or 0)
+        elif t == "content_block_start":
+            i = int(raw.get("index") or 0)
+            cb = raw.get("content_block") or {}
+            if cb.get("type") == "tool_use":
+                tool_idx += 1
+                blocks[i] = tool_idx
+                yield {"choices": [{"delta": {"tool_calls": [{
+                    "index": tool_idx, "id": cb.get("id"),
+                    "function": {"name": cb.get("name") or ""}}]}}]}
+            else:
+                blocks[i] = cb.get("type") or "text"
+        elif t == "content_block_delta":
+            i = int(raw.get("index") or 0)
+            d = raw.get("delta") or {}
+            dt = d.get("type")
+            if dt == "text_delta":
+                yield {"choices": [{"delta":
+                                    {"content": d.get("text") or ""}}]}
+            elif dt == "thinking_delta":
+                yield {"choices": [{"delta": {
+                    "reasoning_content": d.get("thinking") or ""}}]}
+            elif dt == "input_json_delta":
+                ti = blocks.get(i)
+                if isinstance(ti, int):
+                    yield {"choices": [{"delta": {"tool_calls": [{
+                        "index": ti, "function": {
+                            "arguments": d.get("partial_json") or ""}}]}}]}
+        elif t == "message_delta":
+            u = raw.get("usage") or {}
+            out_tok = int(u.get("output_tokens") or 0)
+            yield {"usage": {"prompt_tokens": in_tok,
+                             "completion_tokens": out_tok,
+                             "total_tokens": in_tok + out_tok}}
+        elif t == "error":
+            yield {"error": raw.get("error") or {}}
+            return
+        elif t == "message_stop":
+            return
+
+
+def _dialect_request(chat_key: str, prov: dict, body: dict,
+                     abort_box: dict):
+    """POST a generation in the provider's dialect. Returns
+    (resp, chunk_iterator_factory) - the caller's consumption loop is
+    dialect-blind."""
+    vend = providers.vendor_of(prov)
+    if vend["dialect"] == "anthropic":
+        wire, chunks = _anthropic_body(body), _anthropic_chunks
+    else:
+        wire, chunks = body, _sse
+    resp = providers.request(
+        prov, "POST", vend["chatPath"],
+        json.dumps(wire).encode("utf-8"),
+        {"Content-Type": "application/json"},
+        timeout=STREAM_IDLE_TIMEOUT, abort_box=abort_box)
+    return resp, chunks
+
+
 def resolve_endpoint(cfg: dict, chat: dict, probe: bool = False) -> dict:
     """The provider record + model id this chat talks to:
     {provider: <config record>, model: <model id>, name: <display>}.
@@ -1094,7 +1400,7 @@ def resolve_endpoint(cfg: dict, chat: dict, probe: bool = False) -> dict:
     if not provs:
         raise chats.ChatError(
             "loom.yaml defines no providers yet - add a `providers:` "
-            "entry pointing at a llama-server or ninfer API")
+            "entry pointing at a llama-server or a hosted vendor")
     pname = str(chat.get("provider") or "") \
         or str((cfg.get("chat") or {}).get("provider") or "")
     prov = libconfig.provider_by_name(cfg, pname)
@@ -1294,11 +1600,8 @@ def _gen_once(chat_id: str, ep: dict, messages: list[dict],
     with _lock:
         _streams[chat_id] = _PreStream(abort_box)
     try:
-        resp = providers.request(
-            ep["provider"], "POST", "/v1/chat/completions",
-            json.dumps(body).encode("utf-8"),
-            {"Content-Type": "application/json"},
-            timeout=STREAM_IDLE_TIMEOUT, abort_box=abort_box)
+        resp, chunks = _dialect_request(chat_id, ep["provider"], body,
+                                        abort_box)
     except BaseException:
         with _lock:
             _streams.pop(chat_id, None)
@@ -1309,7 +1612,7 @@ def _gen_once(chat_id: str, ep: dict, messages: list[dict],
     total = 0
     try:
         try:
-            for chunk in _sse(resp):
+            for chunk in chunks(resp):
                 if cancel.is_set():
                     break
                 if chunk.get("error") and err_box is not None:
@@ -1555,6 +1858,43 @@ def _compact_worker(root: Path, chat_id: str, cancel: threading.Event,
 EMPTY_RESPONSE_RETRIES = 3
 
 
+# the classic spellings of tool-call markup across chat templates
+# (Hermes/Qwen <tool_call>, function-tag styles, Mistral [TOOL_CALLS]) -
+# when one shows up as plain TEXT, the server failed to parse the call
+_TOOL_MARKUP_RE = re.compile(
+    r"<tool_call>|<\|tool_call\|>|<function[=_][\w.-]|\[TOOL_CALLS\]",
+    re.I)
+_TOOL_MARKUP_CLOSE_RE = re.compile(
+    r"</tool_call>|<\|/tool_call\|>|</function>|\[/TOOL_CALLS\]", re.I)
+_TOOL_NAME_GUESS_RE = re.compile(
+    r"<function[=_]([\w.-]+)|\"name\"\s*:\s*\"([\w.-]+)\"", re.I)
+
+
+def _detect_failed_call(text: str):
+    """None, or (prose_prefix, guessed_tool_name) when the reply's TEXT
+    is really an unparsed/incomplete tool call that must be discarded
+    and answered with a failure result. Failed means: an open marker
+    with no close (cut mid-call), or markup that IS the whole reply (a
+    complete call the server flushed as text). Markup quoted inside a
+    code fence is prose, not a call."""
+    if not text:
+        return None
+    m = _TOOL_MARKUP_RE.search(text)
+    if not m:
+        return None
+    prose = text[:m.start()]
+    if "```" in prose:
+        return None   # the markup lives in a fenced example - quoting
+    opens = len(_TOOL_MARKUP_RE.findall(text))
+    closes = len(_TOOL_MARKUP_CLOSE_RE.findall(text))
+    only_call = len(prose.strip()) < 40
+    if opens > closes or only_call:
+        g = _TOOL_NAME_GUESS_RE.search(text[m.start():])
+        name = (g.group(1) or g.group(2)) if g else ""
+        return prose.rstrip(), name or "unknown_tool"
+    return None
+
+
 def _response_complete(chat: dict) -> bool:
     """Did the conversation actually END on a model answer? A turn whose
     last word is a bare thought, an empty message, or no message at all
@@ -1602,6 +1942,7 @@ def _worker(root: Path, chat_id: str, cancel: threading.Event, push) -> None:
         # One failure stops retrying for this send (no error-event spam).
         compact_ok = _maybe_autocompact(root, cfg, chat, ep, cancel, ev)
         retries = 0
+        synth_fails = 0
         gave_up = False
         while True:
             if cancel.is_set():
@@ -1610,6 +1951,22 @@ def _worker(root: Path, chat_id: str, cancel: threading.Event, push) -> None:
             _save_from_loop(root, chat)
             if cancel.is_set():
                 break
+            # discarded-broken-call turns keep the loop alive so the
+            # model can retry - but three IN A ROW means it cannot get
+            # a call through (limit too tight, template broken): give
+            # up honestly instead of burning generations forever
+            msgs = chat.get("messages") or []
+            if msgs and msgs[-1].get("synthetic"):
+                synth_fails += 1
+                if synth_fails >= 3:
+                    gave_up = True
+                    ev("notice", msg="three tool calls in a row arrived "
+                       "broken and were discarded - giving up. Raise "
+                       "chat.max_output, or check the server's chat "
+                       "template (--jinja).")
+                    break
+            else:
+                synth_fails = 0
             if done:
                 # a "done" turn that produced no actual ANSWER (a huge
                 # thought that halted before the reply, or an empty
@@ -1682,6 +2039,7 @@ def _turn(root: Path, cfg: dict, chat: dict, ep: dict,
     """One streamed model turn. Returns True when the conversation is done
     (no tool calls)."""
     _refresh_user_fields(root, chat)
+    vend = providers.vendor_of(ep["provider"])
     body = {
         "model": ep["model"],
         "messages": _wire_messages(root, cfg, chat),
@@ -1691,16 +2049,22 @@ def _turn(root: Path, cfg: dict, chat: dict, ep: dict,
                             artifacts=not chat.get("artifactsOff"),
                             knowledge=not chat.get("knowledgeOff"),
                             mcp_perms=chat.get("mcpPerms")),
-        # llama.cpp-style extensions (ninfer speaks them too):
-        # per-chunk timings → LIVE tok/s; prompt_progress chunks → a real
-        # prompt-processing progress bar instead of a silent stall
-        "timings_per_token": True,
-        "return_progress": True,
         "stream_options": {"include_usage": True},
-        # reuse the KV cache for the unchanged prompt prefix - explicit,
-        # so older llama-server builds behave like new ones
-        "cache_prompt": True,
     }
+    # the per-turn output budget. Unset, llama-server generates
+    # unbounded but ninfer-style servers apply THEIR default (8192) and
+    # silently cut long replies - chat.max_output makes it explicit
+    _mo = int((cfg.get("chat") or {}).get("max_output") or 0)
+    if _mo > 0:
+        body["max_tokens"] = _mo
+    if vend["extensions"]:
+        # llama.cpp extensions - hosted vendors reject unknown fields:
+        # per-chunk timings → LIVE tok/s; prompt_progress chunks → a
+        # real prompt-processing progress bar instead of a silent stall;
+        # cache_prompt reuses the KV cache for the unchanged prefix
+        body["timings_per_token"] = True
+        body["return_progress"] = True
+        body["cache_prompt"] = True
     _apply_reasoning(body, store.reasoning_get(
         str(root), providers.model_key(ep["provider"]["name"], ep["model"])))
     t0 = time.monotonic()
@@ -1712,11 +2076,8 @@ def _turn(root: Path, cfg: dict, chat: dict, ep: dict,
     with _lock:
         _streams[chat["id"]] = _PreStream(abort_box)
     try:
-        resp = providers.request(
-            ep["provider"], "POST", "/v1/chat/completions",
-            json.dumps(body).encode("utf-8"),
-            {"Content-Type": "application/json"},
-            timeout=STREAM_IDLE_TIMEOUT, abort_box=abort_box)
+        resp, chunks = _dialect_request(str(chat["id"]), ep["provider"],
+                                        body, abort_box)
     except urllib.error.HTTPError as e:
         with _lock:
             _streams.pop(chat["id"], None)
@@ -1740,9 +2101,10 @@ def _turn(root: Path, cfg: dict, chat: dict, ep: dict,
     calls: dict[int, dict] = {}
     timings = usage = None
     stream_err = None
+    finish = None   # the server's finish_reason ("length" = truncated)
     last_live = 0.0   # throttle for live_stats pushes
     try:
-        for chunk in _sse(resp):
+        for chunk in chunks(resp):
             if cancel.is_set():
                 break
             if chunk.get("timings"):
@@ -1759,6 +2121,8 @@ def _turn(root: Path, cfg: dict, chat: dict, ep: dict,
             if chunk.get("usage"):
                 usage = chunk["usage"]
             for ch in chunk.get("choices") or []:
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]
                 delta = ch.get("delta") or {}
                 txt = delta.get("content")
                 if txt:
@@ -1829,16 +2193,77 @@ def _turn(root: Path, cfg: dict, chat: dict, ep: dict,
             {"id": c["id"], "type": "function",
              "function": {"name": c["name"], "arguments": c["args"] or "{}"}}
             for c in ordered]
-    if text or think or ordered:
+    # a broken tool call must NEVER pass for a finished answer - "it
+    # just stopped" is not permissible. An unparsed/incomplete call in
+    # the TEXT is DISCARDED and replaced with a synthetic failed tool
+    # result naming the limit that caused it, so the loop keeps going
+    # and the model retries immediately. A truncated turn that is NOT a
+    # tool call is marked stopped (Continue / auto-continue resume it).
+    truncated = finish == "length" and not cancel.is_set()
+    mo = int((cfg.get("chat") or {}).get("max_output") or 0)
+    failed = None if (ordered or cancel.is_set()) \
+        else _detect_failed_call(text)
+    if failed:
+        prose, guess = failed
+        fail_id = f"call_failed_{int(time.time() * 1000)}"
+        msg["content"] = prose   # the markup itself is discarded
+        msg["tool_calls"] = [{"id": fail_id, "type": "function",
+                              "function": {"name": guess,
+                                           "arguments": "{}"}}]
+    elif truncated:
+        msg["stopped"] = True
+        ev("notice", msg="the reply hit the server's output token limit "
+           + (f"(max_tokens {mo})" if mo else "(the server's default cap"
+              " - set chat.max_output to raise it)")
+           + " and was cut off - Continue resumes it")
+    elif _TOOL_MARKUP_RE.search(text):
+        # balanced markup inside a real answer - possibly quoting, but
+        # worth a flag in case a tool was actually meant to run
+        ev("notice", msg="the reply contains tool-call markup the server "
+           + "did not parse into a real call - if a tool was meant to "
+           + "run, the server may need --jinja / a matching chat "
+           + "template")
+    if text or think or ordered or failed:
         chat["messages"].append(msg)
     # persist NOW: the frontend re-pulls the chat on tool events, and the
     # assistant turn (with its tool_calls) must already be on disk
     _save_from_loop(root, chat)
     if stream_err:
         raise chats.ChatError(f"stream broke: {stream_err}")
+    if failed and not cancel.is_set():
+        prose, guess = failed
+        fail_id = msg["tool_calls"][0]["id"]
+        cause = (f"the reply hit the output token limit "
+                 + (f"(max_tokens {mo})" if mo
+                    else "(the server's default cap; chat.max_output "
+                         "raises it)")
+                 if truncated else
+                 "the call was malformed or the stream broke")
+        result = ("error: this tool call arrived as raw text the server "
+                  "could not parse into a real call, and was DISCARDED "
+                  f"- nothing was executed. Cause: {cause}. Re-issue "
+                  "the call in proper tool-call format, and split large "
+                  "content into several smaller calls that each fit "
+                  "the limit.")
+        ev("tool_call", callId=fail_id, tool=guess, args={}, perm="allow")
+        ev("tool_result", callId=fail_id, ok=False, cancelled=False,
+           result=result)
+        chat["messages"].append({"role": "tool", "tool_call_id": fail_id,
+                                 "name": guess, "content": result,
+                                 "ok": False, "synthetic": True,
+                                 "ts": int(time.time() * 1000)})
+        _save_from_loop(root, chat)
+        ev("notice", msg="a broken tool call was discarded and reported "
+           + "back to the model - it is retrying")
+        return False   # the loop continues; the model gets to retry NOW
     if not ordered or cancel.is_set():
         return True
 
+    if truncated and ordered:
+        # the LAST structured call is the one the scissors hit - its
+        # refusal (if the args fail to parse) should name the cause
+        ordered[-1]["cut"] = True
+        ordered[-1]["budget"] = mo
     for c in ordered:
         _run_tool(root, cfg, chat, c, cancel, ev)
         _save_from_loop(root, chat)
@@ -1854,12 +2279,26 @@ def _run_tool(root: Path, cfg: dict, chat: dict, call: dict,
     # THIS call under the settings as they are now
     _refresh_user_fields(root, chat)
     name, call_id = call["name"], call["id"]
+    bad_args = None
     try:
         args = json.loads(call["args"] or "{}")
         if not isinstance(args, dict):
             args = {}
     except ValueError:
-        args = {"_raw": call["args"]}
+        # the arguments arrived truncated (token limit, broken stream)
+        # or malformed - EXECUTING a half-arrived call is never safe
+        args = {"_raw": str(call["args"])[:2000]}
+        cause = ""
+        if call.get("cut"):
+            budget = int(call.get("budget") or 0)
+            cause = (" Cause: the reply hit the output token limit "
+                     + (f"(max_tokens {budget})." if budget
+                        else "(the server's default cap; chat.max_output "
+                             "raises it)."))
+        bad_args = ("error: this tool call's arguments arrived truncated "
+                    "or malformed - nothing was executed." + cause
+                    + " Retry the call; for large content, split the "
+                    "work into smaller writes.")
     perm = perm_for(cfg, name, str(chat.get("permMode") or ""),
                     chat.get("mcpPerms"))
     ev("tool_call", callId=call_id, tool=name, args=args, perm=perm)
@@ -1870,7 +2309,13 @@ def _run_tool(root: Path, cfg: dict, chat: dict, call: dict,
     result_ok = True
     cancelled = False
     ran = False   # _exec_tool actually returned (side effects may exist)
-    if perm in ("deny", "disabled"):
+    if bad_args:
+        # fails BEFORE the permission gate - there is nothing sane to
+        # approve, and the error result keeps the loop alive so the
+        # model immediately gets to retry instead of the chat stopping
+        result_ok = False
+        result = bad_args
+    elif perm in ("deny", "disabled"):
         # 'disabled' tools are never OFFERED, but a model can still call
         # one by name (stale context, or the level flipped mid-stream) -
         # the most restrictive level must never fall through to allow
@@ -1921,7 +2366,8 @@ def _run_tool(root: Path, cfg: dict, chat: dict, call: dict,
     # anything the tool left in /artifacts is announced to the user - a
     # command that FAILED or was cancelled may still have written files
     # before it ended, so this keys on "it ran", not on "it succeeded"
-    if ran and name in ("shell", "write_file", "edit_file"):
+    # deliver_artifact is the only path that can add deliverables now
+    if ran and name == "deliver_artifact":
         try:
             _sync_artifacts(root, chat, ev)
         except OSError:

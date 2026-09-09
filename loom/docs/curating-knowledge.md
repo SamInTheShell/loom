@@ -38,7 +38,7 @@ worse than none, because it gets cited with confidence.
 
 1. **Capture** - when a conversation produces a hard-won answer, ask
    the model to write it up as a knowledge document before you close
-   the chat (it can place a draft in `/artifacts` for your review, or
+   the chat (it can deliver a draft as an artifact for your review, or
    write it directly - next section).
 2. **Distill** - practices, not transcripts. "Do X, then Y, because Z"
    survives; "we discussed maybe trying X" doesn't.
@@ -61,7 +61,7 @@ first-class workflow:
    > first). List: duplicates, contradictions between documents, files
    > that state no expiry but look version-bound, and folders whose
    > README doesn't match their contents. Propose a reorganization -
-   > put the plan in /artifacts as a markdown file."
+   > deliver the plan as a markdown artifact."
    The proposal arrives as an artifact you can read and keep before
    anything changes.
 2. **Flip the library pill to `write`** when you want the edits made.

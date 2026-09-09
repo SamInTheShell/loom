@@ -2,7 +2,7 @@
  *
  * The page (termwin.html) hosts ONE chat's diagnostic terminal in a real
  * OS window: a live shell in the exact container setup the chat's model
- * gets - image, /mnt mounts, the /knowledge and /artifacts cuts, the
+ * gets - image, /mnt mounts, the /knowledge cut, /uploads, the
  * chat's own /home/loom, network mode and environment. The setup is
  * computed by the BACKEND from the chat document (chat_term_open); this
  * page never copies chat state, so it cannot drift. When the chat's
@@ -55,12 +55,12 @@ function termWinHeader(info, sid) {
     el("span", { html: icon("library", 12) }),
     el("span", { class: "pname",
                  text: info.knowledge ? "/knowledge" : "knowledge off" })));
-  head.append(roPill("", info.artifacts
-      ? "The chat's artifact delivery folder, read-write"
-      : "Artifacts are CUT OFF in this chat - not mounted",
-    el("span", { html: icon("box", 12) }),
-    el("span", { class: "pname",
-                 text: info.artifacts ? "/artifacts" : "artifacts off" })));
+  if (info.uploads) {
+    head.append(roPill("",
+      "The user's uploaded files for this chat, read-only",
+      el("span", { html: icon("box", 12) }),
+      el("span", { class: "pname", text: "/uploads" })));
+  }
   const net = info.network;   // already canonical: none / loopback / on
   head.append(el("span", {
     class: "pill term-net" + (net === "on" ? " on"

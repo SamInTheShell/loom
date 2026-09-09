@@ -1,25 +1,29 @@
 # loom.yaml - this library's configuration. (loom.yml works too.)
 
 # Inference providers - the HTTP APIs Loom talks to. Loom does NOT
-# launch inference: run llama.cpp's `llama-server` or `ninfer-serve`
-# yourself (locally or on another machine) and point an entry at it.
-# Models are pulled live from each provider's API (GET /v1/models).
-# The Providers tab's "Add provider…" button writes these entries too.
+# launch inference: run llama.cpp's `llama-server` yourself (locally or
+# on another machine) and point an entry at it - or use a hosted
+# vendor: openai | anthropic | gemini | vertex | bedrock (hosted-vendor
+# support is new and lightly tested; feedback welcome). Models are
+# pulled live from each provider's model listing where the vendor has
+# one. The Providers tab's "Add provider…" button writes these too.
 providers: []
-# Complete example - every field:
+# Complete examples - every field:
 # - name: workstation           # required - how chats refer to it
-#   type: llama-cpp             # llama-cpp | ninfer
-#   url: http://127.0.0.1:8080  # required - the API's base URL
+#   vendor: llama-cpp           # llama-cpp | openai | anthropic |
+#                               # gemini | vertex | bedrock
+#   url: http://127.0.0.1:8080  # the API's base URL (hosted vendors
+#                               # have a default; Vertex AI needs yours)
 #   ssh: ""                     # default "" = connect directly; else an
 #                               # ssh destination (user@host or a
 #                               # ~/.ssh/config alias) - the url is then
 #                               # resolved FROM that host and traffic
 #                               # rides an ssh stdio tunnel. SSH KEYS
 #                               # ONLY: password prompts are refused.
-# - name: gpu-box
-#   type: ninfer
-#   url: http://127.0.0.1:8080
-#   ssh: gpu-box
+# - name: claude
+#   vendor: anthropic           # the API key lives in the OS keyring -
+#                               # set it from the provider card's Key
+#                               # button, never in this file
 
 chat:
   # default provider (by name) for new chats; empty = the first one
@@ -33,7 +37,15 @@ chat:
   title_prompt: prompts/title.md
   # older assistant thoughts are dropped from the context; only the most
   # recent turn's thinking is carried forward
-  thought_truncation: true
+  thought_truncation: false
+  # per-reply output budget in tokens, sent as max_tokens. 0 = let the
+  # server decide: llama-server then generates unbounded, but
+  # ninfer-style servers apply THEIR default (ninfer: 8192) and silently
+  # cut long replies - set this if big outputs come back truncated
+  max_output: 0
+  # whole-file read gate for the read_file tool, in tokens: bigger
+  # files must be read in offset/limit slices (0 disables the gate)
+  read_gate: 32768
   compaction:
     auto: true          # compact automatically when the context fills up
     threshold: 0.8      # fraction of the context window that triggers it
@@ -53,6 +65,7 @@ permission-modes:
       find_files: allow
       write_file: ask
       edit_file: ask
+      deliver_artifact: ask
       shell: ask
   allow-edits:         # edits and sandboxed shell run without asking
     tools:
@@ -63,6 +76,7 @@ permission-modes:
       find_files: allow
       write_file: allow
       edit_file: allow
+      deliver_artifact: allow
       shell: allow
   always-allow:        # everything runs without asking
     tools:
@@ -73,6 +87,7 @@ permission-modes:
       find_files: allow
       write_file: allow
       edit_file: allow
+      deliver_artifact: allow
       shell: allow
   deny:                # deny all tools
     tools:
@@ -83,6 +98,7 @@ permission-modes:
       find_files: deny
       write_file: deny
       edit_file: deny
+      deliver_artifact: deny
       shell: deny
   disabled:            # disable all tools
     tools:
@@ -93,6 +109,7 @@ permission-modes:
       find_files: disabled
       write_file: disabled
       edit_file: disabled
+      deliver_artifact: disabled
       shell: disabled
 
 # shell commands from chats and terminals run inside a container

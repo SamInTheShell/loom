@@ -1,6 +1,6 @@
 /* artwin.js - bootstrap for the artifact preview/editor window.
  *
- * One artifact from a chat's /artifacts folder, in a real OS window:
+ * One delivered artifact from a chat, in a real OS window:
  *   - text: the markdown/code editor, read-write IN PLACE - Save (or
  *     Ctrl+S) writes straight back to the artifact file, so the model
  *     reads the edited version on its next tool call;

@@ -1,8 +1,8 @@
 # Chats
 
-A chat streams against one of your configured providers (llama-server
-or ninfer, over HTTP - through an ssh tunnel when the provider has an
-`ssh:` destination). The message area follows llama.cpp's web chat:
+A chat streams against one of your configured providers (a
+llama-server - through an ssh tunnel when the provider has an `ssh:`
+destination - or a hosted vendor API). The message area follows llama.cpp's web chat:
 your messages in bubbles (nudged right), the model's as floating
 markdown (nudged left), tool activity as collapsible cards between
 them, and a stats row (tok/s, prefill speed, time-to-first-token,
@@ -83,13 +83,13 @@ model just isn't told they exist.
 
 **Terminal** (right side of the bar) opens a separate window with a
 real shell in this chat's EXACT container setup - the same image, the
-same /mnt folder mounts, /knowledge and /artifacts (respecting their
-cuts), the chat's own /home/loom, the same network mode and
+same /mnt folder mounts, /knowledge (respecting its cut) and
+/uploads, the chat's own /home/loom, the same network mode and
 environment. Use it to inspect the environment the way the model sees
 it: what's on disk, what the network reaches, which variables are set
 (env signals hidden from the model still load - the terminal shows the
 truth). The shell is a live mirror: change the chat's container,
-mounts, network, environment, or the knowledge/artifacts cuts and it
+mounts, network, environment, or the knowledge cut and it
 restarts itself to match, keeping its scrollback. It shares the chat's
 home but not its processes - the model's shell commands still run in
 their own fresh containers. Closing the window kills the shell.
@@ -209,23 +209,29 @@ Two pills left of the permission mode steer the shell's world:
 
 ## Artifacts
 
-`/artifacts` is the chat's read-write delivery folder. Anything the
-model leaves there arrives two ways at once: in the tools bar's
+Artifacts are **outbound deliverables**: files the model hands you
+to download, nothing else. There is no artifacts folder in the
+container and no `/artifacts` path in the file tools - the model's
+workspace is its persistent `/home/loom` (and write-mode mounts), and
+the ONLY way it can give you a file is the explicit
+**deliver_artifact** tool. It cannot read or edit a deliverable back,
+so artifacts can't be abused as scratch space.
+
+Every delivery arrives two ways at once: in the tools bar's
 **artifacts panel** (the button shows the count), and as a timestamped
 **delivery entry in the chat itself**, so you can always see when a
 file arrived and open or save it from the history.
 
-The same panel's **on/off toggle** (Ctrl+[ opens it) disables the
-whole mechanism per chat: /artifacts is not mounted in shells, the file tools
-refuse it, tool descriptions stop mentioning it, and no new deliveries
-land - already-delivered artifacts stay viewable. Like the network
-chip, it's a real boundary, not a polite request.
+The same panel's **on/off toggle** (Ctrl+[ opens it) disables delivery
+per chat: the deliver_artifact tool is withdrawn (and refused if
+called anyway) and no new deliveries land - already-delivered
+artifacts stay viewable.
 
 - **Click a pill (or a delivery entry's name)** to open the artifact in
   its own window: text opens in the real markdown/code editor and
-  **saves back in place** (the model reads your edited version on its
-  next tool call), images render, and anything else offers a download
-  button. The window also has **Save to…** for a copy, and closes with
+  **saves back in place** (your copy only - the model cannot see
+  artifacts once delivered), images render, and anything else offers a
+  download button. The window also has **Save to…** for a copy, and closes with
   the app.
 - **× on a pill clears it** from the attach bar; the file and the
   delivery entry stay, and the pill returns if the model regenerates
@@ -233,8 +239,8 @@ chip, it's a real boundary, not a polite request.
 - Files carry a **save** button, folders save as **zip** downloads,
   images get hover previews.
 
-Your uploaded images are copied to `/artifacts/uploads` so shell
-commands can process them. Artifacts persist with the chat and are
+Your uploaded images are staged at `/uploads` (read-only) so shell
+and file tools can process them. Artifacts persist with the chat and are
 purged when it is permanently deleted from the Archive.
 
 ## Reasoning effort

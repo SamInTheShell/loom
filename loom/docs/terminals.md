@@ -66,7 +66,7 @@ Terminals die with Loom; they can never outlive the app.
 
 Every chat's tools bar has a **terminal** button that opens this same
 terminal in its own window, locked to that chat's exact container setup
-(image, mounts, the chat's /home/loom, network, environment) for
+(image, mounts, /uploads, the chat's /home/loom, network, environment) for
 diagnosing the environment the way the model sees it. Its header is
 read-only - change the setup in the chat, and the shell restarts itself
 to match, scrollback kept. Unlike terminal tabs it dies with its

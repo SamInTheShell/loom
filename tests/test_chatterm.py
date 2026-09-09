@@ -51,18 +51,16 @@ with tempfile.TemporaryDirectory(prefix="loomtest-ctermlib-") as d:
     check("the environment name rides", s["env"] == "staging")
     check("knowledge mounts by default",
           s["knowledge"] == str(rt / "knowledge"), str(s["knowledge"]))
-    check("artifacts is the chat's delivery folder",
-          s["artifacts"] == str(chats.artifacts_dir(rt, c["id"])),
-          str(s["artifacts"]))
+    check("uploads rides the setup (read-only user files)",
+          s["uploads"] == str(chats.artifacts_dir(rt, c["id"]) / "uploads"),
+          str(s["uploads"]))
     check("home is the CHAT's home - the model's /home/loom",
           s["home"] == str(containers.chat_home(c["id"])), str(s["home"]))
 
     c["knowledgeOff"] = True
-    c["artifactsOff"] = True
     chats.save_chat(rt, c)
     s2 = chatterm.setup_for(rt, chats.load_chat(rt, c["id"]))
     check("the knowledge cut drops the mount", s2["knowledge"] is None)
-    check("the artifacts cut drops the mount", s2["artifacts"] is None)
 
     # legacy boolean network values canonicalize like the shell tool's
     c["network"] = True
@@ -74,16 +72,18 @@ with tempfile.TemporaryDirectory(prefix="loomtest-ctermlib-") as d:
     # ---------- the extra chat-view mounts ----------
     kdir = rt / "knowledge"
     kdir.mkdir(exist_ok=True)
-    adir = Path(d) / "arts"
-    vol = terminals._extra_mounts(kdir, adir)
+    updir = Path(d) / "ups"
+    updir.mkdir(exist_ok=True)
+    vol = terminals._extra_mounts(kdir, updir)
     check("knowledge mounts read-only at /knowledge",
           f"{kdir.resolve()}:/knowledge:ro" in vol, str(vol))
-    check("artifacts mounts read-write at /artifacts",
-          f"{adir.resolve()}:/artifacts:rw" in vol, str(vol))
-    check("the artifacts dir is created", adir.is_dir())
+    check("uploads mounts READ-ONLY at /uploads",
+          f"{updir.resolve()}:/uploads:ro" in vol, str(vol))
+    check("no /artifacts mount exists anywhere",
+          all("/artifacts" not in v for v in vol), str(vol))
     check("cut mounts vanish", terminals._extra_mounts(None, None) == [])
-    check("a missing knowledge dir is skipped",
-          terminals._extra_mounts(Path(d) / "nope", None) == [])
+    check("a missing uploads dir is skipped",
+          terminals._extra_mounts(None, Path(d) / "nope") == [])
 
     # ---------- sync: restart only a live session that drifted ----------
     sid = chatterm.sid_for(c["id"])
@@ -131,13 +131,13 @@ with tempfile.TemporaryDirectory(prefix="loomtest-ctermlib-") as d:
     api.chat_set_container(c["id"], "")
     api.chat_set_env(c["id"], "")
     api.chat_set_knowledge(c["id"], True)
-    api.chat_set_artifacts(c["id"], True)
     check("every container-view setter syncs the mirror",
-          synced == [c["id"]] * 6, str(synced))
+          synced == [c["id"]] * 5, str(synced))
     api.chat_set_thought_truncation(c["id"], True)
     api.chat_set_time_travel(c["id"], 1000)
+    api.chat_set_artifacts(c["id"], True)   # delivery is not a mount
     check("non-container settings never restart the shell",
-          len(synced) == 6, str(synced))
+          len(synced) == 5, str(synced))
     chatterm.sync_async = _real_async
 
     # ---------- the child window's header info ----------
@@ -147,7 +147,7 @@ with tempfile.TemporaryDirectory(prefix="loomtest-ctermlib-") as d:
     check("info carries the canonical view",
           r["data"]["network"] == "on" and r["data"]["env"] == ""
           and r["data"]["knowledge"] is True
-          and r["data"]["artifacts"] is True
+          and r["data"]["uploads"] is False
           and r["data"]["folders"] == []
           and r["data"]["sid"] == sid, str(r))
     r = api.chat_term_open("no-such-chat", 80, 24)

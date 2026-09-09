@@ -81,7 +81,7 @@ check("alias key spellings both match",
 LDOC = ("# head\n"
         "providers:\n"
         "- name: a\n"
-        "  type: llama-cpp\n"
+        "  vendor: llama-cpp\n"
         "  url: http://a:1\n"
         "# b's comment\n"
         "- name: b\n"
@@ -93,12 +93,12 @@ LDOC = ("# head\n"
         "  model: m\n")
 
 t = configedit.replace_list_item(LDOC, ("providers",), "b",
-                                 ["- name: b2", "  type: ninfer",
+                                 ["- name: b2", "  vendor: openai",
                                   "  url: http://b:2"])
 got = yaml.safe_load(t)
 check("replace_list_item swaps just that item",
       [p["name"] for p in got["providers"]] == ["a", "b2", "c"]
-      and got["providers"][1]["type"] == "ninfer"
+      and got["providers"][1]["vendor"] == "openai"
       and "ssh" not in got["providers"][1], t)
 check("comments outside the item survive",
       "# head" in t and "# b's comment" in t, t)
@@ -150,6 +150,7 @@ check("all-default chat serializes to nothing",
 lines = configedit.chat_lines({
     "provider": "ws", "model": "qwen3", "permission_mode": "allow-edits",
     "system_prompt": "prompts/mine.md", "thought_truncation": False,
+    "max_output": 32768,
     "compaction": {"auto": False, "threshold": 0.5}})
 cfg = libconfig.parse_text("\n".join(lines) + "\n")
 check("chat serializer round-trips",
@@ -157,6 +158,7 @@ check("chat serializer round-trips",
       and cfg["chat"]["permission_mode"] == "allow-edits"
       and cfg["chat"]["system_prompt"] == "prompts/mine.md"
       and cfg["chat"]["thought_truncation"] is False
+      and cfg["chat"]["max_output"] == 32768
       and cfg["chat"]["compaction"] == {"auto": False, "threshold": 0.5},
       str((lines, cfg["chat"])))
 
@@ -225,7 +227,7 @@ try:
         BASE = ("# hand-written header\n"
                 "providers:\n"
                 "- name: ws\n"
-                "  type: llama-cpp\n"
+                "  vendor: llama-cpp\n"
                 "  url: http://127.0.0.1:9\n"
                 "\n"
                 "# tail comment\n"
@@ -266,13 +268,13 @@ try:
         # ---- provider_update / provider_remove ----
         _fk.clear()
         _fk[api._provider_key_name("ws")] = "sk-old"
-        r = api.provider_update("ws", "box", "ninfer",
+        r = api.provider_update("ws", "box", "openai",
                                 "http://127.0.0.1:9", "sam@box")
         text = (rt / "loom.yaml").read_text()
         provs = libconfig.load(rt)["providers"]
         check("provider_update rewrites the entry in place",
               r["ok"] and "- name: ws" not in text
-              and provs == [{"name": "box", "type": "ninfer",
+              and provs == [{"name": "box", "vendor": "openai",
                              "url": "http://127.0.0.1:9",
                              "ssh": "sam@box"}], text)
         check("provider_update keeps surrounding comments",

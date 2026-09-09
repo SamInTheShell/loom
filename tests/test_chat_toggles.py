@@ -25,15 +25,20 @@ def check(name, cond, detail=""):
         FAILS.append(name)
 
 
-# ---------- tool_specs: /artifacts vanishes from every description ----------
+# ---------- tool_specs: artifacts are a TOOL, never a folder ----------
 on = json.dumps(chatmod.tool_specs(artifacts=True))
 off = json.dumps(chatmod.tool_specs(artifacts=False))
-check("descriptions mention /artifacts when on", "/artifacts" in on)
-check("the DISABLED note replaces every /artifacts offer when off",
-      "delivered to the user" not in off and "DISABLED" in off, off[:400])
-check("the same tools are still offered",
-      [s["function"]["name"] for s in chatmod.tool_specs(artifacts=False)]
-      == [s["function"]["name"] for s in chatmod.tool_specs(artifacts=True)])
+names_on_a = [s["function"]["name"] for s in chatmod.tool_specs(artifacts=True)]
+names_off_a = [s["function"]["name"] for s in chatmod.tool_specs(artifacts=False)]
+check("no description ever mentions an /artifacts folder",
+      "/artifacts" not in on and "/artifacts" not in off)
+check("deliver_artifact is offered when delivery is on",
+      "deliver_artifact" in names_on_a)
+check("the deliver tool vanishes when delivery is off",
+      "deliver_artifact" not in names_off_a
+      and names_off_a == [n for n in names_on_a if n != "deliver_artifact"])
+check("the spec says outbound-only in plain words",
+      "OUTBOUND" in on and "ONLY way" in on)
 
 from loom.app import Bus, JsApi  # noqa: E402
 
@@ -46,32 +51,64 @@ with tempfile.TemporaryDirectory(prefix="loomtest-toglib-") as d:
         "providers:\n- name: ws\n  url: http://127.0.0.1:9\n")
     cfg = libconfig.load(rt)
 
-    # ---------- the artifacts boundary ----------
+    # ---------- artifacts: a delivery CHANNEL, never a place ----------
+    import threading as _th
     c = chats.new_chat(rt)
-    c["artifactsOff"] = True
     chats.save_chat(rt, c)
-    try:
-        chatmod._resolve_path(rt, c, "/artifacts/out.md")
-        check("file tools refuse /artifacts when off", False)
-    except chats.ChatError as e:
-        check("file tools refuse /artifacts when off",
-              "disabled" in str(e), str(e))
+    for state in (False, True):
+        if state:
+            c["artifactsOff"] = True
+            chats.save_chat(rt, c)
+        try:
+            chatmod._resolve_path(rt, c, "/artifacts/out.md")
+            check(f"/artifacts is never a path (off={state})", False)
+        except chats.ChatError as e:
+            check(f"/artifacts is never a path (off={state})",
+                  "deliver_artifact" in str(e), str(e))
     scopes = [p for p, _h in chatmod._search_scopes(rt, c, "/")]
-    check("search scopes drop /artifacts when off", "/artifacts/" not in scopes)
+    check("search scopes never include /artifacts",
+          all(not s.startswith("/artifacts") for s in scopes), str(scopes))
 
-    adir = chats.artifacts_dir(rt, c["id"], create=True)
-    (adir / "late.md").write_text("x")
-    check("no new deliveries while off",
-          chatmod._sync_artifacts(rt, c) == [] and not c.get("artifacts"))
+    # deliver_artifact: refused while off, works when on
+    try:
+        chatmod._exec_tool(rt, {}, c, "deliver_artifact",
+                           {"name": "r.md", "content": "hi"}, _th.Event())
+        check("delivery refused while the chip is off", False)
+    except chats.ChatError as e:
+        check("delivery refused while the chip is off",
+              "disabled" in str(e), str(e))
     r = api.chat_set_artifacts(c["id"], True)
     check("the chip re-enables",
           r["ok"] and r["data"]["artifacts"] is True
           and "artifactsOff" not in chats.load_chat(rt, c["id"]), str(r))
     c = chats.load_chat(rt, c["id"])
-    check("deliveries resume once on",
-          chatmod._sync_artifacts(rt, c) == ["late.md"])
-    check("resolve works again once on",
-          chatmod._resolve_path(rt, c, "/artifacts/late.md")[0] == "artifact")
+    out = chatmod._exec_tool(rt, {}, c, "deliver_artifact",
+                             {"name": "report.md", "content": "# hi"},
+                             _th.Event())
+    check("text delivery lands", "delivered report.md" in out, out)
+    check("the delivery shows up in the artifact list",
+          chatmod._sync_artifacts(rt, c) == ["report.md"])
+    # path delivery from the chat home
+    from loom import containers as _cont
+    home = _cont.chat_home(c["id"])
+    (home / "final.bin").write_bytes(b"\x00\x01data")
+    out = chatmod._exec_tool(rt, {}, c, "deliver_artifact",
+                             {"path": "/home/loom/final.bin"}, _th.Event())
+    check("a file from /home/loom delivers (binary ok)",
+          "delivered final.bin" in out, out)
+    try:
+        chatmod._deliver_artifact(rt, c, {"name": "uploads",
+                                          "content": "x"})
+        check("delivering over uploads/ is refused", False)
+    except chats.ChatError:
+        check("delivering over uploads/ is refused", True)
+    # the /uploads read-only path resolves for file tools
+    up = chats.artifacts_dir(rt, c["id"]) / "uploads"
+    up.mkdir(parents=True, exist_ok=True)
+    (up / "photo.txt").write_text("pix")
+    kind, host, mode = chatmod._resolve_path(rt, c, "/uploads/photo.txt")
+    check("/uploads resolves read-only",
+          kind == "upload" and mode == "view" and host.is_file())
     r = api.chat_set_artifacts(c["id"], False)
     check("the chip disables",
           r["ok"] and r["data"]["artifacts"] is False
@@ -224,12 +261,15 @@ with tempfile.TemporaryDirectory(prefix="loomtest-toglib-") as d:
     ac2["messages"] = [{"role": "user", "content": "u", "ts": 1}]
     chats.save_chat(rt, ac2)
     wire = chatmod._wire_messages(rt, cfg, chats.load_chat(rt, ac2["id"]))
-    check("artifacts section present by default",
-          "## Artifacts" in wire[0]["content"])
+    check("the delivery section is present by default",
+          "## Delivering files to the user" in wire[0]["content"]
+          and "deliver_artifact" in wire[0]["content"])
+    check("no prompt ever describes an /artifacts folder",
+          "/artifacts" not in wire[0]["content"])
     api.chat_set_artifacts(ac2["id"], False)
     wire = chatmod._wire_messages(rt, cfg, chats.load_chat(rt, ac2["id"]))
-    check("artifacts section gone when cut",
-          "## Artifacts" not in wire[0]["content"]
+    check("the delivery section is gone when cut",
+          "## Delivering files" not in wire[0]["content"]
           and "/artifacts" not in wire[0]["content"])
 
     # ---------- both settings survive worker refresh and forks ----------
